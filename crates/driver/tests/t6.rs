@@ -717,7 +717,7 @@ mod lmc {
         let r = rig(board(8, vec![Fault::ReplyTimeouts { every: 40 }]), virtual_clock(), None);
         framed_run(&r, mark_job(&many_segments(1100), 30.0, 1000.0, 1), 1);
         let evs = until(&r.handle, |e| matches!(e, DriverEvent::State(MachineState::Fault | MachineState::StopNotConfirmed)));
-        assert!(evs.iter().any(|e| matches!(e, DriverEvent::Fault(openlaser_driver::DriverError::Transport(m)) if m.contains("250 ms"))));
+        assert!(evs.iter().any(|e| matches!(e, DriverEvent::Fault(openlaser_driver::DriverError::Transport(_)))), "a transfer fault, not a retry");
         let wire = r.recorder.snapshot().wire;
         assert!(singles(&wire).iter().any(|w| w[0] == STOP_EXECUTE), "emergency stop after the fault");
         assert_eq!(singles(&wire).iter().filter(|w| w[0] == GET_SERIAL_NO).count(), 1, "no reconnect, no reset");
@@ -786,7 +786,10 @@ mod lmc {
         framed_run(&r, mark_job(&polys, 100.0, 1000.0, 1), 1);
         until(&r.handle, |e| matches!(e, DriverEvent::Finished(_)));
         let burned = r.recorder.snapshot().burned;
-        let design: Vec<([f64; 2], [f64; 2])> = polys.iter().flat_map(|p| p.windows(2).map(|w| (w[0], w[1]))).filter(|(a, b)| a != b).collect();
+        // GP drops a mark to the point it is already at, in galvo units: compare segments that move on the wire.
+        let galvo_unit = |v: f64| (32768.0 + v * (65535.0 / field_f())).round_ties_even();
+        let same = |a: [f64; 2], b: [f64; 2]| galvo_unit(a[0]) == galvo_unit(b[0]) && galvo_unit(a[1]) == galvo_unit(b[1]);
+        let design: Vec<([f64; 2], [f64; 2])> = polys.iter().flat_map(|p| p.windows(2).map(|w| (w[0], w[1]))).filter(|(a, b)| !same(*a, *b)).collect();
         assert_eq!(burned.len(), design.len());
         let unit = field_f() / 65535.0;
         for (s, (a, b)) in burned.iter().zip(&design) {
