@@ -66,14 +66,38 @@ impl MarkingList {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LightingList {
     words: Vec<Word>,
+    red: u16,
+}
+
+// A separate command type makes emitting opcodes unrepresentable at lighting call sites.
+#[derive(Debug, Clone, Copy)]
+enum LightCommand {
+    Ready,
+    Port(u16),
+    Speed(u16),
+    JumpDelay([u16; 5]),
+    Jump([u16; 5]),
+    Delay(u16),
+    End,
 }
 
 impl LightingList {
-    fn push(&mut self, op: u16, p: [u16; 5]) {
-        self.words.push([op, p[0], p[1], p[2], p[3], p[4]]);
+    fn push(&mut self, command: LightCommand) -> Result<(), Error> {
+        let (opcode, p) = match command {
+            LightCommand::Ready => (op::LIST_READY_MARK, [0; 5]),
+            LightCommand::Port(v) if v == 0 || v == self.red => (op::LIST_WRITE_PORT, [v, 0, 0, 0, 0]),
+            LightCommand::Port(_) => return Err(Error::UnsafeLighting),
+            LightCommand::Speed(v) => (op::LIST_JUMP_SPEED, [nonzero_speed(v)?, 0, 0, 0, 0]),
+            LightCommand::JumpDelay(p) => (op::LIST_JUMP_DELAY, p),
+            LightCommand::Jump(p) => (op::LIST_JUMP_TO, p),
+            LightCommand::Delay(v) => (op::LIST_DELAY_TIME, [v, 0, 0, 0, 0]),
+            LightCommand::End => (op::LIST_END_OF_LIST, [0; 5]),
+        };
+        self.words.push([opcode, p[0], p[1], p[2], p[3], p[4]]);
+        Ok(())
     }
     fn finish(mut self) -> Result<Vec<Packet>, Error> {
-        self.push(op::LIST_END_OF_LIST, [0; 5]);
+        self.push(LightCommand::End)?;
         packetize(&self.words)
     }
 }
@@ -93,6 +117,10 @@ pub struct LmcJob {
 }
 
 impl LmcJob {
+    /// Hashes each list's prelude, all full packets (including padding), postlude,
+    /// then the little-endian repeat count. Session protocol commands (polls,
+    /// SetEndOfList, ExecuteList), timing estimates, labels, machine id and
+    /// fingerprint are not hashed; emission identity is checked separately.
     pub fn bytes_hash(&self) -> Fingerprint {
         let mut hash = Hasher::new();
         for list in &self.lists {
@@ -136,7 +164,6 @@ pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
     if emit.sections().is_empty() {
         return Err(Error::Empty);
     }
-    let fields = m.field_f();
     let mut lists = Vec::with_capacity(emit.sections().len());
     for section in emit.sections() {
         let CutQ::Galvo(q) = &section.cut else { return Err(Error::NotGalvo) };
@@ -145,11 +172,11 @@ pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
         list.push(op::LIST_READY_MARK, [0; 5]);
         list.push(op::LIST_DELAY_TIME, [q.timings.mo_settle_10us, 0, 0, 0, 0]);
         list.push(op::LIST_WRITE_PORT, [bit(m.ports.laser_bit)?, 0, 0, 0, 0]);
-        list.push(op::LIST_JUMP_SPEED, [q.timings.jump_speed_units, 0, 0, 0, 0]);
+        list.push(op::LIST_JUMP_SPEED, [nonzero_speed(q.timings.jump_speed_units)?, 0, 0, 0, 0]);
         list.push(op::LIST_FIBER_YLPM_PULSE_WIDTH, [pulse, 0, 0, 0, 0]);
         list.push(op::LIST_MARK_CURRENT, [q.mark_current, 0, 0, 0, 0]);
         list.push(op::LIST_Q_SWITCH_PERIOD, [q.q_period, 0, 0, 0, 0]);
-        list.push(op::LIST_MARK_SPEED, [q.speed_units, 0, 0, 0, 0]);
+        list.push(op::LIST_MARK_SPEED, [nonzero_speed(q.speed_units)?, 0, 0, 0, 0]);
         list.push(op::LIST_LASER_ON_DELAY, delay_params(q.timings.laser_on));
         list.push(op::LIST_LASER_OFF_DELAY, delay_params(q.timings.laser_off));
         list.push(op::LIST_POLYGON_DELAY, delay_params(q.timings.polygon));
@@ -159,9 +186,9 @@ pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
         let mut jump_delay = None;
         for path in &section.paths {
             if path.0.len() < 2 {
-                continue;
+                return Err(Error::ShortPath);
             }
-            let start = point(path.0.first(), fields)?;
+            let start = encode_point(*path.0.first().ok_or(Error::ShortPath)?, m)?;
             let delay = if wrote_path { q.timings.jump_delay_short } else { q.timings.jump_delay_long };
             if !wrote_path || start != last {
                 if jump_delay != Some(delay) {
@@ -175,7 +202,7 @@ pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
                 list.push(op::LIST_DELAY_TIME, [q.timings.first_jump_settle_10us, 0, 0, 0, 0]);
             }
             for p in path.0.iter().skip(1) {
-                let to = encode_point(*p, fields)?;
+                let to = encode_point(*p, m)?;
                 if to == last {
                     continue;
                 }
@@ -209,7 +236,10 @@ pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
 }
 
 pub fn encode_frame(frame: &FramePlan, m: &GalvoMachine) -> Result<LmcFrameJob, Error> {
-    let paths: Vec<Vec<[f64; 2]>> = frame.paths().iter().filter(|p| p.0.len() >= 2).map(|p| p.0.clone()).collect();
+    if frame.paths().iter().any(|p| p.0.len() < 2) {
+        return Err(Error::ShortPath);
+    }
+    let paths: Vec<Vec<[f64; 2]>> = frame.paths().iter().map(|p| p.0.clone()).collect();
     if paths.is_empty() {
         return Err(Error::Empty);
     }
@@ -247,19 +277,22 @@ pub fn encode_frame(frame: &FramePlan, m: &GalvoMachine) -> Result<LmcFrameJob, 
 
 fn lighting_packets(paths: &[Vec<[f64; 2]>], passes: u32, m: &GalvoMachine) -> Result<Vec<Packet>, Error> {
     let fields = m.field_f();
-    let light_speed = speed_to_units(m.light_speed.get(), fields[0])?;
+    let light_speed = nonzero_speed(speed_to_units(m.light_speed.get(), fields[0])?)?;
+    if m.ports.red_bit == m.ports.laser_bit {
+        return Err(Error::UnsafeLighting);
+    }
     let red = bit(m.ports.red_bit)?;
     let long = openlaser_types::galvo::delay_word(m.first_jump.delay_us)?;
     let short = openlaser_types::galvo::delay_word(m.timings.jump_delay_short_us)?;
-    let mut list = LightingList::default();
-    list.push(op::LIST_READY_MARK, [0; 5]);
-    list.push(op::LIST_WRITE_PORT, [red, 0, 0, 0, 0]);
-    list.push(op::LIST_WRITE_PORT, [0, 0, 0, 0, 0]);
-    list.push(op::LIST_JUMP_SPEED, [light_speed, 0, 0, 0, 0]);
-    let start = encode_light_point(paths.first().and_then(|p| p.first()).copied().ok_or(Error::Empty)?, fields, m)?;
-    list.push(op::LIST_JUMP_DELAY, delay_params(long));
-    list.push(op::LIST_JUMP_TO, motion(start, (CENTER, CENTER)));
-    list.push(op::LIST_DELAY_TIME, [m.first_jump.settle_10us, 0, 0, 0, 0]);
+    let mut list = LightingList { words: Vec::new(), red };
+    list.push(LightCommand::Ready)?;
+    list.push(LightCommand::Port(red))?;
+    list.push(LightCommand::Port(0))?;
+    list.push(LightCommand::Speed(light_speed))?;
+    let start = encode_light_point(paths.first().and_then(|p| p.first()).copied().ok_or(Error::Empty)?, m)?;
+    list.push(LightCommand::JumpDelay(delay_params(long)))?;
+    list.push(LightCommand::Jump(motion(start, (CENTER, CENTER))))?;
+    list.push(LightCommand::Delay(m.first_jump.settle_10us))?;
     let mut last = start;
     let mut port = 0;
     let mut delay = long;
@@ -268,24 +301,24 @@ fn lighting_packets(paths: &[Vec<[f64; 2]>], passes: u32, m: &GalvoMachine) -> R
     for _ in 0..passes {
         for path in paths {
             for (i, &p) in path.iter().enumerate() {
-                let to = encode_light_point(p, fields, m)?;
+                let to = encode_light_point(p, m)?;
                 if to == last {
                     continue;
                 }
                 let wanted = if i == 0 { 0 } else { red };
                 if port != wanted {
-                    list.push(op::LIST_WRITE_PORT, [wanted, 0, 0, 0, 0]);
+                    list.push(LightCommand::Port(wanted))?;
                     port = wanted;
                 }
                 if wanted == red && !lit_speed {
-                    list.push(op::LIST_JUMP_SPEED, [light_speed, 0, 0, 0, 0]);
+                    list.push(LightCommand::Speed(light_speed))?;
                     lit_speed = true;
                 }
                 if delay != short {
-                    list.push(op::LIST_JUMP_DELAY, delay_params(short));
+                    list.push(LightCommand::JumpDelay(delay_params(short)))?;
                     delay = short;
                 }
-                list.push(op::LIST_JUMP_TO, motion(to, last));
+                list.push(LightCommand::Jump(motion(to, last)))?;
                 last = to;
             }
         }
@@ -293,18 +326,25 @@ fn lighting_packets(paths: &[Vec<[f64; 2]>], passes: u32, m: &GalvoMachine) -> R
     list.finish()
 }
 
-fn point(p: Option<&[f64; 2]>, fields: [f64; 2]) -> Result<(u16, u16), Error> {
-    p.copied().ok_or(Error::Empty).and_then(|p| encode_point(p, fields))
+fn nonzero_speed(v: u16) -> Result<u16, Error> {
+    if v == 0 { Err(Error::ZeroSpeed) } else { Ok(v) }
 }
 
-fn encode_point(p: [f64; 2], fields: [f64; 2]) -> Result<(u16, u16), Error> {
+fn encode_point(p: [f64; 2], m: &GalvoMachine) -> Result<(u16, u16), Error> {
+    let fields = m.field_f();
+    for axis in 0..2 {
+        if !p[axis].is_finite() || p[axis] < m.work_area.min[axis] || p[axis] > m.work_area.max[axis]
+            || p[axis].abs() >= fields[axis] / 2.0 {
+            return Err(Error::NotEncodable { x: p[0], y: p[1] });
+        }
+    }
     let x = mm_to_galvo(p[0], fields[0]).map_err(|_| Error::NotEncodable { x: p[0], y: p[1] })?;
     let y = mm_to_galvo(p[1], fields[1]).map_err(|_| Error::NotEncodable { x: p[0], y: p[1] })?;
     Ok((x, y))
 }
 
-fn encode_light_point(p: [f64; 2], fields: [f64; 2], m: &GalvoMachine) -> Result<(u16, u16), Error> {
-    encode_point([p[0] * m.red_dot.scale[0] + m.red_dot.offset_mm[0], p[1] * m.red_dot.scale[1] + m.red_dot.offset_mm[1]], fields)
+fn encode_light_point(p: [f64; 2], m: &GalvoMachine) -> Result<(u16, u16), Error> {
+    encode_point([p[0] * m.red_dot.scale[0] + m.red_dot.offset_mm[0], p[1] * m.red_dot.scale[1] + m.red_dot.offset_mm[1]], m)
 }
 
 fn motion(to: (u16, u16), last: (u16, u16)) -> [u16; 5] {

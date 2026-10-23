@@ -37,6 +37,12 @@ pub enum Error {
     Encode(#[from] openlaser_types::galvo::EncodeError),
     #[error("section has no galvo parameters")]
     NotGalvo,
+    #[error("motion speed encodes to zero units")]
+    ZeroSpeed,
+    #[error("a path must contain at least two points")]
+    ShortPath,
+    #[error("unsafe lighting port configuration or command")]
+    UnsafeLighting,
     #[error("empty job")]
     Empty,
     #[error("pulse width was not validated")]
