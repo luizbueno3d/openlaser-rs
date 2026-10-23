@@ -443,7 +443,15 @@ proptest! {
                         SectionMode::Line => prop_assert!(plan.frame.contains(path), "a Line path is not traced"),
                         _ => {
                             let mid = [(path.0[0][0] + path.0[1][0]) / 2.0, (path.0[0][1] + path.0[1][1]) / 2.0];
-                            let closed: Vec<Polyline> = plan.frame.iter().filter(|f| f.is_closed(openlaser_geom::CLOSURE_TOL_MM)).cloned().collect();
+                            // Fill is even-odd per layer (S13): judge against this layer's outlines, i.e. the traced
+                            // contours that are not some Line layer's paths.
+                            let line_paths: Vec<&Polyline> = plan.sections.iter().filter(|x| x.mode == SectionMode::Line).flat_map(|x| x.paths.iter()).collect();
+                            let closed: Vec<Polyline> = plan
+                                .frame
+                                .iter()
+                                .filter(|f| f.is_closed(openlaser_geom::CLOSURE_TOL_MM) && !line_paths.contains(f))
+                                .cloned()
+                                .collect();
                             prop_assert!(inside(&closed, mid), "a Fill segment lies outside the traced contours");
                         }
                     }

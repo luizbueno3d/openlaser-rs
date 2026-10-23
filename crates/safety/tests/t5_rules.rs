@@ -623,7 +623,10 @@ fn validate_frame_traces_a_job_that_cannot_burn() {
     if let Kinematics::Galvo(g) = &mut m.kind {
         g.source.max_power_pct = 10.0;
     }
-    let p = job(&m, vec![section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(default_words(&m)))]);
+    // A triangle: a contour that is not itself a bounds rectangle (a single rectangle drawn as `bounds_rect`
+    // draws it would read back as Bounds, which traces the same path).
+    let tri = line(&[[-5.0, -5.0], [5.0, -5.0], [0.0, 5.0], [-5.0, -5.0]]);
+    let p = job(&m, vec![section(0, vec![tri], CutQ::Galvo(default_words(&m)))]);
     assert!(codes(&validate(&p, &m)).contains(&RefusalCode::PowerAboveMax));
     let f = validate_frame(&p, &m, FrameSource::Job).unwrap();
     assert_eq!((f.paths(), f.fingerprint(), f.machine(), f.style(), f.source()), (&p.frame[..], &p.fingerprint, &m.id, FrameStyle::Contour, FrameSource::Job));
@@ -712,4 +715,44 @@ proptest! {
         prop_assert!(codes(&r).contains(&RefusalCode::OutsideWorkArea));
         prop_assert!(validate_frame(&plan, &m, FrameSource::Job).is_err());
     }
+}
+
+// ---- end to end: the business card --------------------------------------------------------------------------
+
+/// OM's business card (Appendix B) planned on the JPT M7 and validated: it passes, with one numbered notice per
+/// open raster shape (67), and its frame validates for every source that has something to trace.
+#[test]
+#[ignore = "needs I1"]
+fn safety_business_card_validates_with_numbered_notices() {
+    use std::sync::Arc;
+
+    let golden = openlaser_testkit::golden_dir().join("inputs");
+    let ws = openlaser_import::om::parse_workspace(&std::fs::read(golden.join("workspace.json")).unwrap()).unwrap();
+    let specs = openlaser_import::om::parse_layer_settings(&std::fs::read(golden.join("layer_settings.json")).unwrap()).unwrap();
+    let imported = openlaser_import::om::to_imported(&ws, &specs).unwrap();
+    let m = jpt();
+    let mut p = openlaser_doc::Project::new(
+        openlaser_doc::Workspace { kind: DeviceKind::GalvoLmc, size_mm: [200.0, 200.0], origin: WorkspaceOrigin::Center },
+        &m.layer_defaults,
+    );
+    for (k, l) in imported.layers {
+        if let LayerKey::Color(i) = k {
+            *p.color_layer_mut(i).unwrap() = l;
+        }
+    }
+    for s in imported.shapes {
+        let id = p.alloc_id();
+        p.shapes.push(Arc::new(openlaser_doc::Shape { id, ..s }));
+    }
+    p.normalize();
+    let opts =
+        openlaser_plan::PlanOptions { selected: None, repeats: 1, frame_style: FrameStyle::Contour, frame_source: FrameSource::Job, flatten_tol_mm: 0.01 };
+    let plan = openlaser_plan::plan(&p, &m, &opts).unwrap();
+    let v = validate(&plan, &m).unwrap();
+    let open: Vec<u32> = v.notices().iter().filter(|n| n.code == NoticeCode::OpenShapeUnhatched).map(|n| n.n).collect();
+    assert_eq!(open, (1..=67).collect::<Vec<u32>>());
+    assert_eq!(v.emit().sections().len(), 2);
+    assert_eq!(v.frame().paths().len(), 403);
+    assert!(validate_frame(&plan, &m, FrameSource::Job).is_ok());
+    assert!(validate_frame(&plan, &m, FrameSource::ToolLayersOnly).is_err(), "no tool-layer shapes");
 }
