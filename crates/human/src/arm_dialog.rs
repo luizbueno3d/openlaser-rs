@@ -124,7 +124,6 @@ impl Human {
             self.arm.automation_seen = true;
         }
         let violations = format::cap_violations(&model.summary.rows, model.emission_cap_pct);
-        let ready = !tainted && self.arm.typed_ok() && self.arm.all_ticked() && violations.is_empty();
 
         let mut clicked = Clicked::Nothing;
         let mut confirm: Option<egui::Response> = None;
@@ -152,6 +151,8 @@ impl Human {
                 ui.colored_label(ui.visuals().error_fg_color, r.as_str());
             }
             ui.horizontal(|ui| {
+                // After the field and the ticks were drawn, so Confirm follows this pass's typing and ticking.
+                let ready = !tainted && state.typed_ok() && state.all_ticked() && violations.is_empty();
                 confirm = Some(ui.add_enabled(ready, egui::Button::new(CONFIRM_LABEL)));
                 if ui.button(CANCEL_LABEL).clicked() {
                     clicked = Clicked::Cancel;
