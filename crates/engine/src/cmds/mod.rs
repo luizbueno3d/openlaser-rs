@@ -54,6 +54,13 @@ pub(crate) fn needs_doc_and_window(s: &Session) -> Result<(), Disabled> {
 
 // ---- shared helpers ---------------------------------------------------------------------------------------------
 
+/// Defence in depth for human-only commands whose handler does not go through a typed API that checks the origin
+/// itself (profile writes, detect): dispatch refused every other origin already; a `run` called directly, outside
+/// dispatch, is `Headless` and refused here.
+pub(crate) fn human_here(s: &Session, id: &str) -> Result<(), EngineError> {
+    if s.current_origin() == crate::command::Origin::Human { Ok(()) } else { Err(EngineError::human_only(id)) }
+}
+
 /// The objects a command acts on: `ids` (each must be a top-level object) or the selection.
 pub(crate) fn target_ids(s: &Session, id: &str, ids: Option<Vec<u64>>) -> Result<Vec<ObjectId>, EngineError> {
     let doc = s.doc()?;

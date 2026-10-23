@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::always;
+use super::{always, human_here};
 use crate::command;
 use crate::command::{Access, CommandSpec, DeviceClass, EngineError, Kind};
 use crate::params::{DeviceParams, NoParams, finite, name, positive};
@@ -95,6 +95,7 @@ fn disconnect(s: &mut Session, p: DeviceParams) -> Result<Value, EngineError> {
 }
 
 fn detect(s: &mut Session, _: NoParams) -> Result<Value, EngineError> {
+    human_here(s, "device.detect")?;
     let provider = s.provider()?;
     let found = provider.detect().map_err(|e| match e {
         openlaser_driver::DriverError::Refused(r) => EngineError::Refused(r),
@@ -148,7 +149,8 @@ fn save_profile(s: &mut Session, id: &str, new: MachineProfile, replace: bool) -
     Ok(profile_json(&new))
 }
 
-fn require_profiles(s: &Session) -> Result<(), EngineError> {
+fn require_profiles(s: &Session, id: &str) -> Result<(), EngineError> {
+    human_here(s, id)?;
     if s.cfg.profiles.is_none() {
         return Err(EngineError::refused(RefusalCode::NoDevice, "profiles are read-only in this session"));
     }
@@ -403,7 +405,7 @@ fn apply_settings(id: &str, p: SettingsParams, m: &mut MachineProfile) -> Result
 
 fn settings_set(s: &mut Session, p: SettingsParams) -> Result<Value, EngineError> {
     const ID: &str = "device.settings.set";
-    require_profiles(s)?;
+    require_profiles(s, ID)?;
     let mut m = target(s, ID, p.device.clone())?;
     apply_settings(ID, p, &mut m)?;
     save_profile(s, ID, m, true)
@@ -424,7 +426,7 @@ pub struct CreateParams {
 
 fn create(s: &mut Session, p: CreateParams) -> Result<Value, EngineError> {
     const ID: &str = "device.create";
-    require_profiles(s)?;
+    require_profiles(s, ID)?;
     let ok = !p.id.is_empty() && p.id.len() <= 64 && p.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
     if !ok {
         return Err(EngineError::bad(ID, "/id", "profile ids are 1..=64 characters of a-z, 0-9 and -"));
@@ -452,7 +454,7 @@ pub struct ImportEzcadParams {
 
 fn import_ezcad(s: &mut Session, p: ImportEzcadParams) -> Result<Value, EngineError> {
     const ID: &str = "device.importEzcad";
-    require_profiles(s)?;
+    require_profiles(s, ID)?;
     let base = target(s, ID, p.device)?;
     let bytes = s.read_file(&p.path)?;
     let cfg = openlaser_machine::markcfg::parse(&bytes).map_err(|e| EngineError::Io(format!("{}: {e}", p.path)))?;
@@ -482,7 +484,7 @@ pub struct CalibrateParams {
 
 fn calibrate_axis(s: &mut Session, p: CalibrateParams) -> Result<Value, EngineError> {
     const ID: &str = "device.calibrateAxis";
-    require_profiles(s)?;
+    require_profiles(s, ID)?;
     let axis = match p.axis {
         1 => 0usize,
         2 => 1usize,

@@ -156,6 +156,11 @@ impl Session {
         let Some(spec) = reg.find(id).copied() else {
             return Err(EngineError::UnknownCommand { id: id.to_owned(), suggestions: reg.suggestions(id).into_iter().map(str::to_owned).collect() });
         };
+        self.run_spec(spec, origin, parent, params)
+    }
+
+    /// Pipeline steps 2–9 for one resolved spec.
+    pub(crate) fn run_spec(&mut self, spec: crate::command::CommandSpec, origin: Origin, parent: Option<Origin>, params: Value) -> Result<Value, EngineError> {
         // 2. params is an object or null; split the universal keys.
         let (params, coalesce, dry_run) = split_universal(spec.id, params)?;
         // 3. policy, before any decode or side effect.
@@ -591,15 +596,16 @@ impl Session {
         self.ctx.as_ref().is_some_and(|c| c.dry_run)
     }
 
-    /// The origin the running command was dispatched with (a Replay step reports Replay); outside dispatch, the
-    /// session's default origin.
+    /// The origin the running command was dispatched with (a Replay step reports Replay). A command `run` called
+    /// directly, outside dispatch, skipped the policy table: it gets `Headless` (fail closed), so no human-only path
+    /// opens for it whatever the session's default origin is.
     pub(crate) fn current_origin(&self) -> Origin {
-        self.ctx.as_ref().map_or(self.cfg.origin, |c| c.origin)
+        self.ctx.as_ref().map_or(Origin::Headless, |c| c.origin)
     }
 
-    /// The origin whose rights apply (a Replay step inherits its caller's).
+    /// The origin whose rights apply (a Replay step inherits its caller's); `Headless` outside dispatch.
     pub(crate) fn effective_origin(&self) -> Origin {
-        self.ctx.as_ref().map_or(self.cfg.origin, |c| c.effective)
+        self.ctx.as_ref().map_or(Origin::Headless, |c| c.effective)
     }
 
     pub(crate) fn coalesce(&self) -> Option<String> {

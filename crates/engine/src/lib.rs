@@ -23,6 +23,8 @@ mod params;
 pub mod prefs;
 mod requests;
 mod session;
+#[cfg(test)]
+mod tests;
 
 pub use command::{
     Access, AgentClass, CommandRow, CommandSpec, DeviceClass, Disabled, EngineError, Kind, ListFilter, Origin, Registry, RunFn, params_schema, registry,
