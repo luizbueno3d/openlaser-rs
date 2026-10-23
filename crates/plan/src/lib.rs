@@ -1,13 +1,41 @@
-//! The planner (SPEC §3.7; owned by WP3, red zone). WP0 stubs.
+//! The planner (SPEC §3.7; owned by WP3, red zone): document + machine → [`JobPlan`].
+//!
+//! - **Sections** in burn order: Cuts / Layers order, then sub-layer, then pass (global passes repeat the whole
+//!   sub-layer stack); draw order inside. Line sections carry the flattened outlines; Fill sections carry 2-point
+//!   hatch segments from `geom::hatch`, one section per hatch pass. Coordinates are machine mm
+//!   ([`machine_transform`] for a galvo, [`gantry_transform`] for a gantry).
+//! - **Quantised words** ([`GalvoCutQ`], [`GantryCutQ`]) are computed once, here ([`quantise`]); encoders read only
+//!   the words.
+//! - **Frame** (Bounds or Contour) from every outline on an emitting layer, hidden or not (frame ⊇ burn); Fill
+//!   layers frame their outlines, never the hatch. Tool layers T1/T2 go to `tool_frame` only.
+//! - **Facts** for everything `safety` must judge; nothing is dropped silently, and no geometry is ever substituted
+//!   for a shape the planner cannot plan (a non-finite, too detailed or too far shape becomes a fact, never a
+//!   stand-in path).
+//! - **Fingerprint** per S21 ([`fingerprint_of`]), frame style and source excluded.
 #![forbid(unsafe_code)]
 
 use std::time::Duration;
 
-pub use openlaser_doc::{DeviceKind, Project};
-pub use openlaser_geom::{Affine, Polyline};
+mod estimate;
+mod fingerprint;
+mod frame;
+mod planner;
+pub mod quantise;
+mod transform;
+
+pub use openlaser_doc::{DeviceKind, Project, WorkspaceOrigin};
+pub use openlaser_geom::{Affine, Bounds, Polyline};
 pub use openlaser_machine::{GalvoMachine, GantryMachine, MachineProfile};
 pub use openlaser_types::galvo::PulseDecision;
 pub use openlaser_types::{Fingerprint, FrameSource, FrameStyle, Hz, LayerKey, MachineId, MmPerS, ObjectId, Percent, SectionMode};
+
+pub use fingerprint::fingerprint_of;
+pub use frame::{HULL_FRAME_UNSUPPORTED, bounds_rect, frame_style_of};
+pub use planner::{
+    MAX_COORD_MM, MAX_DESIGN_POINTS, MAX_FLATTEN_TOL_MM, MAX_HATCH_LINES, MAX_PASSES_PER_LAYER, MAX_SECTION_POINTS, MAX_SECTIONS, MAX_SUB_LAYERS,
+    MIN_FLATTEN_TOL_MM,
+};
+pub use transform::{gantry_bed, gantry_transform};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -36,8 +64,10 @@ pub struct JobPlan {
     pub repeats: u16,
     /// All repeats.
     pub estimate: Duration,
-    /// blake3 over the canonical encoding of machine, device, sections (layer, pass, quantised words, path f64 bit
-    /// patterns), frame, tool_frame, repeats, the machine's calibration and transform, frame style/source.
+    /// S21: blake3 over the canonical encoding of machine, device, sections (layer, pass, quantised words, path f64
+    /// bit patterns), repeats, the machine's calibration, transform, red-dot calibration and first-jump/timing
+    /// settings. NOT frame, tool_frame, frame style or source: those are framing choices, and the receipt records
+    /// them (`covers_job` decides). See [`fingerprint_of`].
     pub fingerprint: Fingerprint,
 }
 
@@ -110,6 +140,10 @@ pub struct PlanFacts {
     pub empty_fill_layers: Vec<LayerKey>,
     pub open_fill_shapes: Vec<(ObjectId, LayerKey)>,
     pub non_finite_objects: Vec<ObjectId>,
+    /// Objects with a point beyond [`MAX_COORD_MM`] on either axis (design mm, after every transform), with their
+    /// layer and the distance (mm) of their farthest point from the design origin. Nothing of such an object is
+    /// planned (no section, no frame, no stand-in geometry); `safety` refuses the job, naming each one.
+    pub far_objects: Vec<(ObjectId, LayerKey, f64)>,
     /// OffsetFill, timings, wobble, Hull frame.
     pub unsupported: Vec<(LayerKey, String)>,
     pub tool_layer_objects: Vec<ObjectId>,
@@ -125,27 +159,29 @@ pub enum Error {
     NotImplemented(&'static str),
 }
 
+/// Plans a project for a machine. `Err` only for a geometry failure that is not a refusal (a stubbed or broken
+/// geometry kernel); everything about the design itself becomes a section, a frame path or a fact.
 pub fn plan(project: &Project, machine: &MachineProfile, opts: &PlanOptions) -> Result<JobPlan, Error> {
-    let _ = (project, machine, opts);
-    Err(Error::NotImplemented("openlaser_plan::plan"))
+    planner::plan(project, machine, opts)
+}
+
+/// The device kind a machine profile drives.
+pub fn device_of(machine: &MachineProfile) -> DeviceKind {
+    planner::device_of(machine)
 }
 
 /// Design mm → machine mm: field angle, swap, negate, offset. Never scale (scale lives in F).
-/// WP0 stub: identity.
 pub fn machine_transform(m: &GalvoMachine) -> Affine {
-    let _ = m;
-    Affine::IDENTITY
+    transform::machine_transform(m)
 }
 
 /// Galvo time model: mark length / actual speed + jump length / jump speed + jump delays + laser on/off/polygon
-/// delays per vertex + MO settle + first-jump settle. WP0 stub: zero.
+/// delays per vertex + MO settle + first-jump settle.
 pub fn estimate_galvo(paths: &[Polyline], q: &GalvoCutQ, m: &GalvoMachine) -> Duration {
-    let _ = (paths, q, m);
-    Duration::ZERO
+    estimate::estimate_galvo(paths, q, m)
 }
 
-/// WP0 stub: zero.
+/// Gantry time model: travel at the machine's travel speed, burn moves at the layer speed (no acceleration).
 pub fn estimate_gantry(paths: &[Polyline], q: &GantryCutQ, m: &GantryMachine) -> Duration {
-    let _ = (paths, q, m);
-    Duration::ZERO
+    estimate::estimate_gantry(paths, q, m)
 }
