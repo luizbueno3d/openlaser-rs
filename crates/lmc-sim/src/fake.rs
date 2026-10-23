@@ -374,9 +374,16 @@ impl LmcTransport for FakeLmc {
         self.single_pending = Some((reply, at.plus(self.cfg.transfer_latency), timeout));
         Ok(())
     }
+    /// Like a USB `wait_next_complete(slice)`: returns as soon as the reply has arrived (`transfer_latency` after
+    /// the submit), and waits the whole slice only while it has not (no transfer pending, or a reply that never
+    /// comes).
     fn poll_single(&mut self, slice: Duration) -> Result<Option<Option<[u16; 4]>>, XferError> {
         self.check()?;
-        self.clock.sleep(slice);
+        let wait = match self.single_pending {
+            Some((_, until, false)) => until.saturating_since(self.clock.now()).min(slice),
+            _ => slice,
+        };
+        self.clock.sleep(wait);
         self.pump()?;
         let Some((reply, until, timeout)) = self.single_pending else { return Ok(None) };
         if timeout || self.clock.now() < until {
@@ -410,9 +417,12 @@ impl LmcTransport for FakeLmc {
         self.packet_pending = Some((pkt.clone(), at.plus(self.cfg.transfer_latency), disconnect));
         Ok(())
     }
+    /// Returns as soon as the packet transfer has completed (`transfer_latency` after the submit), never later than
+    /// the slice; with nothing in flight it returns at once.
     fn poll_packet(&mut self, slice: Duration) -> Result<Option<()>, XferError> {
         self.check()?;
-        self.clock.sleep(slice);
+        let wait = self.packet_pending.as_ref().map_or(Duration::ZERO, |(_, until, _)| until.saturating_since(self.clock.now()).min(slice));
+        self.clock.sleep(wait);
         self.pump()?;
         let Some((_, until, _)) = &self.packet_pending else { return Ok(Some(())) };
         if self.clock.now() < *until {

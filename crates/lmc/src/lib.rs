@@ -18,7 +18,7 @@ pub mod py_compat;
 
 pub use decode::{Decoded, Listing, ListingLine, decode_packet, disassemble, disassemble_frame, emission_summary, emitted_segments};
 pub use encode::{LightingList, LmcFrameJob, LmcJob, LmcList, MarkingList, encode_frame, encode_job};
-pub use packet::{PACKET_LEN, Packet, SLOTS, Single, StatusWord, init_sequence, status_from_reply};
+pub use packet::{PACKET_LEN, Packet, SLOTS, Single, StatusWord, abort_packet, init_sequence, status_from_reply};
 pub use transport::{LmcTransport, XferError};
 
 // Re-exports for callers that name these through the protocol crate (SPEC §3.0).

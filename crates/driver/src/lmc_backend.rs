@@ -47,14 +47,6 @@ impl<T: LmcTransport> Wire for TransportWire<T> {
     }
 }
 
-/// The abort's dummy end-of-list packet (256 × `0x8002`, sha256 `e479558e…6a18`). `openlaser_lmc::Packet` has no
-/// public constructor in the WP0 contract, so the driver cannot build it: until the protocol crate exports one
-/// (REQUEST at I1), the emergency stop skips the dummy packet and says so in the `StopReport` notes. Skipping it
-/// is the conservative side of §5.3 (it is only ever written when READY, for OM parity until H14).
-fn end_of_list_packet() -> Option<Packet> {
-    None
-}
-
 /// LMC session (red zone): §5.
 pub struct LmcBackend<T: LmcTransport> {
     session: Session<TransportWire<T>>,
@@ -70,7 +62,13 @@ impl<T: LmcTransport> LmcBackend<T> {
             Ok(cfg) => (cfg, None),
             Err(e) => (SessionCfg::fallback(), Some(e)),
         };
-        LmcBackend { session: Session::new(TransportWire(transport), cfg, end_of_list_packet()), machine, cfg_error, provider: "lmc", connected: false }
+        LmcBackend {
+            session: Session::new(TransportWire(transport), cfg, openlaser_lmc::abort_packet()),
+            machine,
+            cfg_error,
+            provider: "lmc",
+            connected: false,
+        }
     }
 
     /// The provider name `DeviceInfo` reports ("usb", "sim"); the engine knows it, the transport does not.

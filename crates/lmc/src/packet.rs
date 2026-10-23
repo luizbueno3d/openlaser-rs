@@ -59,6 +59,21 @@ impl Single {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Packet(Box<[u8; PACKET_LEN]>);
 
+/// The abort's dummy end-of-list packet (research 05 §1.9; GP `abort()` writes an empty list): all 256 slots
+/// `listEndOfList` (`0x8002`) with zero parameters, sha256 `e479558e…6a18` (`tests/golden/t1_lmc/v0/abort.json`).
+/// The driver writes it only when the board shows READY within 50 ms of the stop (SPEC §5.3, B2), and follows it with
+/// `ExecuteList` only when no list was executing (OM v1 `_safe_abort`).
+pub fn abort_packet() -> Packet {
+    let mut bytes = Box::new([0u8; PACKET_LEN]);
+    let [lo, hi] = op::LIST_END_OF_LIST.to_le_bytes();
+    for slot in bytes.as_chunks_mut::<12>().0.iter_mut() {
+        let [op_lo, op_hi, ..] = slot;
+        *op_lo = lo;
+        *op_hi = hi;
+    }
+    Packet(bytes)
+}
+
 impl Packet {
     /// Builds a padded packet. At most 256 words are accepted; unused slots
     /// are `EndOfList`. This is also the primitive used by both typed list

@@ -26,6 +26,8 @@ openlaser-arm = { workspace = true, features = ["test-witness"] }
 # T6 builds marking packets with GP's encoder replay (SPEC §2.3 rule 10: py-compat only as a dev-dependency).
 openlaser-lmc = { workspace = true, features = ["py-compat"] }
 openlaser-lmc-sim = { workspace = true }
+# rust_v1_session builds the shipping mark_box10 EmitPlan (CutQ, GalvoCutQ, ResolvedTimings, Section).
+openlaser-plan = { workspace = true }
 openlaser-safety = { workspace = true, features = ["unchecked-for-tests"] }
 openlaser-testkit = { workspace = true }
 proptest = { workspace = true }

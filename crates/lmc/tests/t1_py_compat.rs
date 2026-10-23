@@ -41,3 +41,22 @@ fn t1_py_compat() {
     assert_events(&all[..39], &fixture("v0", "init").events, "init");
     assert_events(&all[39..], &fixture("v0", "abort").events, "abort");
 }
+
+#[test]
+fn abort_packet_is_the_v0_dummy_end_of_list_packet() {
+    // The shipping abort's dummy packet (SPEC §5.3) is byte-exact with the one GP's abort() wrote (v0 `abort`).
+    let abort = fixture("v0", "abort");
+    let dummy = abort
+        .events
+        .iter()
+        .find_map(|e| match e {
+            Event::List { sha256, n_cmds } => Some((sha256.clone(), *n_cmds)),
+            _ => None,
+        })
+        .expect("the v0 abort writes one list packet");
+    let p = openlaser_lmc::abort_packet();
+    assert_eq!(p.sha256_hex(), dummy.0);
+    assert_eq!(p.real_commands(), usize::from(dummy.1));
+    assert_eq!(p.bytes().as_slice(), t1::packet(&dummy.0).unwrap_or_else(|e| panic!("{e}")));
+    assert_eq!(p, openlaser_lmc::Packet::from_words(&[]).unwrap());
+}

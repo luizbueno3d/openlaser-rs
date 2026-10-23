@@ -3,8 +3,8 @@
 //!
 //! The scripted terminal gets its `HumanConfirm` from `openlaser_arm::testing` (SPEC §3.21). The scripted rig stands
 //! in for the engine session so the CLI's own decisions (TTY gate, Enter only after an executed pass, stop keys,
-//! `--allow-emission`, the bench cap, the challenge) are checked now; the `needs I1` tests drive the real engine
-//! with the simulator once WP3–WP6 land.
+//! `--allow-emission`, the bench cap, the challenge) are checked on their own; the tests at the end drive the real
+//! engine (planner, encoder, driver) with the simulator, each with its own temporary profile folder.
 // Test code: clippy.toml allows these inside `#[test]` fns only; the scripted terminal and rig below are helpers.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
@@ -833,7 +833,6 @@ fn document_text_reaches_the_terminal_as_plain_text() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn arm_confirmation_is_stamped_after_the_line_is_read() {
     // The operator takes 30 s to read the summary and type the challenge: the confirmation carries the time the line
     // came in, not the time the prompt was printed (mint refuses a confirmation older than 10 s).
@@ -877,7 +876,6 @@ fn faults_end_the_flow() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn cli_wrong_nonce_refused() {
     let (mut env, s) = fake_env(one_pass_on_poll_3(1.0, None));
     let mut term = Scripted::new(true, &[Key::Wait(4), Key::Enter]);
@@ -891,7 +889,6 @@ fn cli_wrong_nonce_refused() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn cli_correct_challenge_arms_and_marks() {
     let (mut env, s) = fake_env(one_pass_on_poll_3(1.0, None));
     let mut term = Scripted::new(true, &[Key::Wait(4), Key::Enter]);
@@ -992,18 +989,24 @@ fn cli_trace_file_matches_t1_event_format() {
     assert!(scenarios >= 20, "every v0 and v1 scenario was replayed ({scenarios})");
 }
 
-// ---- needs the engine, the planner, the encoder and the driver (I1) ----------------------------------------------
+// ---- the engine, the planner, the encoder and the driver on the simulator -----------------------------------------
 
-fn engine_env(sim: openlaser_lmc_sim::SimConfig) -> Env {
+/// The engine rig on the simulator, with its own empty profile folder: never the user's real one, and never `None`
+/// (a machine whose saved profile cannot be read is refused, so `None`, "no profile folder on this system", refuses
+/// every device command). Keep the `TempDir` alive as long as the `Env`.
+fn engine_env(sim: openlaser_lmc_sim::SimConfig) -> (Env, tempfile::TempDir) {
     let clock: Arc<dyn openlaser_types::Clock> = Arc::new(openlaser_types::SystemClock::new());
-    Env {
-        profiles_dir: None,
+    let profiles = tempfile::tempdir().unwrap();
+    let dir = profiles.path().join("machines");
+    let env = Env {
+        profiles_dir: Some(dir.clone()),
         clock: Arc::clone(&clock),
         poll: Duration::from_millis(5),
         signals: false,
         exit: Arc::new(|_| {}),
-        rigs: Box::new(EngineRigs::new(None, sim, clock)),
-    }
+        rigs: Box::new(EngineRigs::new(Some(dir), sim, clock)),
+    };
+    (env, profiles)
 }
 
 /// Presses Enter every second for a minute: the first one after an executed pass is accepted, the earlier ones are
@@ -1013,10 +1016,9 @@ fn enter_after_frame() -> Vec<Key> {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn cli_run_sim_marks_business_card() {
     let card = openlaser_testkit::golden_dir().join("inputs").join("workspace.json");
-    let mut env = engine_env(default_sim_config());
+    let (mut env, _profiles) = engine_env(default_sim_config());
     let mut term = Scripted::new(true, &enter_after_frame());
     term.typing = Some(|c| format!("ARM {c:06}"));
     let code = run_with(&[String::from("run"), card.to_string_lossy().into_owned(), "--sim".into(), "--allow-emission".into()], &mut term, &mut env);
@@ -1027,11 +1029,10 @@ fn cli_run_sim_marks_business_card() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn cli_first_emission_power_cap_refused_on_the_simulator() {
     let mut sim = default_sim_config();
     sim.emission_cap_pct = Some(10.0);
-    let mut env = engine_env(sim);
+    let (mut env, _profiles) = engine_env(sim);
     let mut term = Scripted::new(true, &enter_after_frame());
     term.typing = Some(|c| format!("ARM {c:06}"));
     // box10 is the T1 input at 50 %.
@@ -1047,11 +1048,10 @@ fn cli_first_emission_power_cap_refused_on_the_simulator() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn cli_trace_sim_frame_writes_t1_lines() {
     let dir = tempfile::tempdir().unwrap();
     let trace: PathBuf = dir.path().join("frame.jsonl");
-    let mut env = engine_env(default_sim_config());
+    let (mut env, _profiles) = engine_env(default_sim_config());
     let mut term = Scripted::new(true, &[]);
     let args = vec!["frame".into(), "--builtin".into(), "box10".into(), "--sim".into(), "--trace".into(), trace.to_string_lossy().into_owned()];
     assert_eq!(run_with(&args, &mut term, &mut env), EXIT_OK, "{}", term.output());
@@ -1064,9 +1064,8 @@ fn cli_trace_sim_frame_writes_t1_lines() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn cli_frame_extent_reaches_past_the_work_area_on_red_light_only() {
-    let mut env = engine_env(default_sim_config());
+    let (mut env, _profiles) = engine_env(default_sim_config());
     let mut term = Scripted::new(true, &[]);
     assert_eq!(run_with(&argv("frame --builtin corners --extent 110 --sim"), &mut term, &mut env), EXIT_OK, "{}", term.output());
     // 118.34 is +F/2 at scale 1.1834: never encodable.
@@ -1076,12 +1075,11 @@ fn cli_frame_extent_reaches_past_the_work_area_on_red_light_only() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn cli_skipped_profile_file_refuses_device_commands() {
     // A saved profile that no longer loads would leave the machine on its built-in calibration: refused, not run.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("jpt-m7-200-sim.json"), b"{ \"id\": \"jpt-m7-200-sim\", ").unwrap();
-    let mut env = engine_env(default_sim_config());
+    let (mut env, _profiles) = engine_env(default_sim_config());
     env.rigs = Box::new(EngineRigs::new(Some(dir.path().to_path_buf()), default_sim_config(), Arc::clone(&env.clock)));
     let mut term = Scripted::new(true, &[]);
     assert_eq!(run_with(&argv("frame --builtin box10 --sim"), &mut term, &mut env), EXIT_FAIL);

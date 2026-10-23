@@ -414,3 +414,28 @@ fn an_mo_left_open_and_the_final_port_are_recorded() {
     single(&mut b, op::RESET, 0);
     assert_eq!(b.recorder().snapshot().port, 0);
 }
+
+#[test]
+fn polls_return_when_the_transfer_completes_not_after_a_whole_slice() {
+    // A USB transfer completes when the board answers; a poll with a 20 ms slice waits only the 2 ms latency (the
+    // real-time T6 stop budget counts every abort transfer). A reply that never comes still costs the whole slice.
+    let clock = Arc::new(VirtualClock::new());
+    let mut cfg = config();
+    cfg.transfer_latency = Duration::from_millis(2);
+    cfg.faults.push(Fault::ReplyTimeouts { every: 2 });
+    let mut b = FakeLmc::new(cfg, clock.clone());
+    let slice = Duration::from_millis(20);
+    b.submit_single(Single([op::GET_VERSION, 0, 0, 0, 0, 0])).unwrap_or_else(|e| panic!("{e}"));
+    let t0 = clock.now();
+    assert!(b.poll_single(slice).unwrap_or_else(|e| panic!("{e}")).is_some());
+    assert_eq!(clock.now().saturating_since(t0), Duration::from_millis(2));
+    b.submit_packet(&packet(&[])).unwrap_or_else(|e| panic!("{e}"));
+    let t1 = clock.now();
+    assert_eq!(b.poll_packet(slice), Ok(Some(())));
+    assert_eq!(clock.now().saturating_since(t1), Duration::from_millis(2));
+    // The second reply never comes (ReplyTimeouts every 2): the poll waits the slice and reports nothing.
+    b.submit_single(Single([op::GET_VERSION, 0, 0, 0, 0, 0])).unwrap_or_else(|e| panic!("{e}"));
+    let t2 = clock.now();
+    assert_eq!(b.poll_single(slice), Ok(None));
+    assert_eq!(clock.now().saturating_since(t2), slice);
+}

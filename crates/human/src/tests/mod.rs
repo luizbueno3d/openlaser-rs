@@ -1,8 +1,8 @@
 //! Kittest suite for the provenance gate and the ARM dialog (SPEC §6.4: harness input counts as human; synthetic
 //! input goes through `Human::inject`; AccessKit actions arrive as `Event::AccessKitActionRequest`).
 //!
-//! `openlaser_arm::mint` is WP3's (a fail-closed stub until I1), so these tests install a recording mint through
-//! `Human::test_mint` (compiled only under `cfg(test)`); the `needs I1` test at the end runs the real one.
+//! Most tests install a recording mint through `Human::test_mint` (compiled only under `cfg(test)`) to see exactly
+//! what the dialog passes; the test at the end runs WP3's real `openlaser_arm::mint`.
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -32,7 +32,7 @@ fn mints() -> u32 {
     MINTS.with(Cell::get)
 }
 
-/// Records the call and hands out a test token (the real checks are WP3's, exercised by the `needs I1` test).
+/// Records the call and hands out a test token (the real checks are WP3's, exercised by the last test).
 fn recording_mint(s: &EmissionSummary, r: &FrameReceipt, c: HumanConfirm, n: usize, session: SessionId, now: MonoTime) -> Result<ArmToken, Refusal> {
     drop(c);
     let _ = (r, n);
@@ -724,10 +724,9 @@ fn frame_is_synthetic_tracks_the_taint_window() {
     assert_eq!(h.state().human.injected_events(), 1);
 }
 
-// ---- needs WP3's mint (I1) ---------------------------------------------------------------------------------------
+// ---- WP3's real mint -----------------------------------------------------------------------------------------------
 
 #[test]
-#[ignore = "needs I1"]
 fn human_click_after_300ms_mints_token_with_real_mint() {
     let (mut h, clock) = harness_with(None, model(7, None));
     human_fills(&mut h);

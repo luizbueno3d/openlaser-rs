@@ -4,7 +4,7 @@ The wire event streams of the shipping LMC session (SPEC §5.3) on a READY FakeL
 faults), written by `crates/driver/tests/rust_v1_session.rs`:
 
 ```sh
-UPDATE_RUST_V1=1 cargo test -p openlaser-driver --test rust_v1_session -- --ignored
+OPENLASER_NO_HW=1 UPDATE_RUST_V1=1 cargo test -p openlaser-driver --test rust_v1_session
 ```
 
 and compared byte for byte by the same tests without `UPDATE_RUST_V1`. They are **candidates**: they become

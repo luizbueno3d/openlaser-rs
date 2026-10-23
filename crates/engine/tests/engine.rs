@@ -2,7 +2,7 @@
 //!
 //! - `registry`: ids, aliases, schemas, the policy table, the `command_list` snapshot;
 //! - `undo`: an undo round trip for every Edit command and `prop_undo_redo_roundtrip`;
-//! - `emission`: the human emission path end to end on a FakeLmc (`#[ignore = "needs I1"]`: it needs WP1–WP5);
+//! - `emission`: the human emission path end to end on a FakeLmc (WP1–WP5, merged at I1);
 //! - `panic_hunt`: every command × `testkit::adversarial::params()` (`#[ignore]`, run at I2).
 //!
 //! Nothing here opens a real device: every provider is a test double or a FakeLmc (AGENTS.md §1).
@@ -407,7 +407,6 @@ mod undo {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn undo_roundtrip_edit_commands_needing_geometry_and_import() {
         let (mut s, _, _) = scene();
         let svg = openlaser_testkit::fixture("square10mm.svg").to_string_lossy().into_owned();
@@ -505,7 +504,7 @@ mod undo {
     }
 }
 
-// ---- the human emission path on a FakeLmc (needs I1) -------------------------------------------------------------
+// ---- the human emission path on a FakeLmc --------------------------------------------------------------------------
 
 mod emission {
     use std::sync::Mutex;
@@ -625,7 +624,6 @@ mod emission {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn e2e_mopa_business_card_sim() {
         let stop_now = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let registry_slot: Arc<Mutex<Option<Arc<openlaser_engine::StopRegistry>>>> = Arc::new(Mutex::new(None));
@@ -694,7 +692,6 @@ mod emission {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn run_armed_requires_receipt() {
         let mut b = bench(true, None);
         small_square(&mut b);
@@ -706,7 +703,6 @@ mod emission {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn tool_layer_receipt_does_not_arm() {
         let mut b = bench(true, None);
         small_square(&mut b);
@@ -718,7 +714,6 @@ mod emission {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn frame_with_bounds_style_satisfies_start_for_contour_job() {
         let mut b = bench(true, None);
         small_square(&mut b);
@@ -732,7 +727,6 @@ mod emission {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn pending_arm_voided_by_edit_on_the_real_path() {
         let mut b = bench(true, None);
         small_square(&mut b);
@@ -745,7 +739,6 @@ mod emission {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn arm_token_invalid_after_edit_on_the_real_path() {
         let mut b = bench(true, None);
         small_square(&mut b);
@@ -774,7 +767,6 @@ mod emission {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn run_armed_sends_the_pending_job_object() {
         let mut b = bench(true, None);
         small_square(&mut b);
@@ -801,7 +793,6 @@ mod emission {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn job_submit_never_reaches_driver_run() {
         let mut b = bench(true, None);
         small_square(&mut b);
@@ -825,7 +816,6 @@ mod emission {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn edit_after_submit_marks_stale() {
         let mut b = bench(true, None);
         small_square(&mut b);
@@ -837,7 +827,6 @@ mod emission {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn submission_flow_human_frames_then_arms() {
         let mut b = bench(true, None);
         small_square(&mut b);
@@ -857,7 +846,6 @@ mod emission {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn stop_from_an_agent_stops_a_frame_loop() {
         let mut b = bench(true, None);
         small_square(&mut b);

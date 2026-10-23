@@ -3,9 +3,9 @@
 //! (`5f7aa63` `safety.py`, `layers.py`, `live.py` `geometry_errors`): the same decision as OM v1, as a code.
 //!
 //! Plans are built by hand so each rule is tested on its own. Their galvo words come from the T0 formulas written
-//! out below (not from `types::galvo`), so after I1 these tests also cross-check WP4's encoders through `safety`'s
-//! word re-derivation. Tests whose verdict depends on another package's behaviour (the work area from WP1's
-//! `effective_work_area`, the encoders from WP4) are `#[ignore = "needs I1"]` (§7.0 rule 6).
+//! out below (not from `types::galvo`), so these tests also cross-check WP4's encoders through `safety`'s word
+//! re-derivation; the tests whose verdict depends on another package's behaviour (the work area from WP1's
+//! `effective_work_area`, the encoders from WP4) run since I1 merged those packages.
 
 // An integration-test crate is test code; clippy's in-test allowances only reach `#[test]` functions, not helpers.
 #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
@@ -182,7 +182,6 @@ fn gantry_cut(speed: f64, power: f64) -> CutQ {
 // ---- geometry ----------------------------------------------------------------------------------------------------
 
 #[test]
-#[ignore = "needs I1"]
 fn safety_outside_work_area_refused() {
     // B10: the work area is the lens's rated field (±100 mm), not the galvo's reach (±118.34 mm at scale 1.1834).
     let (m, ok) = galvo_job(vec![line(&[[100.0, 0.0], [-100.0, 0.0]]), line(&[[0.0, 100.0], [0.0, -100.0]])]);
@@ -198,7 +197,6 @@ fn safety_outside_work_area_refused() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn safety_plus_half_field_refused() {
     // A machine whose work area reaches the whole encodable field: +F/2 exactly is refused (OM clamps to 65535),
     // F/2 − 1 µm is accepted.
@@ -215,7 +213,6 @@ fn safety_plus_half_field_refused() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn safety_not_encodable_refused() {
     // A word that does not fit 16 bits is refused, never wrapped (OM's `& 0xFFFF` wraps 0.2 kHz): 20000 / 0.2 kHz
     // = 100000. The frequency rule fires too; the encodability rule names the word.
@@ -295,7 +292,6 @@ fn safety_far_object_refused_by_name() {
 /// The same blocker end to end: `M(1e9, 0) M(0, 0) C(5, 10)(10, 10)(10, 0)` next to an in-field square. The far
 /// object is refused by name and its in-field subpath is never planned as its control polygon (the trapezoid).
 #[test]
-#[ignore = "needs I1"]
 fn safety_lone_far_move_to_refused_end_to_end() {
     use std::sync::Arc;
 
@@ -685,7 +681,6 @@ fn safety_stale_refused() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn safety_stale_words_refused() {
     // Words that do not match the settings they claim (re-fingerprinted, so only the word check can catch it).
     let m = jpt();
@@ -780,7 +775,6 @@ fn validate_frame_refuses_hull_and_empty_frames() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn validate_frame_traces_a_job_that_cannot_burn() {
     // A power refusal blocks the burn, not the framing (to look at placement).
     let mut m = jpt();
@@ -804,7 +798,6 @@ fn validate_frame_traces_a_job_that_cannot_burn() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn validated_carries_the_plan_unchanged() {
     let (m, mut p) = galvo_job(vec![square(0.0, 0.0, 5.0), line(&[[-10.0, -10.0], [10.0, 10.0]])]);
     p.repeats = 3;
@@ -862,7 +855,6 @@ proptest! {
 
     /// SPEC §6.5: every point inside the effective work area encodes, and nothing inside is refused.
     #[test]
-    #[ignore = "needs I1"]
     fn prop_points_inside_work_area_encode(x in -100.0f64..=100.0, y in -100.0f64..=100.0, x2 in -100.0f64..=100.0, y2 in -100.0f64..=100.0) {
         let (m, p) = galvo_job(vec![line(&[[x, y], [x2, y2]])]);
         let c = codes(&validate(&p, &m));
@@ -886,7 +878,6 @@ proptest! {
 /// OM's business card (Appendix B) planned on the JPT M7 and validated: it passes, with one numbered notice per
 /// open raster shape (67), and its frame validates for every source that has something to trace.
 #[test]
-#[ignore = "needs I1"]
 fn safety_business_card_validates_with_numbered_notices() {
     use std::sync::Arc;
 

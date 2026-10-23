@@ -1,18 +1,17 @@
 //! T6 (SPEC §6.3): the driver on lmc-sim's FakeLmc and FakeGrbl, the §6.3 table by name.
 //!
-//! Integration tests because of the `driver ← lmc-sim` dev-dependency cycle (§2.3 rule 10). Everything here needs
-//! WP4's FakeLmc, `encode_frame`, `py_compat` and WP3's `ArmToken::check`, so the tests are `#[ignore = "needs I1"]`
-//! until the integrator merges them; the same mechanisms are covered now by the driver's unit tests (scripted board,
-//! scripted GRBL, mock backend). Randomised stops are tripped from `FakeLmc::set_hook` at a seeded wire event, never
-//! from another thread. `T6_RUNS` raises the 200 deterministic runs; `T6_RT_RUNS` the 40 real-time ones.
+//! Integration tests because of the `driver ← lmc-sim` dev-dependency cycle (§2.3 rule 10). Randomised stops are
+//! tripped from `FakeLmc::set_hook` at a seeded wire event, never from another thread. `T6_RUNS` raises the 200
+//! deterministic runs; `T6_RT_RUNS` the 40 real-time ones.
 //!
 //! Marking jobs are built from GP's own packets (`openlaser_lmc::py_compat::mark_polylines`, the v0 encoder replay)
-//! with the shipping prelude and postlude: the driver's mechanics do not depend on how the packets were encoded, and
-//! the driver's dependency closure cannot name `openlaser_plan`'s `CutQ` to build a shipping `EmitPlan` (REQUEST).
+//! with the shipping prelude and postlude: the driver's mechanics do not depend on how the packets were encoded (the
+//! shipping encoder's own session stream is pinned by `rust_v1_session.rs`).
 
 // Test code: clippy.toml allows these inside #[test] fns; the shared helpers of this file need it spelled out.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -84,22 +83,33 @@ const EXECUTE_LIST: u16 = 0x0005;
 const STOP_EXECUTE: u16 = 0x001F;
 const GET_SERIAL_NO: u16 = 0x0009;
 
-/// The galvo time model of one packet, from its decoded commands: jumps and marks at their speed words (galvo
-/// units per ms), delays in 10 µs, per-vertex delays approximated.
-fn packet_est(p: &Packet) -> Duration {
-    let (mut jump, mut mark) = (830.0_f64, 276.0_f64);
-    let mut us = 0.0_f64;
-    for d in decode_packet(p) {
-        match d {
-            Decoded::JumpSpeed(v) => jump = f64::from(v.max(1)),
-            Decoded::MarkSpeed(v) => mark = f64::from(v.max(1)),
-            Decoded::JumpTo { dist, .. } => us += f64::from(dist) / jump * 1000.0 + 8.0,
-            Decoded::MarkTo { dist, .. } => us += f64::from(dist) / mark * 1000.0 + 100.0,
-            Decoded::DelayTime(n) => us += f64::from(n) * 10.0,
-            _ => {}
-        }
-    }
-    Duration::from_micros(us as u64)
+/// The galvo time model of each packet of one list, from its decoded commands, as the board executes them: jumps and
+/// marks at their speed words (galvo units per ms), laser on/off/polygon and jump delays in µs, `DelayTime` in 10 µs.
+/// The speed and delay words carry over from packet to packet (GP sets them once, in the list's first packet), as in
+/// the shipping encoder's `packet_est` (`decode::packet_times`).
+fn packet_ests(packets: &[Packet]) -> Vec<Duration> {
+    let (mut jump, mut mark, mut jump_delay, mut mark_delays) = (830.0_f64, 276.0_f64, 0.0_f64, [0.0_f64; 3]);
+    packets
+        .iter()
+        .map(|p| {
+            let mut us = 0.0_f64;
+            for d in decode_packet(p) {
+                match d {
+                    Decoded::JumpSpeed(v) => jump = f64::from(v.max(1)),
+                    Decoded::MarkSpeed(v) => mark = f64::from(v.max(1)),
+                    Decoded::JumpDelay(v, _) => jump_delay = f64::from(v),
+                    Decoded::LaserOnDelay(v, _) => mark_delays[0] = f64::from(v),
+                    Decoded::LaserOffDelay(v, _) => mark_delays[1] = f64::from(v),
+                    Decoded::PolygonDelay(v, _) => mark_delays[2] = f64::from(v),
+                    Decoded::JumpTo { dist, .. } => us += f64::from(dist) / jump * 1000.0 + jump_delay,
+                    Decoded::MarkTo { dist, .. } => us += f64::from(dist) / mark * 1000.0 + mark_delays.iter().sum::<f64>(),
+                    Decoded::DelayTime(n) => us += f64::from(n) * 10.0,
+                    _ => {}
+                }
+            }
+            Duration::from_micros(us as u64)
+        })
+        .collect()
 }
 
 /// A marking job from GP's packets for `polys` (one list), with the shipping prelude and postlude.
@@ -113,7 +123,7 @@ fn mark_job(polys: &[Vec<[f64; 2]>], power: f64, speed: f64, repeats: u16) -> Lm
             _ => None,
         })
         .collect();
-    let packet_est = packets.iter().map(packet_est).collect();
+    let packet_est = packet_ests(&packets);
     LmcJob {
         prelude: vec![single(RESET_LIST, 0), single(WRITE_PORT, 1), single(FIBER_SET_MO, 1), single(GET_VERSION, 0)],
         lists: vec![LmcList { layer: LayerKey::color(0).unwrap(), pass: 1, packets, packet_est }],
@@ -157,6 +167,8 @@ type Lmc = DriverHandle<LmcBackend<FakeLmc>>;
 struct Rig {
     handle: Lmc,
     recorder: Arc<Recorder>,
+    /// The wire event (0-based, counted by the board's hook) at which the hook trips the stop; `usize::MAX`: never.
+    stop_at: Arc<AtomicUsize>,
 }
 
 /// Spawns a driver on a FakeLmc; `stop_at` trips the stop at that wire event (0-based) from the board's hook.
@@ -164,22 +176,26 @@ fn rig(cfg: SimConfig, clock: Arc<dyn Clock>, stop_at: Option<usize>) -> Rig {
     let fake = FakeLmc::new(cfg, Arc::clone(&clock));
     let recorder = fake.recorder();
     let stopper_slot: Arc<OnceLock<Stopper>> = Arc::new(OnceLock::new());
-    if let Some(k) = stop_at {
-        let slot = Arc::clone(&stopper_slot);
-        let mut n = 0usize;
-        fake.set_hook(Box::new(move |_w: &SimWire, _t: MonoTime| {
-            if n == k
-                && let Some(s) = slot.get()
-            {
-                s.stop();
-            }
-            n += 1;
-        }));
-    }
+    let target = Arc::new(AtomicUsize::new(stop_at.unwrap_or(usize::MAX)));
+    let (slot, at) = (Arc::clone(&stopper_slot), Arc::clone(&target));
+    let mut n = 0usize;
+    fake.set_hook(Box::new(move |_w: &SimWire, _t: MonoTime| {
+        if n == at.load(Ordering::SeqCst)
+            && let Some(s) = slot.get()
+        {
+            s.stop();
+        }
+        n += 1;
+    }));
     let backend = LmcBackend::new(fake, galvo()).with_provider_name("sim");
     let handle = spawn(backend, machine_id(), SESSION, Arc::clone(&clock));
     let _ = stopper_slot.set(handle.stopper());
-    Rig { handle, recorder }
+    Rig { handle, recorder, stop_at: target }
+}
+
+/// Arms the hook to trip the stop `k` wire events from now (call it while the driver is idle).
+fn stop_after(r: &Rig, k: usize) {
+    r.stop_at.store(r.recorder.snapshot().wire.len() + k, Ordering::SeqCst);
 }
 
 fn virtual_clock() -> Arc<dyn Clock> {
@@ -216,12 +232,40 @@ fn connected(r: &Rig) {
 
 /// Connect, frame the job once (a human frame of the job), then run it with a valid token.
 fn framed_run(r: &Rig, job: LmcJob, nonce: u64) {
-    connected(r);
+    if let Some(evs) = framed_run_or_stopped(r, job, nonce) {
+        panic!("stopped before the run was queued: {:?}", report_of(&evs));
+    }
+}
+
+/// [`framed_run`] for the randomised stops, which trip the latch at any wire event: the stop (or a fault, which the
+/// runtime follows with the emergency stop) can land in the connect or the frame, both stop states of SPEC §5.4
+/// ("connecting", "framing"). The machine then never reaches the state the next step waits for, so the run is not
+/// queued and the events up to the `Stopped` report are returned; `None` means the run was queued.
+fn framed_run_or_stopped(r: &Rig, job: LmcJob, nonce: u64) -> Option<Vec<DriverEvent>> {
+    r.handle.connect();
+    let evs = until(&r.handle, |e| idle(e) || stopped(e));
+    if evs.iter().any(stopped) {
+        return Some(evs);
+    }
     r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, BY_HUMAN);
-    until(&r.handle, |e| matches!(e, DriverEvent::FrameCompleted(_)));
-    until(&r.handle, idle);
+    // The frame's receipt, then its Idle (the outcome event comes before the state change).
+    for wanted in [frame_completed as fn(&DriverEvent) -> bool, idle] {
+        let evs = until(&r.handle, |e| wanted(e) || stopped(e));
+        if evs.iter().any(stopped) {
+            return Some(evs);
+        }
+    }
     let t = token(&job, nonce, far());
     r.handle.run(job, t);
+    None
+}
+
+fn frame_completed(e: &DriverEvent) -> bool {
+    matches!(e, DriverEvent::FrameCompleted(_))
+}
+
+fn finished(e: &DriverEvent) -> bool {
+    matches!(e, DriverEvent::Finished(_))
 }
 
 fn singles(wire: &[SimWire]) -> Vec<[u16; 6]> {
@@ -261,22 +305,35 @@ mod lmc {
     use super::*;
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_stop_p99_under_100ms_all_states() {
         // Real-time variant: SystemClock, 2 ms per transfer. Stops land in connect, framing, streaming, buffer full,
-        // packet in flight and BUSY (random wire events across all of them).
+        // packet in flight and BUSY (random wire events across all of them): one run in three trips the stop in the
+        // connect or the Frame Once, the others in the run itself (framed by one Loop pass, which is stopped first).
         let mut rng = Rng(0x0dd5_eed5);
         let mut latencies = Vec::new();
         for run in 0..runs("T6_RT_RUNS", 40) {
             let cfg = SimConfig { transfer_latency: Duration::from_millis(2), ..board(1 + (run % 4) as u8, Vec::new()) };
-            let stop_at = rng.below(160);
-            let r = rig(cfg, Arc::new(SystemClock::new()), Some(stop_at));
-            r.handle.connect();
-            r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, BY_HUMAN);
-            let job = mark_job(&many_segments(1100), 30.0, 1000.0, 1);
-            let t = token(&job, run as u64, far());
-            r.handle.run(job, t);
-            let evs = until(&r.handle, stopped);
+            let r = rig(cfg, Arc::new(SystemClock::new()), None);
+            let evs = if run % 3 == 0 {
+                r.stop_at.store(rng.below(160), Ordering::SeqCst);
+                r.handle.connect();
+                r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, BY_HUMAN);
+                until(&r.handle, stopped)
+            } else {
+                connected(&r);
+                r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Loop, BY_HUMAN);
+                until(&r.handle, frame_completed);
+                let ack = r.handle.stopper().stop_and_wait(Duration::from_secs(2));
+                assert!(ack.report.is_some_and(|x| x.confirmed), "run {run}: the Loop frame stopped");
+                until(&r.handle, stopped);
+                let job = mark_job(&many_segments(1100), 30.0, 1000.0, 1);
+                let t = token(&job, run as u64, far());
+                stop_after(&r, rng.below(150));
+                r.handle.run(job, t);
+                let evs = until(&r.handle, |e| stopped(e) || finished(e));
+                assert!(evs.iter().any(|e| matches!(e, DriverEvent::State(MachineState::Running { .. }))), "run {run}: the stop landed in the run");
+                evs
+            };
             let report = report_of(&evs);
             assert!(report.mo_closed && report.ports_zero, "run {run}: {report:?}");
             latencies.push(report.elapsed);
@@ -289,29 +346,28 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_no_write_while_not_ready() {
         let mut rng = Rng(0x1234_5678);
         for run in 0..runs("T6_RUNS", 200) {
             let depth = 1 + rng.below(8) as u8;
             let stop_at = rng.below(400);
             let r = rig(board(depth, Vec::new()), virtual_clock(), Some(stop_at));
-            framed_run(&r, mark_job(&many_segments(1100), 30.0, 1000.0, 1), run as u64);
-            until(&r.handle, |e| stopped(e) || matches!(e, DriverEvent::Finished(_)));
+            if framed_run_or_stopped(&r, mark_job(&many_segments(1100), 30.0, 1000.0, 1), run as u64).is_none() {
+                until(&r.handle, |e| stopped(e) || finished(e));
+            }
             let rec = r.recorder.snapshot();
             assert_eq!(rec.writes_while_not_ready, 0, "run {run} depth {depth} stop at {stop_at}");
         }
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_mo_closed_ports_zero_after_every_stop() {
         let mut rng = Rng(0xfeed_beef);
         for run in 0..runs("T6_RUNS", 200) {
             let stop_at = rng.below(300);
             let r = rig(board(1 + rng.below(4) as u8, Vec::new()), virtual_clock(), Some(stop_at));
-            framed_run(&r, mark_job(&many_segments(600), 30.0, 1000.0, 1), run as u64);
-            let evs = until(&r.handle, |e| stopped(e) || matches!(e, DriverEvent::Finished(_)));
+            let evs = framed_run_or_stopped(&r, mark_job(&many_segments(600), 30.0, 1000.0, 1), run as u64)
+                .unwrap_or_else(|| until(&r.handle, |e| stopped(e) || finished(e)));
             let rec = r.recorder.snapshot();
             let (mo, port) = final_mo_and_port(&rec.wire);
             assert_eq!((mo, port), (Some(0), Some(0)), "run {run} stop at {stop_at}");
@@ -322,7 +378,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_busy_20s_completes_without_mo_close() {
         // B1: a job the board executes for ~20 s completes; MO closes only after BUSY clears.
         let r = rig(board(8, Vec::new()), virtual_clock(), None);
@@ -336,7 +391,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_abort_no_write_while_not_ready() {
         // B2: a board that never raises READY: no 3072-byte write during the abort; MO(0) and WritePort(0) still go.
         let r = rig(board(8, vec![Fault::ReadyNeverReturns { after_execute: false }]), virtual_clock(), None);
@@ -350,7 +404,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_ready_never_returns_stopped_within_2s() {
         let clock = virtual_clock();
         let r = rig(board(8, vec![Fault::ReadyNeverReturns { after_execute: true }]), Arc::clone(&clock), None);
@@ -365,7 +418,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_watchdog_only_without_progress() {
         // A board at buffer depth 1 progresses slowly but steadily: never stopped by the watchdog.
         let r = rig(board(1, Vec::new()), virtual_clock(), None);
@@ -375,7 +427,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_framing_records_zero_emission() {
         for mode in [FrameMode::Once, FrameMode::Loop] {
             let r = rig(board(8, Vec::new()), virtual_clock(), None);
@@ -392,7 +443,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_run_ahead_cap_packets_and_seconds() {
         // At every packet write: ≤ 3 packets sent but not yet executed (by the time model the driver uses), and
         // ≤ 2 s queued after the write unless the board held nothing before it.
@@ -438,7 +488,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_slow_packets_execute_without_deadlock() {
         // Every packet estimated > 2 s (the business-card raster at 300 mm/s class): ExecuteList after packet 1.
         let r = rig(board(8, Vec::new()), virtual_clock(), None);
@@ -448,15 +497,15 @@ mod lmc {
         framed_run(&r, job, 1);
         let evs = until(&r.handle, |e| matches!(e, DriverEvent::Finished(_) | DriverEvent::Fault(_)));
         assert!(matches!(evs.last(), Some(DriverEvent::Finished(Outcome::Finished { .. }))), "{:?}", evs.last());
+        // The job's list starts at its Fiber_SetMo(1) (the Frame Once's lighting list came before it).
         let wire = r.recorder.snapshot().wire;
-        let first_packet = wire.iter().position(|w| matches!(w, SimWire::Packet { .. })).unwrap();
-        let exec = wire.iter().position(|w| matches!(w, SimWire::Single { words, .. } if words[0] == EXECUTE_LIST)).unwrap();
-        let packets_before_exec = wire[first_packet..exec].iter().filter(|w| matches!(w, SimWire::Packet { .. })).count();
+        let start = wire.iter().position(|w| matches!(w, SimWire::Single { words, .. } if words[0] == FIBER_SET_MO && words[1] == 1)).unwrap();
+        let exec = start + wire[start..].iter().position(|w| matches!(w, SimWire::Single { words, .. } if words[0] == EXECUTE_LIST)).unwrap();
+        let packets_before_exec = wire[start..exec].iter().filter(|w| matches!(w, SimWire::Packet { .. })).count();
         assert_eq!(packets_before_exec, 1);
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_buffer_depth_1_and_2_complete() {
         for depth in [1u8, 2] {
             let r = rig(board(depth, Vec::new()), virtual_clock(), None);
@@ -474,7 +523,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_inflight_packet_completed_before_stop_execute() {
         // Stop at the wire event of a packet write (latency 2 ms keeps it in flight): it completes, then StopExecute.
         let cfg = SimConfig { transfer_latency: Duration::from_millis(2), ..board(8, Vec::new()) };
@@ -495,7 +543,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_abort_mid_list_sends_no_execute_list() {
         // Stop right after ExecuteList: the abort's dummy packet (if READY) is not followed by ExecuteList.
         let probe = rig(board(8, Vec::new()), virtual_clock(), None);
@@ -511,21 +558,29 @@ mod lmc {
         let stop = wire.iter().position(|w| matches!(w, SimWire::Single { words, .. } if words[0] == STOP_EXECUTE)).unwrap();
         assert!(!singles(&wire[stop..]).iter().any(|w| w[0] == EXECUTE_LIST), "no ExecuteList in a mid-list abort");
 
-        // After a finished list (idle), the abort's dummy packet is followed by ExecuteList (OM v1 parity) when the
-        // protocol crate provides the dummy packet.
+        // After a finished list (idle, READY), the abort writes the dummy end-of-list packet (byte-exact with v0's,
+        // `openlaser_lmc::abort_packet`), then SetEndOfList and ExecuteList (OM v1 parity).
         let idle_rig = rig(board(8, Vec::new()), virtual_clock(), None);
         connected(&idle_rig);
         let before = idle_rig.recorder.snapshot().wire.len();
         idle_rig.handle.stopper().stop_and_wait(Duration::from_secs(2));
         let wire = idle_rig.recorder.snapshot().wire;
         let abort = &wire[before..];
-        if abort.iter().any(|w| matches!(w, SimWire::Packet { .. })) {
-            assert!(singles(abort).iter().any(|w| w[0] == EXECUTE_LIST));
-        }
+        let dummy = openlaser_lmc::abort_packet().sha256_hex();
+        let packets: Vec<&String> = abort
+            .iter()
+            .filter_map(|w| match w {
+                SimWire::Packet { sha256, .. } => Some(sha256),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(packets, vec![&dummy], "one dummy end-of-list packet");
+        let after = abort.iter().position(|w| matches!(w, SimWire::Packet { .. })).unwrap();
+        let next: Vec<u16> = singles(&abort[after..]).iter().map(|w| w[0]).take(2).collect();
+        assert_eq!(next, vec![0x0019, EXECUTE_LIST], "SetEndOfList, then ExecuteList on an idle board");
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_dead_man_handle_drop_stops() {
         let r = rig(board(8, Vec::new()), Arc::new(SystemClock::new()), None);
         connected(&r);
@@ -537,7 +592,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_handle_drop_waits_for_stop_report() {
         // The dropping thread returns only after the abort reached the wire (≤ 500 ms).
         let r = rig(SimConfig { transfer_latency: Duration::from_millis(2), ..board(8, Vec::new()) }, Arc::new(SystemClock::new()), None);
@@ -553,7 +607,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_panic_guard_stops() {
         // A transport that panics mid-run (wrapping FakeLmc): contained, then the emergency stop.
         struct Panicky(FakeLmc, u32);
@@ -598,7 +651,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_driver_never_blocks_on_unpolled_events() {
         // Nobody reads events during a long job (> 100 000 transfers of traffic); the stop is as fast as ever.
         let r = rig(board(8, Vec::new()), Arc::new(SystemClock::new()), None);
@@ -611,7 +663,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_frame_receipt_only_after_executed_pass() {
         // Once: the receipt comes after a status read showing !BUSY after the list's ExecuteList.
         let clock = virtual_clock();
@@ -659,7 +710,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_stop_after_queue_cancels_queued_run() {
         let r = rig(board(8, Vec::new()), virtual_clock(), None);
         connected(&r);
@@ -679,7 +729,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_run_refused_when_bytes_differ_from_token() {
         let r = rig(board(8, Vec::new()), virtual_clock(), None);
         connected(&r);
@@ -697,7 +746,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_run_refused_while_framing() {
         let r = rig(board(8, Vec::new()), virtual_clock(), None);
         connected(&r);
@@ -712,19 +760,29 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_transfer_timeout_faults_and_stops() {
-        let r = rig(board(8, vec![Fault::ReplyTimeouts { every: 40 }]), virtual_clock(), None);
+        // The reply that never comes lands in the run: count the replies of a fault-free connect and Frame Once first
+        // (deterministic on the virtual clock), then let the 25th reply of the run time out.
+        let probe = rig(board(8, Vec::new()), virtual_clock(), None);
+        connected(&probe);
+        probe.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, BY_HUMAN);
+        until(&probe.handle, frame_completed);
+        until(&probe.handle, idle);
+        let replies = probe.recorder.snapshot().wire.iter().filter(|w| matches!(w, SimWire::Read { .. })).count() as u32;
+        let r = rig(board(8, vec![Fault::ReplyTimeouts { every: replies + 25 }]), virtual_clock(), None);
         framed_run(&r, mark_job(&many_segments(1100), 30.0, 1000.0, 1), 1);
         let evs = until(&r.handle, |e| matches!(e, DriverEvent::State(MachineState::Fault | MachineState::StopNotConfirmed)));
-        assert!(evs.iter().any(|e| matches!(e, DriverEvent::Fault(openlaser_driver::DriverError::Transport(_)))), "a transfer fault, not a retry");
+        assert!(evs.iter().any(|e| matches!(e, DriverEvent::State(MachineState::Running { .. }))), "the timeout landed in the run");
+        assert!(
+            evs.iter().any(|e| matches!(e, DriverEvent::Fault(openlaser_driver::DriverError::Transport(m)) if m.contains("no reply within 250 ms"))),
+            "a transfer fault after transfer_timeout_ms, not a retry"
+        );
         let wire = r.recorder.snapshot().wire;
         assert!(singles(&wire).iter().any(|w| w[0] == STOP_EXECUTE), "emergency stop after the fault");
         assert_eq!(singles(&wire).iter().filter(|w| w[0] == GET_SERIAL_NO).count(), 1, "no reconnect, no reset");
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_run_refused_without_own_receipt() {
         let r = rig(board(8, Vec::new()), virtual_clock(), None);
         connected(&r);
@@ -735,7 +793,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_run_refused_tool_layers_receipt() {
         let r = rig(board(8, Vec::new()), virtual_clock(), None);
         connected(&r);
@@ -748,7 +805,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn arm_token_single_use() {
         let r = rig(board(8, Vec::new()), virtual_clock(), None);
         let job = mark_job(&box10(), 30.0, 1000.0, 1);
@@ -760,7 +816,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn arm_token_expired_refused() {
         let clock = Arc::new(VirtualClock::new());
         let r = rig(board(8, Vec::new()), clock.clone(), None);
@@ -775,7 +830,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_business_card_emission_matches_design() {
         // The business card's vector-engrave layer (304 paths, 1750 points): FakeLmc's independently decoded burn
         // equals the design's segments within one galvo unit.
@@ -800,13 +854,14 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn t6_session_init_once() {
         let r = rig(board(8, Vec::new()), virtual_clock(), None);
         let job = mark_job(&box10(), 30.0, 1000.0, 1);
         framed_run(&r, job.clone(), 1);
         until(&r.handle, |e| matches!(e, DriverEvent::Finished(_)));
         r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, BY_HUMAN);
+        // The run's own Idle follows its Finished event: wait for this frame's receipt before its Idle.
+        until(&r.handle, frame_completed);
         until(&r.handle, idle);
         let t = token(&job, 2, far());
         r.handle.run(job, t);
@@ -818,7 +873,6 @@ mod lmc {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn frame_once_outcome_and_repeat_counts() {
         // Sanity of the Once path as the engine sees it: one receipt, Idle after, no MO.
         let r = rig(board(8, Vec::new()), virtual_clock(), None);
@@ -983,7 +1037,6 @@ mod grbl {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn grbl_never_moves_on_connect() {
         let mut g = grbl(gantry([400.0, 400.0], 1000), None, None);
         let mut cx = Cx::new(&g.latch, &g.tx, &*g.clock);
@@ -995,7 +1048,6 @@ mod grbl {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn grbl_preflight_refusals() {
         // fake_grbl's settings: $30=1000, $32=1, $130=$131=400.
         for (m, expect) in [(gantry([600.0, 400.0], 1000), "$130"), (gantry([400.0, 400.0], 255), "$30")] {
@@ -1012,7 +1064,6 @@ mod grbl {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn grbl_error_sends_hold_and_reset() {
         let mut g = grbl(gantry([400.0, 400.0], 1000), Some(12), None);
         let mut cx = Cx::new(&g.latch, &g.tx, &*g.clock);
@@ -1026,7 +1077,6 @@ mod grbl {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn grbl_stop_under_100ms() {
         let mut g = grbl(gantry([400.0, 400.0], 1000), None, Some(40));
         let mut cx = Cx::new(&g.latch, &g.tx, &*g.clock);
@@ -1038,7 +1088,6 @@ mod grbl {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn grbl_char_counting_respects_rx() {
         let mut g = grbl(gantry([400.0, 400.0], 1000), None, None);
         let mut cx = Cx::new(&g.latch, &g.tx, &*g.clock);

@@ -1,9 +1,6 @@
 //! rust-v1 session goldens (SPEC §6.2): the wire event stream of the shipping session on a READY FakeLmc, written to
 //! `tests/golden/rust-v1-candidate/session/` with `UPDATE_RUST_V1=1` and compared byte for byte otherwise. They stay
 //! candidates until Luiz signs `docs/DIVERGENCES.md` (D13), then move to `tests/golden/rust-v1/`.
-//!
-//! Needs WP4's FakeLmc and encoders (and, for the marking half, the `openlaser-plan` dev-dependency: see
-//! [`mark_box10_job`]), so the tests are `#[ignore = "needs I1"]`.
 
 // Test code: clippy.toml allows these inside #[test] fns; the shared helpers of this file need it spelled out.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
@@ -50,59 +47,46 @@ fn frame_box10() -> LmcFrameJob {
     encode_frame(&plan, &galvo()).expect("encode_frame")
 }
 
-/// GOLD `mark_box10` through the SHIPPING encoder: the 10 mm box at 50 %, 30 kHz, 200 ns, 1000 mm/s.
-///
-/// Building its `EmitPlan` needs `openlaser_plan::{CutQ, GalvoCutQ, ResolvedTimings}`, which nothing in the driver's
-/// dependency closure re-exports, so it cannot be named here until `openlaser-plan` is a dev-dependency of the
-/// driver (REQUEST: a one-line `Cargo.toml` + `Cargo.lock` change for the integrator). Then this body becomes
-/// `Ok(shipping_mark_box10!())`.
-fn mark_box10_job() -> Result<LmcJob, String> {
-    Err("needs the openlaser-plan dev-dependency of openlaser-driver (REQUEST for I1)".to_owned())
-}
-
-/// The shipping mark_box10 `LmcJob` (the words of GOLD `mark_box10`; R05 §1.5): expands only once
-/// `openlaser-plan` is a dev-dependency.
-#[allow(unused_macros)]
-macro_rules! shipping_mark_box10 {
-    () => {{
-        use openlaser_plan::{CutQ, GalvoCutQ, ResolvedTimings, Section};
-        use openlaser_types::galvo::PulseDecision;
-        use openlaser_types::{DeviceKind, Hz, LayerKey, MmPerS, ObjectId, Percent, SectionMode};
-        let q = GalvoCutQ {
-            requested_speed: MmPerS::new(1000.0).unwrap(),
-            speed_units: 276,
-            actual_speed_mm_s: 276.0 * 236.68 * 1000.0 / 65535.0,
-            power: Percent::new(50.0).unwrap(),
-            mark_current: 2048,
-            frequency: Hz::new(30_000).unwrap(),
-            q_period: 667,
-            pulse: PulseDecision::Exact(200),
-            timings: ResolvedTimings {
-                laser_on: (100, 0),
-                laser_off: (100, 0),
-                polygon: (100, 0),
-                jump_delay_short: (8, 0),
-                jump_delay_long: (200, 0),
-                jump_speed_units: 830,
-                mo_settle_10us: 800,
-                first_jump_settle_10us: 100,
-            },
-        };
-        let section = Section {
-            layer: LayerKey::color(0).unwrap(),
-            layer_name: "C00".to_owned(),
-            sub: 0,
-            pass: 1,
-            of: 1,
-            mode: SectionMode::Line,
-            cut: CutQ::Galvo(q),
-            paths: vec![Polyline(box10())],
-            objects: vec![ObjectId(1)],
-            estimate: Duration::from_millis(50),
-        };
-        let emit = openlaser_safety::testing::emit_plan_unchecked(vec![section], FP, machine_id(), DeviceKind::GalvoLmc, 1);
-        openlaser_lmc::encode_job(&emit, &galvo()).expect("encode_job")
-    }};
+/// GOLD `mark_box10` through the SHIPPING encoder: the 10 mm box at 50 %, 30 kHz, 200 ns, 1000 mm/s (the words of
+/// GOLD `mark_box10`; R05 §1.5).
+fn mark_box10_job() -> LmcJob {
+    use openlaser_plan::{CutQ, GalvoCutQ, ResolvedTimings, Section};
+    use openlaser_types::galvo::PulseDecision;
+    use openlaser_types::{DeviceKind, Hz, LayerKey, MmPerS, ObjectId, Percent, SectionMode};
+    let q = GalvoCutQ {
+        requested_speed: MmPerS::new(1000.0).unwrap(),
+        speed_units: 276,
+        actual_speed_mm_s: 276.0 * 236.68 * 1000.0 / 65535.0,
+        power: Percent::new(50.0).unwrap(),
+        mark_current: 2048,
+        frequency: Hz::new(30_000).unwrap(),
+        q_period: 667,
+        pulse: PulseDecision::Exact(200),
+        timings: ResolvedTimings {
+            laser_on: (100, 0),
+            laser_off: (100, 0),
+            polygon: (100, 0),
+            jump_delay_short: (8, 0),
+            jump_delay_long: (200, 0),
+            jump_speed_units: 830,
+            mo_settle_10us: 800,
+            first_jump_settle_10us: 100,
+        },
+    };
+    let section = Section {
+        layer: LayerKey::color(0).unwrap(),
+        layer_name: "C00".to_owned(),
+        sub: 0,
+        pass: 1,
+        of: 1,
+        mode: SectionMode::Line,
+        cut: CutQ::Galvo(q),
+        paths: vec![Polyline(box10())],
+        objects: vec![ObjectId(1)],
+        estimate: Duration::from_millis(50),
+    };
+    let emit = openlaser_safety::testing::emit_plan_unchecked(vec![section], FP, machine_id(), DeviceKind::GalvoLmc, 1);
+    openlaser_lmc::encode_job(&emit, &galvo()).expect("encode_job")
 }
 
 fn ready_board() -> SimConfig {
@@ -174,7 +158,6 @@ fn spawn_ready() -> (DriverHandle<LmcBackend<FakeLmc>>, Arc<Recorder>) {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn rust_v1_session_connect_frame_box10() {
     let (h, recorder) = spawn_ready();
     h.connect();
@@ -186,11 +169,10 @@ fn rust_v1_session_connect_frame_box10() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn rust_v1_session() {
     // connect + frame_box10 + mark_box10 on a READY board equals the candidate stream (the frame comes first: the
     // driver runs nothing without its own executed-pass receipt).
-    let job = mark_box10_job().expect("the shipping mark_box10 job");
+    let job = mark_box10_job();
     let (h, recorder) = spawn_ready();
     h.connect();
     until(&h, idle);

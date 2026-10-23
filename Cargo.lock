@@ -3087,6 +3087,7 @@ dependencies = [
  "openlaser-lmc",
  "openlaser-lmc-sim",
  "openlaser-machine",
+ "openlaser-plan",
  "openlaser-safety",
  "openlaser-testkit",
  "openlaser-types",

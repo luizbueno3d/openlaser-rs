@@ -1,6 +1,6 @@
 //! Unit tests over the session internals (pending ARM, driver-event folding, history) and the WP6 acceptance tests
-//! that run before the other packages' behaviour lands. Tests that need real plans, encoders or drivers live in
-//! `tests/engine.rs` and are `#[ignore = "needs I1"]` until the integrator merges them.
+//! that run without the other packages' behaviour. Tests that need real plans, encoders or drivers live in
+//! `tests/engine.rs`.
 
 #[cfg(test)]
 use openlaser_arm::testing::token_for_tests;
@@ -1324,7 +1324,6 @@ fn agents_cannot_quit_while_a_machine_works() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn field_wider_than_rated_is_refused() {
     // H27: the field grows only as far as the lens was cleared; WP1's validate_profile decides, the engine refuses and
     // nothing reaches the store.

@@ -41,7 +41,7 @@ const WATCHDOG_CAP: Duration = Duration::from_secs(24 * 3600);
 
 /// The USB-shaped seam the session drives: `LmcTransport` with the packet type left open.
 pub(crate) trait Wire: Send {
-    type Pkt;
+    type Pkt: Clone;
     fn submit_single(&mut self, cmd: Single) -> Result<(), XferError>;
     fn poll_single(&mut self, slice: Duration) -> Result<Option<Option<[u16; 4]>>, XferError>;
     fn submit_packet(&mut self, p: &Self::Pkt) -> Result<(), XferError>;
@@ -314,7 +314,8 @@ fn ms(d: Duration) -> u128 {
 pub(crate) struct Session<W: Wire> {
     pub(crate) wire: W,
     cfg: SessionCfg,
-    abort_packet: Option<W::Pkt>,
+    /// The abort's dummy end-of-list packet (`openlaser_lmc::abort_packet` on a real wire).
+    abort_packet: W::Pkt,
     packet_in_flight: bool,
     read_abandoned: bool,
     /// `ExecuteList` was sent for the current list and its !BUSY not yet seen (OM v1 `_list_executing`).
@@ -324,7 +325,7 @@ pub(crate) struct Session<W: Wire> {
 }
 
 impl<W: Wire> Session<W> {
-    pub(crate) fn new(wire: W, cfg: SessionCfg, abort_packet: Option<W::Pkt>) -> Self {
+    pub(crate) fn new(wire: W, cfg: SessionCfg, abort_packet: W::Pkt) -> Self {
         Session { wire, cfg, abort_packet, packet_in_flight: false, read_abandoned: false, list_executing: false, mo_open: false }
     }
 
@@ -687,9 +688,8 @@ impl<W: Wire> Session<W> {
         self.abort_single(lmc_ops::single(RESET_LIST, 0), cx, mode, &mut notes);
 
         let ready = self.wait_status(cx, mode, ABORT_READY_WAIT, StatusWord::ready, &mut notes).is_some();
-        if !ready {
-            notes.push("board not READY within 50 ms: no dummy end-of-list packet (never write while not READY)".to_owned());
-        } else if let Some(dummy) = self.abort_packet.take() {
+        if ready {
+            let dummy = self.abort_packet.clone();
             let sent = match self.packet(&dummy, "abort", cx, mode) {
                 Ok(()) => true,
                 Err(Halt::Fault(e)) => {
@@ -698,7 +698,6 @@ impl<W: Wire> Session<W> {
                 }
                 Err(Halt::Stopped) => false,
             };
-            self.abort_packet = Some(dummy);
             if sent {
                 self.abort_single(lmc_ops::single(SET_END_OF_LIST, 0), cx, mode, &mut notes);
                 if self.list_executing {
@@ -708,7 +707,7 @@ impl<W: Wire> Session<W> {
                 }
             }
         } else {
-            notes.push("no dummy end-of-list packet: the protocol crate provides none in this build".to_owned());
+            notes.push("board not READY within 50 ms: no dummy end-of-list packet (never write while not READY)".to_owned());
         }
 
         let mo_second = self.abort_single(lmc_ops::single(FIBER_SET_MO, 0), cx, mode, &mut notes);
@@ -1040,7 +1039,7 @@ mod tests {
 
         fn session(&self, faults: Faults) -> Session<Board> {
             let board = Board::new(self.clock.clone(), Faults { buffer_depth: faults.buffer_depth.max(1), ..faults });
-            Session::new(board, SessionCfg::from_machine(&machine()).unwrap(), Some(Pkt { id: 9999, exec: Duration::ZERO }))
+            Session::new(board, SessionCfg::from_machine(&machine()).unwrap(), Pkt { id: 9999, exec: Duration::ZERO })
         }
     }
 
@@ -1269,7 +1268,7 @@ mod tests {
                 latch.trip();
             }
         }));
-        let mut s = Session::new(board, SessionCfg::from_machine(&machine()).unwrap(), Some(Pkt { id: 9999, exec: Duration::ZERO }));
+        let mut s = Session::new(board, SessionCfg::from_machine(&machine()).unwrap(), Pkt { id: 9999, exec: Duration::ZERO });
         let (pk, est) = packets(4, Duration::from_millis(100));
         assert_eq!(run_one_list(&rig, &mut s, &pk, &est), Err(Halt::Stopped));
         assert!(s.packet_in_flight, "the stop was seen while packet #2 was still in flight");
@@ -1292,7 +1291,7 @@ mod tests {
                     latch.trip();
                 }
             }));
-        let mut s = Session::new(board, SessionCfg::from_machine(&machine()).unwrap(), None);
+        let mut s = Session::new(board, SessionCfg::from_machine(&machine()).unwrap(), Pkt { id: 9999, exec: Duration::ZERO });
         let (pk, est) = packets(3, Duration::from_millis(100));
         assert_eq!(run_one_list(&rig, &mut s, &pk, &est), Err(Halt::Stopped));
         let report = s.emergency(&rig.cx());
@@ -1314,7 +1313,7 @@ mod tests {
                 latch.trip();
             }
         }));
-        let mut s = Session::new(board, SessionCfg::from_machine(&machine()).unwrap(), Some(Pkt { id: 9999, exec: Duration::ZERO }));
+        let mut s = Session::new(board, SessionCfg::from_machine(&machine()).unwrap(), Pkt { id: 9999, exec: Duration::ZERO });
         let (pk, est) = packets(1, Duration::from_secs(5));
         assert_eq!(run_one_list(&rig, &mut s, &pk, &est), Err(Halt::Stopped));
         let _ = s.emergency(&rig.cx());
@@ -1383,7 +1382,7 @@ mod tests {
                     latch.trip();
                 }
             }));
-            let mut s = Session::new(board, SessionCfg::from_machine(&machine()).unwrap(), Some(Pkt { id: 9999, exec: Duration::ZERO }));
+            let mut s = Session::new(board, SessionCfg::from_machine(&machine()).unwrap(), Pkt { id: 9999, exec: Duration::ZERO });
             let (pk, est) = packets(5, Duration::from_millis(400));
             let res = run_one_list(&rig, &mut s, &pk, &est);
             let report = s.emergency(&rig.cx());
@@ -1432,7 +1431,7 @@ mod tests {
                 latch.trip(); // stop during pass 4, before its !BUSY
             }
         }));
-        let mut s = Session::new(board, SessionCfg::from_machine(&machine()).unwrap(), None);
+        let mut s = Session::new(board, SessionCfg::from_machine(&machine()).unwrap(), Pkt { id: 9999, exec: Duration::ZERO });
         let (pass, _) = packets(1, Duration::from_millis(300));
         let spec = FrameSpec { once: &pass, once_est: Duration::from_secs(2), once_passes: 1, pass: &pass, pass_est: Duration::from_millis(300) };
         let mut receipts = Vec::new();

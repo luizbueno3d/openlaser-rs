@@ -2,8 +2,8 @@
 //! fingerprint (S21) and the properties of §6.5.
 //!
 //! Projects are built as literals (30 colour layers from the JPT M7 defaults), not through `Project::new`, so the
-//! layer table is under the test's control. Every test that needs real geometry (WP1's `Geom::to_bez`, `flatten`,
-//! `hatch`), the OM importer (WP2) or the galvo encoders (WP4) is `#[ignore = "needs I1"]` (§7.0 rule 6).
+//! layer table is under the test's control. The tests that need real geometry (WP1's `Geom::to_bez`, `flatten`,
+//! `hatch`), the OM importer (WP2) or the galvo encoders (WP4) run since I1 merged those packages.
 
 // An integration-test crate is test code; clippy's in-test allowances only reach `#[test]` functions, not helpers.
 #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
@@ -166,7 +166,6 @@ fn polylines_of(v: &serde_json::Value) -> Vec<Vec<[f64; 2]>> {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn plan_business_card_matches_om() {
     let golden = openlaser_testkit::golden_dir();
     let ws = openlaser_import::om::parse_workspace(&std::fs::read(golden.join("inputs").join("workspace.json")).unwrap()).unwrap();
@@ -227,7 +226,6 @@ fn plan_business_card_matches_om() {
 // ---- sections, facts, frames ----------------------------------------------------------------------------------
 
 #[test]
-#[ignore = "needs I1"]
 fn plan_orders_layers_sub_layers_passes_and_global_passes() {
     let m = machine();
     let d = m.layer_defaults.clone();
@@ -252,7 +250,6 @@ fn plan_orders_layers_sub_layers_passes_and_global_passes() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn plan_fill_hatches_closed_shapes_and_notes_open_ones() {
     let m = machine();
     let d = m.layer_defaults.clone();
@@ -319,7 +316,6 @@ fn plan_records_facts_never_drops() {
 
 /// B6: a hidden layer with Output on is recorded (safety refuses it) and still framed, Contour and Bounds alike.
 #[test]
-#[ignore = "needs I1"]
 fn plan_frames_hidden_output_layers() {
     let m = machine();
     let mut p = project(&m, vec![rect(1, C0, 0.0, 0.0, 10.0, 10.0), rect(2, C1, 30.0, 0.0, 10.0, 10.0)]);
@@ -340,7 +336,6 @@ fn plan_frames_hidden_output_layers() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn plan_selected_only_and_tool_frame() {
     let m = machine();
     let mut p = project(&m, vec![rect(1, C0, 0.0, 0.0, 10.0, 10.0), rect(2, C0, 30.0, 0.0, 10.0, 10.0), rect(3, LayerKey::Tool(1), 0.0, 0.0, 80.0, 80.0)]);
@@ -356,7 +351,6 @@ fn plan_selected_only_and_tool_frame() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn plan_applies_the_machine_transform_after_hatching() {
     let mut m = machine();
     if let Kinematics::Galvo(g) = &mut m.kind {
@@ -370,7 +364,6 @@ fn plan_applies_the_machine_transform_after_hatching() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn fingerprint_changes_with_power() {
     let m = machine();
     let p = project(&m, vec![rect(1, C0, 0.0, 0.0, 10.0, 10.0)]);
@@ -394,7 +387,6 @@ fn fingerprint_changes_with_power() {
 }
 
 #[test]
-#[ignore = "needs I1"]
 fn estimate_galvo_counts_marks_jumps_and_delays() {
     let m = machine();
     let g = galvo(&m);
@@ -450,7 +442,6 @@ proptest! {
     /// of the traced closed contours; with Bounds, everything lies inside the rectangle (B6). `hide` hides C00
     /// and/or C01 with Output still on: a hidden emitting layer is recorded and must be framed all the same.
     #[test]
-    #[ignore = "needs I1"]
     fn prop_frame_covers_burn((shapes, cross, passes, interval) in design(), bounds in any::<bool>(), hide in any::<(bool, bool)>()) {
         let m = machine();
         let mut p = design_project(&m, shapes, cross, passes, interval);
@@ -498,7 +489,6 @@ proptest! {
     /// SPEC §5.2 rule 4: the speed is encoded once, from the requested value, to whole units (trunc); the displayed
     /// actual speed is never re-encoded. F ∈ [100, 300].
     #[test]
-    #[ignore = "needs I1"]
     fn prop_speed_units_stable_over_field(f in 100.0f64..300.0, v in 0.5f64..6000.0) {
         let mut m = machine();
         let g = match &mut m.kind { Kinematics::Galvo(g) => g, Kinematics::Gantry(_) => panic!("galvo") };
@@ -516,7 +506,6 @@ proptest! {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn prop_plan_deterministic((shapes, cross, passes, interval) in design()) {
         let m = machine();
         let p = design_project(&m, shapes, cross, passes, interval);
@@ -528,7 +517,6 @@ proptest! {
 
     /// S21: frame style and source are framing choices, not part of the emission identity.
     #[test]
-    #[ignore = "needs I1"]
     fn prop_fingerprint_ignores_frame_style((shapes, cross, passes, interval) in design()) {
         let m = machine();
         let p = design_project(&m, shapes, cross, passes, interval);

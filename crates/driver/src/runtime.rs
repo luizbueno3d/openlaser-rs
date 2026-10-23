@@ -1005,7 +1005,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs I1"] // ArmToken::check (WP3) refuses every token until I1
     fn run_finishes_with_a_valid_token_and_own_receipt() {
         let calls = Arc::new(Calls::default());
         let h = spawn_mock(Mock::new(&calls), Arc::new(SystemClock::new()));
@@ -1018,7 +1017,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs I1"] // ArmToken::check (WP3) refuses every token until I1
     fn arm_token_single_use() {
         let calls = Arc::new(Calls::default());
         let h = spawn_mock(Mock::new(&calls), Arc::new(SystemClock::new()));
