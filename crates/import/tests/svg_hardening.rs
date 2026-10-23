@@ -338,3 +338,37 @@ fn clipped_svg_geometry_is_refused() {
     let no_size = r##"<svg viewBox="0 0 10 10"><path d="M0 0L20 20" stroke="#000000"/></svg>"##;
     assert_eq!(run(svg(no_size)).expect("a nested svg without a size is not clipped").shapes.len(), 1);
 }
+
+// ---- the guard's own work stays linear ------------------------------------------------------------------------------
+
+/// Many elements sharing one id, each named by many references: `<use>` resolves the way usvg does (the first element
+/// with that id), each paint id is looked up once, and a gradient `href` naming a shared id is refused.
+#[test]
+fn shared_ids_keep_the_guard_linear() {
+    let uses = svg(&format!(
+        r##"<defs><path id="a" d="M0 0L1 1" stroke="#000000"/>{}</defs>{}"##,
+        r#"<g id="a"/>"#.repeat(100_000),
+        r##"<use href="#a"/>"##.repeat(20_000)
+    ));
+    assert_eq!(run(uses).expect("imports").shapes.len(), 20_000);
+    let gradients = svg(&format!(
+        r##"<defs>{}</defs>{}"##,
+        r##"<linearGradient id="g" href="#g"/>"##.repeat(50_000),
+        r##"<rect width="1" height="1" fill="url(#g)"/>"##.repeat(50_000)
+    ));
+    assert_not_implemented(run(gradients), "several elements share");
+}
+
+/// An ordinary large drawing (class styles, a shared gradient, 50,000 paths) imports within the time bound.
+#[test]
+fn large_ordinary_svg_imports_quickly() {
+    let paths: String =
+        (0..50_000).map(|i| format!(r#"<path class="{}" d="M{} 1L{} 9"/>"#, if i % 2 == 0 { "cut" } else { "fill" }, i % 20, (i + 3) % 20)).collect();
+    let doc = svg(&format!(
+        r##"<style>.cut{{fill:none;stroke:#000000;stroke-width:0.1}} .fill{{fill:url(#g)}}</style><defs><linearGradient id="g"><stop offset="0" stop-color="#000000"/><stop offset="1" stop-color="#ffffff"/></linearGradient></defs>{paths}"##
+    ));
+    let started = Instant::now();
+    let imported = run(doc).expect("imports");
+    assert_eq!(imported.shapes.len(), 50_000);
+    eprintln!("50,000 paths in {:?}", started.elapsed());
+}

@@ -219,7 +219,13 @@ pub(crate) struct SvgFacts {
     pub sheet_hides: bool,
 }
 
-type Ids<'a, 'input> = HashMap<&'a str, Vec<Node<'a, 'input>>>;
+/// Elements by id: `all` holds every element carrying an id usvg resolves `url(#…)` and gradient `href`s against
+/// (`id`, `xml:id`, `svg:id`; conservative: usvg picks one of them); `first_plain` is usvg's own map for `<use>`,
+/// the first element in document order with a plain `id`.
+struct Ids<'a, 'input> {
+    all: HashMap<&'a str, Vec<Node<'a, 'input>>>,
+    first_plain: HashMap<&'a str, Node<'a, 'input>>,
+}
 
 /// Attributes usvg reads (no namespace, SVG, XLink or XML); it ignores every other namespace.
 fn read_by_usvg(attribute: &roxmltree::Attribute<'_, '_>) -> bool {
@@ -246,11 +252,13 @@ pub(crate) fn check(doc: &roxmltree::Document<'_>) -> Result<SvgFacts> {
     if root.tag_name().name() != "svg" {
         return Err(malformed(format!("the root element is <{}>, not <svg>", root.tag_name().name())));
     }
-    let mut ids: Ids<'_, '_> = HashMap::new();
+    let mut ids = Ids { all: HashMap::new(), first_plain: HashMap::new() };
     for node in doc.descendants().filter(Node::is_element) {
-        // usvg resolves `#id` against every attribute whose local name is `id` (`xml:id` and `svg:id` included).
         for id in attribute_values(node, "id") {
-            ids.entry(id).or_default().push(node);
+            ids.all.entry(id).or_default().push(node);
+        }
+        if let Some(id) = node.attribute("id") {
+            ids.first_plain.entry(id).or_insert(node);
         }
     }
     let mut facts = SvgFacts::default();
@@ -403,19 +411,39 @@ fn iri_keys(value: &str) -> [Option<&str>; 2] {
     [mirror, value.trim().strip_prefix('#')]
 }
 
-/// Every element an `href` (any namespace) of `node` may name, once each.
-fn href_targets<'a, 'input>(node: Node<'a, 'input>, ids: &Ids<'a, 'input>) -> Vec<Node<'a, 'input>> {
+/// The elements a `<use>` may instantiate: usvg reads `xlink:href`, else `href`, and takes the first element with
+/// that plain `id`; every `href` (any namespace) and both id spellings are taken here, so at most four.
+fn use_targets<'a, 'input>(node: Node<'a, 'input>, ids: &Ids<'a, 'input>) -> Vec<Node<'a, 'input>> {
     let mut out: Vec<Node<'a, 'input>> = Vec::new();
     for attribute in node.attributes().filter(|a| a.name() == "href") {
         for key in iri_keys(attribute.value()).into_iter().flatten() {
-            for &target in ids.get(key).map(Vec::as_slice).unwrap_or_default() {
-                if !out.iter().any(|n| n.id() == target.id()) {
-                    out.push(target);
-                }
+            if let Some(&target) = ids.first_plain.get(key)
+                && !out.iter().any(|n| n.id() == target.id())
+            {
+                out.push(target);
             }
         }
     }
     out
+}
+
+/// The gradients a gradient's `href` names; an id several elements share is refused (the chain must be one chain).
+fn gradient_targets<'a, 'input>(node: Node<'a, 'input>, ids: &Ids<'a, 'input>) -> Result<Vec<Node<'a, 'input>>> {
+    let mut out: Vec<Node<'a, 'input>> = Vec::new();
+    for attribute in node.attributes().filter(|a| a.name() == "href" && read_by_usvg(a)) {
+        for key in iri_keys(attribute.value()).into_iter().flatten() {
+            match ids.all.get(key).map(Vec::as_slice).unwrap_or_default() {
+                [] => {}
+                [target] => {
+                    if !out.iter().any(|n| n.id() == target.id()) {
+                        out.push(*target);
+                    }
+                }
+                _ => return Err(Error::NotImplemented("SVG gradients whose href names an id that several elements share")),
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Styles and paint references gathered from attributes, `style` attributes and `<style>` sheets.
@@ -573,12 +601,10 @@ enum Visit<T> {
 fn paint_stops<'a, 'input>(paints: &[&str], ids: &Ids<'a, 'input>) -> Result<u64> {
     let mut memo: HashMap<NodeId, Visit<(usize, u64)>> = HashMap::new();
     let mut most = 0u64;
-    for id in paints {
-        let mut targets: Vec<Node<'a, 'input>> = Vec::new();
-        for key in [*id, id.trim()] {
-            targets.extend(ids.get(key).map(Vec::as_slice).unwrap_or_default());
-        }
-        for target in targets {
+    // Each id once: a file may name the same gradient from every element.
+    let keys: std::collections::BTreeSet<&str> = paints.iter().flat_map(|id| [*id, id.trim()]).collect();
+    for key in keys {
+        for &target in ids.all.get(key).map(Vec::as_slice).unwrap_or_default() {
             if !is_gradient(target) {
                 return Err(Error::NotImplemented("SVG pattern fills and strokes (paint servers other than gradients); convert them to plain colours"));
             }
@@ -593,7 +619,7 @@ fn gradient_chain<'a, 'input>(start: Node<'a, 'input>, ids: &Ids<'a, 'input>, me
     let looped = || Error::Malformed { format: "SVG", message: "gradients reference each other in a loop (href)".to_owned() };
     let mut stack = vec![(start, false)];
     while let Some((node, expanded)) = stack.pop() {
-        let targets = href_targets(node, ids);
+        let targets = gradient_targets(node, ids)?;
         if !expanded {
             match memo.get(&node.id()) {
                 Some(Visit::Done(_)) => continue,
@@ -654,7 +680,7 @@ fn expand<'a, 'input>(root: Node<'a, 'input>, ids: &Ids<'a, 'input>) -> Result<C
     let mut memo: HashMap<NodeId, Visit<Cost>> = HashMap::new();
     let mut stack = vec![(root, false)];
     while let Some((node, expanded)) = stack.pop() {
-        let targets = if node.tag_name().name() == "use" { href_targets(node, ids) } else { Vec::new() };
+        let targets = if node.tag_name().name() == "use" { use_targets(node, ids) } else { Vec::new() };
         let children = || node.children().filter(Node::is_element).map(|n| (n, false)).chain(targets.iter().map(|n| (*n, true)));
         if !expanded {
             match memo.get(&node.id()) {
@@ -1015,6 +1041,10 @@ fn path_points(d: &str) -> Result<u64> {
                 current = subpath_start;
                 after_close = true;
             }
+        }
+        if points > MAX_ENTITY_POINTS as u64 {
+            // Over the per-entity limit already: the caller refuses; parsing the rest would only cost time.
+            return Ok(points);
         }
         if emitted {
             empty_run = 0;
