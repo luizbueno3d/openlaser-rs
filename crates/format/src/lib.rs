@@ -38,12 +38,13 @@ pub enum Error {
 }
 
 /// zip: manifest.json {format, formatVersion, generator, project: ProjectM, paths: {pN: "M0 0L10 0…Z"}} +
-/// assets/<blake3>.<ext> (original image bytes, never re-encoded). ProjectM is a separate serde model converted
+/// assets/<blake3>.gray8 (raw row-major grayscale pixels). ProjectM is a separate serde model converted
 /// with exhaustive struct literals both ways, so a new doc field fails to compile until it is saved.
 pub fn save(project: &Project) -> Result<Vec<u8>, Error> {
     let mut paths = std::collections::BTreeMap::new();
+    let mut assets = std::collections::BTreeMap::new();
     let mut next_path = 0usize;
-    let model = ProjectM::from_project(project, &mut paths, &mut next_path, 0)?;
+    let model = ProjectM::from_project(project, &mut paths, &mut assets, &mut next_path, 0)?;
     if project.workspace.size_mm.iter().any(|v| !v.is_finite()) {
         return Err(Error::NonFinite { path: "project.workspace.sizeMm".to_owned() });
     }
@@ -54,9 +55,17 @@ pub fn save(project: &Project) -> Result<Vec<u8>, Error> {
     if json.len() > MAX_DECOMPRESSED {
         return Err(Error::LimitExceeded("manifest exceeds 64 MiB".to_owned()));
     }
+    let archive_size = assets.values().try_fold(json.len(), |size, asset| size.checked_add(asset.len()));
+    if archive_size.is_none_or(|size| size > MAX_DECOMPRESSED) || assets.len().saturating_add(1) > MAX_ENTRIES {
+        return Err(Error::LimitExceeded("project assets exceed archive limits".to_owned()));
+    }
     let mut writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
     writer.start_file("manifest.json", SimpleFileOptions::default()).map_err(|error| Error::Corrupt(error.to_string()))?;
     writer.write_all(&json)?;
+    for (name, bytes) in &assets {
+        writer.start_file(name, SimpleFileOptions::default()).map_err(|error| Error::Corrupt(error.to_string()))?;
+        writer.write_all(bytes)?;
+    }
     writer.finish().map(|cursor| cursor.into_inner()).map_err(|error| Error::Corrupt(error.to_string()))
 }
 
@@ -67,6 +76,7 @@ pub fn load(bytes: &[u8]) -> Result<Project, Error> {
         return Err(Error::LimitExceeded("too many zip entries".to_owned()));
     }
     let mut manifest_bytes = Vec::new();
+    let mut assets = std::collections::BTreeMap::new();
     let mut total = 0usize;
     for index in 0..archive.len() {
         let mut file = archive.by_index(index).map_err(|error| Error::Corrupt(error.to_string()))?;
@@ -81,6 +91,12 @@ pub fn load(bytes: &[u8]) -> Result<Project, Error> {
         }
         if name == "manifest.json" {
             file.read_to_end(&mut manifest_bytes)?;
+        } else if name.starts_with("assets/") {
+            let mut asset_bytes = Vec::with_capacity(size);
+            file.read_to_end(&mut asset_bytes)?;
+            if assets.insert(name.clone(), asset_bytes).is_some() {
+                return Err(Error::Corrupt(format!("duplicate asset entry {name}")));
+            }
         }
     }
     if manifest_bytes.is_empty() {
@@ -111,7 +127,7 @@ pub fn load(bytes: &[u8]) -> Result<Project, Error> {
     if manifest.project.workspace.size_mm.iter().any(|v| !v.is_finite()) {
         return Err(Error::NonFinite { path: "project.workspace.sizeMm".to_owned() });
     }
-    manifest.project.into_project(&manifest.paths, 0)
+    manifest.project.into_project(&manifest.paths, &assets, 0)
 }
 
 /// craft-atomic.
@@ -132,6 +148,13 @@ const MAX_DECOMPRESSED: usize = 64 * 1024 * 1024;
 const MAX_ENTRIES: usize = 4096;
 const MAX_POINTS: usize = 1_000_000;
 const MAX_GROUP_DEPTH: usize = 32;
+
+fn bitmap_pixel_count(px: [u32; 2]) -> Result<usize, Error> {
+    usize::try_from(px[0])
+        .ok()
+        .and_then(|width| usize::try_from(px[1]).ok().and_then(|height| width.checked_mul(height)))
+        .ok_or_else(|| Error::LimitExceeded("bitmap pixel dimensions overflow".to_owned()))
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -177,7 +200,7 @@ enum GeomM {
     Rect { w: Mm, h: Mm, corner_radius: Mm },
     Ellipse { rx: Mm, ry: Mm },
     Polygon { sides: u16, radius: Mm },
-    Bitmap { asset: [u8; 32], px: [u32; 2], size_mm: [f64; 2], gray: Vec<u8>, source_ext: String },
+    Bitmap { asset: [u8; 32], px: [u32; 2], size_mm: [f64; 2], gray_asset: String, source_ext: String },
     Group { shapes: Vec<ShapeM> },
 }
 
@@ -192,10 +215,16 @@ enum PathCommand {
 }
 
 impl ProjectM {
-    fn from_project(project: &Project, paths: &mut std::collections::BTreeMap<String, String>, next: &mut usize, depth: usize) -> Result<Self, Error> {
+    fn from_project(
+        project: &Project,
+        paths: &mut std::collections::BTreeMap<String, String>,
+        assets: &mut std::collections::BTreeMap<String, Vec<u8>>,
+        next: &mut usize,
+        depth: usize,
+    ) -> Result<Self, Error> {
         Ok(Self {
             name: project.name.clone(),
-            shapes: project.shapes.iter().map(|shape| ShapeM::from_shape(shape, paths, next, depth)).collect::<Result<_, _>>()?,
+            shapes: project.shapes.iter().map(|shape| ShapeM::from_shape(shape, paths, assets, next, depth)).collect::<Result<_, _>>()?,
             layers: project.layers.clone(),
             workspace: project.workspace.clone(),
             device_hint: project.device_hint.clone(),
@@ -205,13 +234,18 @@ impl ProjectM {
             extras: project.extras.clone(),
         })
     }
-    fn into_project(self, paths: &std::collections::BTreeMap<String, String>, depth: usize) -> Result<Project, Error> {
+    fn into_project(
+        self,
+        paths: &std::collections::BTreeMap<String, String>,
+        assets: &std::collections::BTreeMap<String, Vec<u8>>,
+        depth: usize,
+    ) -> Result<Project, Error> {
         if depth > MAX_GROUP_DEPTH {
             return Err(Error::LimitExceeded("group nesting exceeds 32".to_owned()));
         }
         Ok(Project {
             name: self.name,
-            shapes: self.shapes.into_iter().map(|shape| shape.into_shape(paths, depth)).collect::<Result<_, _>>()?,
+            shapes: self.shapes.into_iter().map(|shape| shape.into_shape(paths, assets, depth)).collect::<Result<_, _>>()?,
             layers: self.layers,
             workspace: self.workspace,
             device_hint: self.device_hint,
@@ -224,7 +258,13 @@ impl ProjectM {
 }
 
 impl ShapeM {
-    fn from_shape(shape: &Shape, paths: &mut std::collections::BTreeMap<String, String>, next: &mut usize, depth: usize) -> Result<Self, Error> {
+    fn from_shape(
+        shape: &Shape,
+        paths: &mut std::collections::BTreeMap<String, String>,
+        assets: &mut std::collections::BTreeMap<String, Vec<u8>>,
+        next: &mut usize,
+        depth: usize,
+    ) -> Result<Self, Error> {
         if depth > MAX_GROUP_DEPTH {
             return Err(Error::LimitExceeded("group nesting exceeds 32".to_owned()));
         }
@@ -244,15 +284,18 @@ impl ShapeM {
             Geom::Rect { w, h, corner_radius } => GeomM::Rect { w: *w, h: *h, corner_radius: *corner_radius },
             Geom::Ellipse { rx, ry } => GeomM::Ellipse { rx: *rx, ry: *ry },
             Geom::Polygon { sides, radius } => GeomM::Polygon { sides: *sides, radius: *radius },
-            Geom::Bitmap(bitmap) => GeomM::Bitmap {
-                asset: bitmap.asset.0,
-                px: bitmap.px,
-                size_mm: bitmap.size_mm,
-                gray: bitmap.gray.to_vec(),
-                source_ext: bitmap.source_ext.clone(),
-            },
+            Geom::Bitmap(bitmap) => {
+                let expected = bitmap_pixel_count(bitmap.px)?;
+                if expected != bitmap.gray.len() {
+                    return Err(Error::Corrupt("bitmap pixel dimensions do not match grayscale bytes".to_owned()));
+                }
+                let digest = blake3::hash(&bitmap.gray);
+                let name = format!("assets/{}.gray8", digest.to_hex());
+                assets.entry(name.clone()).or_insert_with(|| bitmap.gray.to_vec());
+                GeomM::Bitmap { asset: bitmap.asset.0, px: bitmap.px, size_mm: bitmap.size_mm, gray_asset: name, source_ext: bitmap.source_ext.clone() }
+            }
             Geom::Group(shapes) => {
-                GeomM::Group { shapes: shapes.iter().map(|item| ShapeM::from_shape(item, paths, next, depth + 1)).collect::<Result<_, _>>()? }
+                GeomM::Group { shapes: shapes.iter().map(|item| ShapeM::from_shape(item, paths, assets, next, depth + 1)).collect::<Result<_, _>>()? }
             }
         };
         Ok(Self {
@@ -266,7 +309,12 @@ impl ShapeM {
             priority: shape.priority,
         })
     }
-    fn into_shape(self, paths: &std::collections::BTreeMap<String, String>, depth: usize) -> Result<Arc<Shape>, Error> {
+    fn into_shape(
+        self,
+        paths: &std::collections::BTreeMap<String, String>,
+        assets: &std::collections::BTreeMap<String, Vec<u8>>,
+        depth: usize,
+    ) -> Result<Arc<Shape>, Error> {
         if depth > MAX_GROUP_DEPTH {
             return Err(Error::LimitExceeded("group nesting exceeds 32".to_owned()));
         }
@@ -282,16 +330,21 @@ impl ShapeM {
             GeomM::Rect { w, h, corner_radius } => Geom::Rect { w, h, corner_radius },
             GeomM::Ellipse { rx, ry } => Geom::Ellipse { rx, ry },
             GeomM::Polygon { sides, radius } => Geom::Polygon { sides, radius },
-            GeomM::Bitmap { asset, px, size_mm, gray, source_ext } => {
-                let expected = usize::try_from(px[0]).ok().and_then(|x| usize::try_from(px[1]).ok().and_then(|y| x.checked_mul(y)));
-                if expected != Some(gray.len()) {
+            GeomM::Bitmap { asset, px, size_mm, gray_asset, source_ext } => {
+                let expected = bitmap_pixel_count(px)?;
+                let gray = assets.get(&gray_asset).ok_or_else(|| Error::Corrupt(format!("missing bitmap asset {gray_asset}")))?;
+                if expected != gray.len() {
                     return Err(Error::Corrupt("bitmap pixel dimensions do not match grayscale bytes".to_owned()));
                 }
-                Geom::Bitmap(Arc::new(BitmapData { asset: AssetId(asset), px, size_mm, gray: Arc::from(gray), source_ext }))
+                let expected_name = format!("assets/{}.gray8", blake3::hash(gray).to_hex());
+                if gray_asset != expected_name {
+                    return Err(Error::Corrupt(format!("bitmap asset hash does not match {gray_asset}")));
+                }
+                Geom::Bitmap(Arc::new(BitmapData { asset: AssetId(asset), px, size_mm, gray: Arc::from(gray.as_slice()), source_ext }))
             }
-            GeomM::Group { shapes } => {
-                Geom::Group(shapes.into_iter().map(|item| item.into_shape(paths, depth + 1).map(|shape| (*shape).clone().into())).collect::<Result<_, _>>()?)
-            }
+            GeomM::Group { shapes } => Geom::Group(
+                shapes.into_iter().map(|item| item.into_shape(paths, assets, depth + 1).map(|shape| (*shape).clone().into())).collect::<Result<_, _>>()?,
+            ),
         };
         Ok(Arc::new(Shape {
             id: self.id,
@@ -484,6 +537,34 @@ mod tests {
     fn olp_roundtrip_equal() {
         let original = project();
         let bytes = save(&original).unwrap();
+        assert_eq!(load(&bytes).unwrap(), original);
+    }
+
+    #[test]
+    fn olp_bitmap_asset_roundtrip() {
+        let mut original = project();
+        let pixels: Arc<[u8]> = Arc::from([0_u8, 1, 127, 255]);
+        let mut shape = (*original.shapes[0]).clone();
+        shape.geom = Geom::Bitmap(Arc::new(BitmapData {
+            asset: AssetId([0x5a; 32]),
+            px: [2, 2],
+            size_mm: [10.0, 10.0],
+            gray: pixels.clone(),
+            source_ext: "png".to_owned(),
+        }));
+        original.shapes[0] = Arc::new(shape);
+
+        let bytes = save(&original).unwrap();
+        let mut archive = ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+        let mut names = Vec::new();
+        for index in 0..archive.len() {
+            names.push(archive.by_index(index).unwrap().name().unwrap().into_owned());
+        }
+        let asset_name = names.iter().find(|name| name.starts_with("assets/")).unwrap();
+        assert_eq!(asset_name, &format!("assets/{}.gray8", blake3::hash(&pixels).to_hex()));
+        let mut stored = Vec::new();
+        archive.by_name(asset_name).unwrap().read_to_end(&mut stored).unwrap();
+        assert_eq!(stored, pixels.as_ref());
         assert_eq!(load(&bytes).unwrap(), original);
     }
 
