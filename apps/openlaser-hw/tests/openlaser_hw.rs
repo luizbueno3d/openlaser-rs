@@ -20,13 +20,13 @@ use openlaser_engine::{
 };
 use openlaser_hw::args::JobSource;
 use openlaser_hw::builtin::Builtin;
-use openlaser_hw::flow::start_marking;
+use openlaser_hw::flow::{KeyStops, start_marking, watch_marking};
 use openlaser_hw::rig::{ArmView, EngineRigs, Rig, RigEvent, RigFactory, RigSpec};
 use openlaser_hw::stop::{CountingStop, StopTarget};
 use openlaser_hw::trace::{TraceWriter, from_t1};
 use openlaser_hw::tty_arm::arm_line_matches;
 use openlaser_hw::{EXIT_FAIL, EXIT_OK, EXIT_USAGE, Env, HwError, KeyPoll, KeySession, StopFn, StopKey, Terminal, default_sim_config, run_with};
-use openlaser_types::{Bounds, FrameOrigin, PassRow, SectionMode, VirtualClock};
+use openlaser_types::{Bounds, Clock, FrameOrigin, Notice, NoticeCode, PassRow, SectionMode, VirtualClock};
 use serde_json::Value;
 
 // ---- the scripted terminal -----------------------------------------------------------------------------------
@@ -52,8 +52,12 @@ struct Scripted {
     out: Arc<Mutex<String>>,
     keys: Arc<Mutex<VecDeque<Key>>>,
     typing: Option<Typing>,
+    /// How long the operator takes to type the line, on this clock.
+    typing_takes: Option<(Arc<VirtualClock>, Duration)>,
     checklist_len: usize,
     challenges: Vec<u64>,
+    /// (when the challenge was printed, when the confirmation was stamped).
+    stamps: Vec<(MonoTime, MonoTime)>,
 }
 
 impl Scripted {
@@ -64,8 +68,10 @@ impl Scripted {
             out: Arc::new(Mutex::new(String::new())),
             keys: Arc::new(Mutex::new(keys.iter().copied().collect())),
             typing: None,
+            typing_takes: None,
             checklist_len: 4,
             challenges: Vec::new(),
+            stamps: Vec::new(),
         }
     }
 
@@ -88,11 +94,18 @@ impl Terminal for Scripted {
     }
 
     /// Emulates `TtyTerminal::confirm_arm`: a line matching the challenge yields a confirmation (here from
-    /// `arm::testing`, as a GUI-kind confirmation of "ARM" with every item ticked), anything else None.
-    fn confirm_arm(&mut self, challenge: u64, at: MonoTime) -> Option<HumanConfirm> {
+    /// `arm::testing`, as a GUI-kind confirmation of "ARM" with every item ticked) stamped once the line is in,
+    /// anything else None.
+    fn confirm_arm(&mut self, challenge: u64, now: &dyn Fn() -> MonoTime) -> Option<HumanConfirm> {
         self.challenges.push(challenge);
+        let asked = now();
         let typed = (self.typing?)(challenge);
+        if let Some((clock, took)) = &self.typing_takes {
+            clock.advance(*took);
+        }
         self.write(&format!("> {typed}\n"));
+        let at = now();
+        self.stamps.push((asked, at));
         arm_line_matches(&typed, challenge).then(|| confirm_for_tests("ARM", vec![true; self.checklist_len], at))
     }
 
@@ -227,6 +240,14 @@ struct Script {
     stop_acks: Option<Vec<(MachineId, StopAck)>>,
     /// A stop that lands while `run_armed` is queueing the job (the key thread racing the main thread).
     stop_during_run_armed: Option<Arc<dyn StopTarget>>,
+    /// `stop_now` trips nothing the rig ever reports (a wedged transfer, a dead driver thread): no Stopped event.
+    silent_stop_now: bool,
+    /// The checklist `request_arm` returns (default: four items).
+    checklist: Option<Vec<String>>,
+    /// Edits every summary the rig hands out (document text an agent wrote, say).
+    forge: Option<fn(&mut EmissionSummary)>,
+    /// The rig's clock (`fake_env` shares it with `Env`).
+    clock: Option<Arc<VirtualClock>>,
 }
 
 type Shared = Arc<Mutex<Script>>;
@@ -237,7 +258,9 @@ impl StopTarget for FakeStop {
     fn stop_now(&self) {
         let mut s = self.0.lock().unwrap();
         s.calls.push("stop_now".into());
-        s.urgent.push_back(RigEvent::Stopped(confirmed()));
+        if !s.silent_stop_now {
+            s.urgent.push_back(RigEvent::Stopped(confirmed()));
+        }
     }
 
     fn stop_and_wait(&self, _max: Duration) -> Vec<(MachineId, StopAck)> {
@@ -260,6 +283,15 @@ impl FakeRig {
     fn call(&self, c: &str) {
         self.s.lock().unwrap().calls.push(c.to_owned());
     }
+
+    fn summary_now(&self) -> EmissionSummary {
+        let s = self.s.lock().unwrap();
+        let mut out = summary(s.power_pct);
+        if let Some(forge) = s.forge {
+            forge(&mut out);
+        }
+        out
+    }
 }
 
 impl Rig for FakeRig {
@@ -272,7 +304,7 @@ impl Rig for FakeRig {
     }
 
     fn now(&self) -> MonoTime {
-        MonoTime::default()
+        self.s.lock().unwrap().clock.as_ref().map_or_else(MonoTime::default, |c| c.now())
     }
 
     fn load(
@@ -289,7 +321,7 @@ impl Rig for FakeRig {
 
     fn summary(&mut self) -> Result<EmissionSummary, HwError> {
         self.call("summary");
-        Ok(summary(self.s.lock().unwrap().power_pct))
+        Ok(self.summary_now())
     }
 
     fn connect(&mut self) -> Result<(), HwError> {
@@ -321,8 +353,8 @@ impl Rig for FakeRig {
 
     fn request_arm(&mut self) -> Result<ArmView, HwError> {
         self.call("request_arm");
-        let p = self.s.lock().unwrap().power_pct;
-        Ok(ArmView { summary: summary(p), receipt: receipt(1, FrameSource::Job), checklist: vec!["E-stop in reach".into(); 4] })
+        let checklist = self.s.lock().unwrap().checklist.clone().unwrap_or_else(|| vec!["E-stop in reach".into(); 4]);
+        Ok(ArmView { summary: self.summary_now(), receipt: receipt(1, FrameSource::Job), checklist })
     }
 
     fn emission_cap_pct(&self) -> Result<Option<f64>, HwError> {
@@ -361,11 +393,13 @@ impl RigFactory for FakeRigs {
     }
 }
 
-fn fake_env(script: Script) -> (Env, Shared) {
+fn fake_env(mut script: Script) -> (Env, Shared) {
+    let clock = Arc::new(VirtualClock::new());
+    script.clock = Some(Arc::clone(&clock));
     let shared = Arc::new(Mutex::new(script));
     let env = Env {
         profiles_dir: None,
-        clock: Arc::new(VirtualClock::new()),
+        clock,
         poll: Duration::from_millis(20),
         signals: false,
         exit: Arc::new(|_| {}),
@@ -431,6 +465,27 @@ fn cli_profile_set_requires_tty() {
         assert!(term.output().contains("not_a_tty"), "{sub}: {}", term.output());
     }
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "nothing was written");
+}
+
+#[test]
+fn cli_profile_set_refused_while_its_file_is_skipped() {
+    // The saved profile no longer loads: the diff would compare the built-in, and SAVE would overwrite the file with
+    // the built-in plus the change. Refused; the file is left as it is.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("jpt-m7-200.json");
+    std::fs::write(&file, b"{ \"id\": \"jpt-m7-200\", ").unwrap();
+    let (mut env, _) = fake_env(Script::default());
+    env.profiles_dir = Some(dir.path().to_path_buf());
+    for sub in ["profile set cal.negate.x true", "profile import-om calibration.json", "profile import-ezcad markcfg7"] {
+        let mut term = Scripted::new(true, &[]);
+        term.lines.push_back("SAVE jpt-m7-200".into());
+        assert_eq!(run_with(&argv(sub), &mut term, &mut env), EXIT_FAIL, "{sub}");
+        let out = term.output();
+        assert!(out.contains("machine profile files were skipped") && out.contains("nothing was written"), "{sub}: {out}");
+        assert!(!out.contains("Type `SAVE"), "{sub}: never asks to save: {out}");
+    }
+    assert_eq!(std::fs::read(&file).unwrap(), b"{ \"id\": \"jpt-m7-200\", ");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
 
 // ---- hardware is a build feature ---------------------------------------------------------------------------------
@@ -659,6 +714,7 @@ fn cli_space_and_esc_stop() {
         let out = term.output();
         assert_eq!(code, EXIT_FAIL, "{key}");
         assert!(out.contains("Stopped: confirmed"), "{key}: {out}");
+        assert!(!out.contains("STOP NOT CONFIRMED"), "{key}: the report came in time: {out}");
         assert!(out.contains("nothing was marked"), "{key}: {out}");
         let c = calls(&s);
         assert!(has(&c, "stop_now"), "{key} trips the latch at once: {c:?}");
@@ -669,6 +725,127 @@ fn cli_space_and_esc_stop() {
     let mut term = Scripted::new(true, &[Key::Wait(5), Key::Stop(StopKey::Space)]);
     assert_eq!(run_with(&argv("frame --builtin box10 --loop --sim"), &mut term, &mut env), EXIT_OK, "{}", term.output());
     assert!(has(&calls(&s), "stop_now"));
+}
+
+/// What the watchdog's second request gets from a driver that never reported: latched, no StopReport.
+fn no_report() -> Vec<(MachineId, StopAck)> {
+    vec![(MachineId("jpt-m7-200-sim".into()), StopAck { latched: true, report: None, elapsed_ms: 500 })]
+}
+
+#[test]
+fn stop_key_without_a_report_says_stop_not_confirmed_within_500_ms() {
+    // SPEC §5.4 watchdog: the key trips the latch, but no StopReport ever arrives (a wedged transfer, a dead driver
+    // thread). 500 ms later the operator reads STOP NOT CONFIRMED and is sent to the key switch / E-stop, the CLI asks
+    // every machine again and prints their answers, and the command ends in an error, both in `frame --loop` (where a
+    // reported stop is a success) and in `run`.
+    for (cmd, key) in [("frame --builtin box10 --loop --sim", StopKey::Esc), ("run --builtin dot --sim --allow-emission", StopKey::Space)] {
+        let script = Script { power_pct: 1.0, silent_stop_now: true, stop_acks: Some(no_report()), ..Script::default() };
+        let (mut env, s) = fake_env(script);
+        let clock = s.lock().unwrap().clock.clone().unwrap();
+        let mut term = Scripted::new(true, &[Key::Wait(3), Key::Stop(key)]);
+        let code = run_with(&argv(cmd), &mut term, &mut env);
+        let out = term.output();
+        assert_eq!(code, EXIT_FAIL, "{cmd}: {out}");
+        assert!(out.contains("STOP NOT CONFIRMED: no StopReport within 500 ms of the stop key: use the key switch / E-stop."), "{cmd}: {out}");
+        assert!(out.contains("stop jpt-m7-200-sim: latched; no StopReport within 500 ms: use the key switch / E-stop"), "{cmd}: {out}");
+        assert!(out.contains("the stop was not confirmed: use the key switch / E-stop"), "{cmd}: {out}");
+        let c = calls(&s);
+        let pressed = c.iter().position(|x| x == "stop_now").unwrap();
+        assert!(c.iter().skip(pressed).any(|x| x == "stop_and_wait"), "asked again: {c:?}");
+        assert!(!has(&c, "request_arm"), "{c:?}");
+        // The key came on the 4th poll (60 ms); the notice came on the first poll at or after 560 ms, not later.
+        let t = clock.now().0;
+        assert!(t >= Duration::from_millis(560) && t <= Duration::from_millis(600), "{cmd}: {t:?}");
+    }
+}
+
+#[test]
+fn stop_key_without_a_report_while_marking_says_stop_not_confirmed() {
+    let progress = |n| vec![RigEvent::Progress { packets_acked: n, total: 1_000, eta_ms: 60_000 }];
+    let script = Script { silent_stop_now: true, stop_acks: Some(no_report()), batches: (1..2_000).map(progress).collect(), ..Script::default() };
+    let (env, s) = fake_env(script);
+    let mut rig = fake_rig(&s);
+    let key_stops = KeyStops::new(rig.stopper(), Arc::clone(&env.clock));
+    let mut term = Scripted::new(true, &[Key::Wait(5), Key::Stop(StopKey::Esc)]);
+    let mut keys = term.keys(key_stops.stop_fn()).unwrap();
+    let err = watch_marking(rig.as_mut(), &mut term, &env, &key_stops, keys.as_mut()).unwrap_err();
+    let out = term.output();
+    assert!(out.contains("STOP NOT CONFIRMED: no StopReport within 500 ms of the stop key: use the key switch / E-stop."), "{out}");
+    assert!(err.to_string().contains("the stop was not confirmed: use the key switch / E-stop"), "{err}");
+    assert!(key_stops.pressed_at().is_some());
+    let polls = s.lock().unwrap().polls;
+    assert!(polls <= 6 + 26, "the watchdog fired 500 ms after the key, not later ({polls} polls)");
+    // The driver confirms the stop when asked again: still an error, and it says the engine never reported.
+    let script = Script { silent_stop_now: true, batches: (1..2_000).map(progress).collect(), ..Script::default() };
+    let (env, s) = fake_env(script);
+    let mut rig = fake_rig(&s);
+    let key_stops = KeyStops::new(rig.stopper(), Arc::clone(&env.clock));
+    let mut term = Scripted::new(true, &[Key::Wait(5), Key::Stop(StopKey::Esc)]);
+    let mut keys = term.keys(key_stops.stop_fn()).unwrap();
+    let err = watch_marking(rig.as_mut(), &mut term, &env, &key_stops, keys.as_mut()).unwrap_err();
+    assert!(err.to_string().contains("the engine did not report the stop within 500 ms"), "{err}");
+    assert!(term.output().contains("stop jpt-m7-200-sim: confirmed in 40 ms"), "{}", term.output());
+}
+
+#[test]
+fn cli_empty_checklist_refused_before_any_challenge() {
+    let mut script = one_pass_on_poll_3(1.0, None);
+    script.checklist = Some(Vec::new());
+    let (mut env, s) = fake_env(script);
+    let mut term = Scripted::new(true, &[Key::Wait(4), Key::Enter]);
+    term.typing = Some(|c| format!("ARM {c:06}"));
+    assert_eq!(run_with(&argv("run --builtin dot --sim --allow-emission"), &mut term, &mut env), EXIT_FAIL);
+    let out = term.output();
+    assert!(out.contains("checklist_incomplete"), "{out}");
+    assert!(term.challenges.is_empty(), "no challenge is issued");
+    assert!(has(&calls(&s), "request_arm") && !has(&calls(&s), "run_armed"), "{:?}", calls(&s));
+}
+
+#[test]
+fn document_text_reaches_the_terminal_as_plain_text() {
+    // An agent named the layer so that it prints fake numbers and then conceals (ESC[8m) the real ones and everything
+    // after them; a notice and a warning carry more escape sequences, a carriage return and a bidi override. Whatever
+    // reaches Terminal::write has no control character but the CLI's own line ends, and the real power is shown.
+    let mut script = one_pass_on_poll_3(80.0, None);
+    script.forge = Some(|s| {
+        s.rows[0].layer_name = "C00   Line  1/1  5.00 % (fake)\u{1b}[8m".into();
+        s.notices.push(Notice {
+            n: 1,
+            code: NoticeCode::OpenShapeUnhatched,
+            message: "open shape\u{1b}[2J\u{9b}8m\r\u{202E}%08\u{200B}".into(),
+            object: None,
+            layer: None,
+        });
+    });
+    script.batches.push_front(vec![RigEvent::Warning("trace\u{1b}]0;title\u{7}\u{1b}[8m".into())]);
+    script.checklist = Some(vec!["E-stop in reach\u{1b}[8m".into()]);
+    let (mut env, _s) = fake_env(script);
+    let mut term = Scripted::new(true, &[Key::Wait(5), Key::Enter]);
+    term.typing = Some(|c| format!("ARM {c:06}"));
+    let _ = run_with(&argv("run --builtin dot --sim --allow-emission"), &mut term, &mut env);
+    let out = term.output();
+    let bad: Vec<char> = out.chars().filter(|c| *c != '\n' && (c.is_control() || ['\u{202E}', '\u{200B}'].contains(c))).collect();
+    assert!(bad.is_empty(), "{bad:?} reached the terminal:\n{out}");
+    assert!(out.contains("80.00 %"), "{out}");
+    assert!(out.contains("Notice 1: open shape[2J8m%08"), "{out}");
+    assert!(out.contains("warning: trace]0;title[8m"), "{out}");
+    assert!(out.contains("Checklist (typing the challenge confirms every item):\n  1. E-stop in reach[8m\n"), "{out}");
+}
+
+#[test]
+#[ignore = "needs I1"]
+fn arm_confirmation_is_stamped_after_the_line_is_read() {
+    // The operator takes 30 s to read the summary and type the challenge: the confirmation carries the time the line
+    // came in, not the time the prompt was printed (mint refuses a confirmation older than 10 s).
+    let (mut env, s) = fake_env(one_pass_on_poll_3(1.0, None));
+    let clock = s.lock().unwrap().clock.clone().unwrap();
+    let mut term = Scripted::new(true, &[Key::Wait(4), Key::Enter]);
+    term.typing = Some(|c| format!("ARM {c:06}"));
+    term.typing_takes = Some((clock, Duration::from_secs(30)));
+    let _ = run_with(&argv("run --builtin dot --sim --allow-emission"), &mut term, &mut env);
+    assert_eq!(term.stamps.len(), 1, "{}", term.output());
+    let (asked, at) = term.stamps[0];
+    assert_eq!(at, asked.plus(Duration::from_secs(30)), "stamped when the line was read");
 }
 
 #[test]

@@ -5,18 +5,19 @@
 //! summary of the PendingArm, the profile checklist and a 6-digit challenge → `ARM <challenge>` → mark. The first
 //! emission of a bench session refuses any row above the cap (`BenchPowerCap`, S23) before the challenge. Esc,
 //! Space and Ctrl-C stop at once from the key thread; a stop, a fault or the key reader closing ends the flow with
-//! nothing (more) marked.
+//! nothing (more) marked. A stop key whose StopReport has not arrived 500 ms later prints "STOP NOT CONFIRMED: use
+//! the key switch / E-stop" and asks every machine again (SPEC §5.4 watchdog), so the operator never waits in silence.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use openlaser_engine::{ArmToken, FrameMode, FrameReceipt};
-use openlaser_types::RefusalCode;
+use openlaser_types::{Clock, MonoTime, RefusalCode};
 
 use crate::args::{FrameOpts, RunOpts, StatusOpts};
 use crate::rig::{Purpose, Rig, RigEvent, RigSpec};
 use crate::stop::{self, CountingStop, STOP_WAIT, StopTarget};
-use crate::{Env, HwError, KeyPoll, KeySession, StopFn, StopKey, Terminal, require_tty, summary};
+use crate::{Env, HwError, KeyPoll, KeySession, StopFn, StopKey, Terminal, plain, require_tty, summary};
 
 /// Signal handlers, the watcher and the panic hook, held for the length of a device command.
 struct Guards {
@@ -33,14 +34,63 @@ fn guards(env: &Env, target: &Arc<dyn StopTarget>) -> Result<Guards, HwError> {
     let flags = signals.flags.iter().map(|f| stop::SignalFlag { flag: Arc::clone(&f.flag), name: f.name, exit_code: f.exit_code }).collect();
     // `\r\n`: a signal can land while the key thread holds the terminal in raw mode, where `\n` alone does not
     // return the cursor.
-    let sink: stop::ReportSink = Box::new(|line| eprint!("{}\r\n", line.replace('\n', "\r\n")));
+    let sink: stop::ReportSink = Box::new(|line| eprint!("{}\r\n", plain::block(line).replace('\n', "\r\n")));
     let watcher = stop::watch(flags, Arc::clone(target), sink, Arc::clone(&env.exit)).map_err(HwError::Failed)?;
     Ok(Guards { _signals: Some(signals), _watcher: Some(watcher) })
 }
 
-fn stop_fn(target: &Arc<dyn StopTarget>) -> StopFn {
-    let t = Arc::clone(target);
-    Arc::new(move |_key: StopKey| t.stop_now())
+/// The stop keys of one frame or mark phase. Each one trips every latch at once, on the key thread; the first one is
+/// also timed, so the main loop knows when its StopReport is late (SPEC §5.4 watchdog, [`STOP_WAIT`]).
+pub struct KeyStops {
+    target: Arc<dyn StopTarget>,
+    clock: Arc<dyn Clock>,
+    first: Mutex<Option<MonoTime>>,
+}
+
+impl KeyStops {
+    pub fn new(target: Arc<dyn StopTarget>, clock: Arc<dyn Clock>) -> Arc<Self> {
+        Arc::new(KeyStops { target, clock, first: Mutex::new(None) })
+    }
+
+    /// What the key thread calls for Esc, Space, Ctrl-C and a lost input. The time is read before the trip, so the
+    /// watchdog never starts late; the trip itself never waits.
+    pub fn stop_fn(self: &Arc<Self>) -> StopFn {
+        let me = Arc::clone(self);
+        Arc::new(move |_key: StopKey| {
+            let at = me.clock.now();
+            me.target.stop_now();
+            let mut first = me.first.lock().unwrap_or_else(PoisonError::into_inner);
+            if first.is_none() {
+                *first = Some(at);
+            }
+        })
+    }
+
+    /// When the first stop key of this phase was pressed.
+    pub fn pressed_at(&self) -> Option<MonoTime> {
+        *self.first.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A stop key was pressed [`STOP_WAIT`] ago or more (and the caller has not seen its StopReport).
+    fn overdue(&self, now: MonoTime) -> bool {
+        self.pressed_at().is_some_and(|at| now >= at.plus(STOP_WAIT))
+    }
+
+    /// SPEC §5.4 watchdog: no StopReport within 500 ms of the stop key. Says so at once, asks every machine again
+    /// (≤ 500 ms), prints each answer; the phase ends in an error either way.
+    fn not_reported(&self, term: &mut dyn Terminal) -> HwError {
+        term.write(&format!(
+            "STOP NOT CONFIRMED: no StopReport within {} ms of the stop key: use the key switch / E-stop.\nAsking every machine to stop again:\n",
+            STOP_WAIT.as_millis()
+        ));
+        let acks = self.target.stop_and_wait(STOP_WAIT);
+        print_stop(term, &acks);
+        if stop_confirmed(&acks) {
+            HwError::Failed(format!("the engine did not report the stop within {} ms; every machine confirmed it when asked again", STOP_WAIT.as_millis()))
+        } else {
+            HwError::Failed("the stop was not confirmed: use the key switch / E-stop".to_owned())
+        }
+    }
 }
 
 fn print_stop(term: &mut dyn Terminal, acks: &[(openlaser_engine::MachineId, openlaser_engine::StopAck)]) {
@@ -65,7 +115,7 @@ pub fn status(o: &StatusOpts, term: &mut dyn Terminal, env: &mut Env) -> Result<
     let mut rig = env.rigs.open(&RigSpec { purpose: Purpose::Status, device: o.device.clone(), extent: None })?;
     let lines = rig.probe()?;
     for l in lines {
-        term.write(&format!("{l}\n"));
+        term.write(&format!("{}\n", plain::field(&l, plain::MESSAGE_MAX_CHARS)));
     }
     Ok(())
 }
@@ -76,7 +126,6 @@ enum Phase {
     Accepted(FrameReceipt),
     /// Frame Once completed.
     Completed(u32),
-    Finished(Duration),
     Stopped,
 }
 
@@ -95,7 +144,7 @@ pub fn frame(o: &FrameOpts, term: &mut dyn Terminal, env: &mut Env) -> Result<()
         Phase::Completed(passes) => term.write(&format!("Frame done: {passes} pass(es) executed.\n")),
         Phase::Stopped if o.looping => {}
         Phase::Stopped => return Err(HwError::Failed("the frame was stopped before it completed".to_owned())),
-        Phase::Accepted(_) | Phase::Finished(_) => {}
+        Phase::Accepted(_) => {}
     }
     Ok(())
 }
@@ -109,7 +158,8 @@ fn frame_phase(
     o: &FrameOpts,
     accept_on_enter: bool,
 ) -> Result<Phase, HwError> {
-    let mut keys = term.keys(stop_fn(target)).map_err(|e| HwError::Failed(format!("cannot read keys: {e}")))?;
+    let key_stops = KeyStops::new(Arc::clone(target), Arc::clone(&env.clock));
+    let mut keys = term.keys(key_stops.stop_fn()).map_err(|e| HwError::Failed(format!("cannot read keys: {e}")))?;
     let fp = rig.start_frame(mode, o.style, o.source)?;
     term.write(&format!(
         "Framing job {} with the red light ({}). Esc, Space or Ctrl-C stops.{}\n",
@@ -121,9 +171,10 @@ fn frame_phase(
     let mut announced_passes = 0u32;
     loop {
         // Keys first: an Enter is judged against the passes seen before it was read, never against a receipt that
-        // arrives in the same iteration (S20: the pass must have executed before the person accepts it).
+        // arrives in the same iteration (S20: the pass must have executed before the person accepts it). After a stop
+        // key, Enter accepts nothing.
         match keys.poll() {
-            KeyPoll::Enter if accept_on_enter => match accepted.as_ref().map(|r| summary::receipt_accepts(r, &fp)) {
+            KeyPoll::Enter if accept_on_enter && key_stops.pressed_at().is_none() => match accepted.as_ref().map(|r| summary::receipt_accepts(r, &fp)) {
                 Some(Ok(())) => {
                     if let Some(r) = accepted.take() {
                         return Ok(Phase::Accepted(r));
@@ -163,18 +214,24 @@ fn frame_phase(
                     // The driver already stops on a fault; stopping again is idempotent and costs nothing.
                     let acks = target.stop_and_wait(STOP_WAIT);
                     print_stop(term, &acks);
-                    return Err(HwError::Failed(format!("machine fault: {e}")));
+                    return Err(HwError::Failed(format!("machine fault: {}", plain::field(&e, plain::MESSAGE_MAX_CHARS))));
                 }
-                RigEvent::Warning(w) => term.write(&format!("warning: {w}\n")),
+                RigEvent::Warning(w) => term.write(&format!("warning: {}\n", plain::field(&w, plain::MESSAGE_MAX_CHARS))),
                 RigEvent::Progress { .. } | RigEvent::Finished(_) | RigEvent::ArmVoided(_) => {}
             }
+        }
+        if key_stops.overdue(env.clock.now()) {
+            return Err(key_stops.not_reported(term));
         }
         env.clock.sleep(env.poll);
     }
 }
 
-/// Watches a marking job until it finishes, stops or faults.
-fn mark_phase(rig: &mut dyn Rig, term: &mut dyn Terminal, env: &Env, target: &Arc<dyn StopTarget>, keys: &mut dyn KeySession) -> Result<Phase, HwError> {
+/// Watches a marking job until it finishes (its duration) or stops or faults (an error). `keys` reads the stop keys
+/// through `key_stops.stop_fn()`; a stop key whose StopReport is 500 ms late ends it with "STOP NOT CONFIRMED".
+pub fn watch_marking(rig: &mut dyn Rig, term: &mut dyn Terminal, env: &Env, key_stops: &KeyStops, keys: &mut dyn KeySession) -> Result<Duration, HwError> {
+    let target = &key_stops.target;
+    let stopped = || HwError::Failed("the job was stopped before it finished".to_owned());
     let mut last_report = 0u32;
     loop {
         for ev in rig.poll() {
@@ -185,18 +242,18 @@ fn mark_phase(rig: &mut dyn Rig, term: &mut dyn Terminal, env: &Env, target: &Ar
                         term.write(&format!("Marking: packet {packets_acked}/{total}, about {:.1} s left.\n", Duration::from_millis(eta_ms).as_secs_f64()));
                     }
                 }
-                RigEvent::Finished(d) => return Ok(Phase::Finished(d)),
+                RigEvent::Finished(d) => return Ok(d),
                 RigEvent::Stopped(rep) => {
                     print_report(term, &rep);
-                    return Ok(Phase::Stopped);
+                    return Err(stopped());
                 }
                 RigEvent::Fault(e) => {
                     let acks = target.stop_and_wait(STOP_WAIT);
                     print_stop(term, &acks);
-                    return Err(HwError::Failed(format!("machine fault: {e}; the job was stopped")));
+                    return Err(HwError::Failed(format!("machine fault: {}; the job was stopped", plain::field(&e, plain::MESSAGE_MAX_CHARS))));
                 }
-                RigEvent::ArmVoided(reason) => term.write(&format!("ARM voided: {reason}\n")),
-                RigEvent::Warning(w) => term.write(&format!("warning: {w}\n")),
+                RigEvent::ArmVoided(reason) => term.write(&format!("ARM voided: {}\n", plain::field(&reason, plain::MESSAGE_MAX_CHARS))),
+                RigEvent::Warning(w) => term.write(&format!("warning: {}\n", plain::field(&w, plain::MESSAGE_MAX_CHARS))),
                 RigEvent::FrameCompleted(_) => {}
             }
         }
@@ -204,7 +261,10 @@ fn mark_phase(rig: &mut dyn Rig, term: &mut dyn Terminal, env: &Env, target: &Ar
             term.write("The key reader closed: stopping.\n");
             let acks = target.stop_and_wait(STOP_WAIT);
             print_stop(term, &acks);
-            return Ok(Phase::Stopped);
+            return Err(stopped());
+        }
+        if key_stops.overdue(env.clock.now()) {
+            return Err(key_stops.not_reported(term));
         }
         env.clock.sleep(env.poll);
     }
@@ -236,7 +296,9 @@ fn stop_framing(rig: &mut dyn Rig, term: &mut dyn Terminal, env: &Env, target: &
                     print_report(term, &r);
                     return Err(HwError::Failed("the frame stop was not confirmed; nothing was armed or marked".to_owned()));
                 }
-                RigEvent::Fault(e) => return Err(HwError::Failed(format!("machine fault while stopping the frame: {e}"))),
+                RigEvent::Fault(e) => {
+                    return Err(HwError::Failed(format!("machine fault while stopping the frame: {}", plain::field(&e, plain::MESSAGE_MAX_CHARS))));
+                }
                 _ => {}
             }
         }
@@ -318,23 +380,21 @@ fn run_inner(rig: &mut dyn Rig, o: &RunOpts, term: &mut dyn Terminal, env: &Env,
     }
     term.write("Checklist (typing the challenge confirms every item):\n");
     for (i, item) in arm.checklist.iter().enumerate() {
-        term.write(&format!("  {}. {item}\n", i + 1));
+        term.write(&format!("  {}. {}\n", i + 1, plain::field(item, plain::MESSAGE_MAX_CHARS)));
     }
     let challenge = openlaser_arm::tty_nonce()?;
-    let Some(confirm) = term.confirm_arm(challenge, rig.now()) else {
+    // Stamped by the terminal once the line is read (the operator may take a while to read the summary).
+    let Some(confirm) = term.confirm_arm(challenge, &|| rig.now()) else {
         return Err(HwError::refused(RefusalCode::ArmTextMismatch, "the typed text was not `ARM` and the challenge; nothing was armed"));
     };
     let token = openlaser_arm::mint(&arm.summary, &arm.receipt, confirm, arm.checklist.len(), rig.session(), rig.now())?;
 
     // Keys first, so a stop works from the first packet.
-    let mut keys = term.keys(stop_fn(target)).map_err(|e| HwError::Failed(format!("cannot read keys: {e}")))?;
+    let key_stops = KeyStops::new(Arc::clone(target), Arc::clone(&env.clock));
+    let mut keys = term.keys(key_stops.stop_fn()).map_err(|e| HwError::Failed(format!("cannot read keys: {e}")))?;
     start_marking(rig, stops, stops_before_arm, token)?;
     term.write("Marking. Esc, Space or Ctrl-C stops.\n");
-    match mark_phase(rig, term, env, target, keys.as_mut())? {
-        Phase::Finished(d) => {
-            term.write(&format!("Finished in {:.1} s.\n", d.as_secs_f64()));
-            Ok(())
-        }
-        _ => Err(HwError::Failed("the job was stopped before it finished".to_owned())),
-    }
+    let d = watch_marking(rig, term, env, &key_stops, keys.as_mut())?;
+    term.write(&format!("Finished in {:.1} s.\n", d.as_secs_f64()));
+    Ok(())
 }
