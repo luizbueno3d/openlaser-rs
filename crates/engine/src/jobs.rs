@@ -212,7 +212,10 @@ pub(crate) fn build(project: &Project, profile: &MachineProfile, popts: &PlanOpt
             let frame = openlaser_gcode::frame_program(validated.frame(), g, &header).map_err(gcode_err)?;
             let summary = gantry_summary(&plan, &job, profile, g, &notices);
             let listing = gcode_listing(&job.text);
-            let burned = gcode_burned(&job.text, g.s_max);
+            let burns = gcode_decode(&job.text, g.s_max);
+            // Bytes are the truth (§1.3 rule 3): every burn the text makes must be one the confirmation shows.
+            check_gantry_bytes(&summary, &burns).map_err(|r| encode_refused(fp, &notices, r))?;
+            let burned = burns.into_iter().map(|b| b.seg).collect();
             (Encoded::Gcode { job: Arc::new(job), frame: Arc::new(frame) }, summary, listing, burned)
         }
     };
@@ -251,8 +254,8 @@ fn bed_bounds(g: &GantryMachine) -> Bounds {
 }
 
 /// The gantry summary. The bytes hash is computed from the program text (S22); the per-row power and speed are the
-/// quantised words the encoder wrote (`GantryCutQ.s_value`, the requested speed), the decoded burn comes from the
-/// text (`gcode_burned`). The crash bound is the whole estimate: GRBL keeps executing its planner and RX buffer
+/// quantised words the encoder was asked to write (`GantryCutQ.s_value`, the requested speed), and
+/// `check_gantry_bytes` then proves them against the S and F words decoded from the text itself. The crash bound is the whole estimate: GRBL keeps executing its planner and RX buffer
 /// after a host crash, and this build does not model their depth.
 fn gantry_summary(plan: &JobPlan, prog: &GcodeProgram, profile: &MachineProfile, g: &GantryMachine, notices: &[Notice]) -> EmissionSummary {
     let s_max = f64::from(g.s_max.max(1));
@@ -305,13 +308,29 @@ fn gcode_listing(text: &str) -> Listing {
 }
 
 /// Burned segments decoded from G-code text: G1/G2/G3 moves (arcs as chords) while M3/M4 is on and S > 0.
+#[cfg(test)]
 pub(crate) fn gcode_burned(text: &str, s_max: u32) -> Vec<EmittedSegment> {
+    gcode_decode(text, s_max).into_iter().map(|b| b.seg).collect()
+}
+
+/// One burning move decoded from G-code text, with the feed in effect for it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct GcodeBurn {
+    pub seg: EmittedSegment,
+    /// mm/min; None when no feed is in effect (never set, not positive, or G93 inverse time).
+    pub feed_mm_min: Option<f64>,
+}
+
+/// Decodes the burning moves of G-code text: G1/G2/G3 (arcs as chords) while M3/M4 is on and S > 0, each with its S
+/// power (in % of `s_max`) and its modal F feed (in mm/min, inch feeds converted).
+pub(crate) fn gcode_decode(text: &str, s_max: u32) -> Vec<GcodeBurn> {
     let s_max = f64::from(s_max.max(1));
     let mut out = Vec::new();
     let (mut pos, mut absolute, mut inch, mut motion, mut laser, mut s) = ([0.0f64, 0.0f64], true, false, 0u8, false, 0.0f64);
+    let (mut feed, mut inverse_time): (Option<f64>, bool) = (None, false);
     for raw in text.lines() {
         let line = strip_gcode_comments(raw);
-        let (mut x, mut y) = (None, None);
+        let (mut x, mut y, mut f) = (None, None, None);
         for (letter, v) in gcode_words(&line) {
             // Whole G/M codes only; `as` is exact here (finite, whole, 0..=999).
             let code = (v.fract() == 0.0 && (0.0..1000.0).contains(&v)).then_some(v as u32);
@@ -323,18 +342,25 @@ pub(crate) fn gcode_burned(text: &str, s_max: u32) -> Vec<EmittedSegment> {
                 ('G', Some(21)) => inch = false,
                 ('G', Some(90)) => absolute = true,
                 ('G', Some(91)) => absolute = false,
+                ('G', Some(93)) => inverse_time = true,
+                ('G', Some(94)) => inverse_time = false,
                 ('M', Some(3 | 4)) => laser = true,
                 ('M', Some(2 | 5 | 30)) => laser = false,
                 ('S', _) => s = v,
+                ('F', _) => f = Some(v),
                 ('X', _) => x = Some(v),
                 ('Y', _) => y = Some(v),
                 _ => {}
             }
         }
+        // Units apply to the whole block, so the line's F and X/Y are converted after all its words are read.
+        let k = if inch { 25.4 } else { 1.0 };
+        if let Some(f) = f {
+            feed = (f > 0.0).then_some(f * k);
+        }
         if x.is_none() && y.is_none() {
             continue;
         }
-        let k = if inch { 25.4 } else { 1.0 };
         let mut to = pos;
         if let Some(x) = x {
             to[0] = if absolute { x * k } else { pos[0] + x * k };
@@ -343,11 +369,44 @@ pub(crate) fn gcode_burned(text: &str, s_max: u32) -> Vec<EmittedSegment> {
             to[1] = if absolute { y * k } else { pos[1] + y * k };
         }
         if motion != 0 && laser && s > 0.0 {
-            out.push(EmittedSegment { a: pos, b: to, power_pct: s * 100.0 / s_max });
+            let feed_mm_min = if inverse_time { None } else { feed };
+            out.push(GcodeBurn { seg: EmittedSegment { a: pos, b: to, power_pct: s * 100.0 / s_max }, feed_mm_min });
         }
         pos = to;
     }
     out
+}
+
+/// F is written with at most three decimals (T2 number format): a decoded feed matches a row within this, in mm/min.
+const FEED_TOLERANCE_MM_MIN: f64 = 0.01;
+/// S is an integer word: the decoded % matches a row's to rounding.
+const POWER_TOLERANCE_PCT: f64 = 1e-6;
+
+/// Bytes are the truth (§1.3 rule 3, AGENTS.md §1 rule 4): every burning move of the G-code text must run at the S
+/// power and F feed of some row of the confirmation. A burn the confirmation does not show (another power, another
+/// speed, no feed, inverse-time feed) refuses the job with `BytesMismatch`; nothing is clamped.
+pub(crate) fn check_gantry_bytes(summary: &EmissionSummary, burns: &[GcodeBurn]) -> Result<(), Refusal> {
+    for b in burns {
+        let p = b.seg.power_pct;
+        let Some(feed) = b.feed_mm_min.filter(|f| f.is_finite() && *f > 0.0) else {
+            return Err(Refusal::new(
+                RefusalCode::BytesMismatch,
+                "the G-code burns without a feed rate the confirmation can show (no F, or inverse-time feed); nothing can be armed from it",
+            )
+            .at(b.seg.a));
+        };
+        let shown = summary.rows.iter().any(|r| {
+            p.is_finite() && (r.power_pct - p).abs() <= POWER_TOLERANCE_PCT * p.abs().max(1.0) && (r.speed_mm_s * 60.0 - feed).abs() <= FEED_TOLERANCE_MM_MIN
+        });
+        if !shown {
+            return Err(Refusal::new(
+                RefusalCode::BytesMismatch,
+                format!("the G-code burns at {p:.2} % and F{feed:.3} mm/min, which no row of the confirmation shows; nothing can be armed from it"),
+            )
+            .at(b.seg.a));
+        }
+    }
+    Ok(())
 }
 
 fn strip_gcode_comments(line: &str) -> String {
@@ -416,6 +475,79 @@ mod tests {
         assert_eq!(segs.len(), 1);
         assert!((segs[0].b[0] - 25.4).abs() < 1e-9);
         assert!(gcode_burned("", 0).is_empty());
+    }
+
+    #[test]
+    fn gcode_feeds_follow_units_and_modes() {
+        let burns = gcode_decode("G21\nM3 S500\nG1 X1 Y0 F300\nG1 X2\nG20 G1 X1 F10\nG93 G1 X0 F2\nG94 F0 G1 X1\n", 1000);
+        let feeds: Vec<Option<f64>> = burns.iter().map(|b| b.feed_mm_min).collect();
+        assert_eq!(feeds.len(), 5);
+        assert_eq!(feeds[0], Some(300.0));
+        assert_eq!(feeds[1], Some(300.0), "F is modal");
+        assert!((feeds[2].unwrap() - 254.0).abs() < 1e-9, "an inch feed is converted (G20 on the same line)");
+        assert_eq!(feeds[3], None, "inverse time has no feed the confirmation can show");
+        assert_eq!(feeds[4], None, "F0 is no feed");
+    }
+
+    fn row(power_pct: f64, speed_mm_s: f64) -> PassRow {
+        PassRow {
+            layer: openlaser_types::LayerKey::Color(0),
+            layer_name: "C00".into(),
+            sub: 0,
+            pass: 1,
+            of: 1,
+            mode: openlaser_types::SectionMode::Line,
+            power_pct,
+            frequency_khz: None,
+            pulse_ns: None,
+            speed_mm_s,
+            galvo: None,
+            paths: 1,
+            mark_mm: 1.0,
+            bounds: Bounds { min: [0.0, 0.0], max: [1.0, 1.0] },
+            estimate: Duration::ZERO,
+        }
+    }
+
+    fn gantry_summary_with(rows: Vec<PassRow>) -> EmissionSummary {
+        EmissionSummary {
+            fingerprint: Fingerprint([1; 32]),
+            bytes_hash: Fingerprint([2; 32]),
+            machine: MachineId("diode".into()),
+            rows,
+            notices: Vec::new(),
+            repeats: 1,
+            estimate: Duration::ZERO,
+            crash_bound: Duration::ZERO,
+            packets: 0,
+            work_area: Bounds { min: [0.0, 0.0], max: [400.0, 400.0] },
+            negate: [false, false],
+            swap_xy: false,
+        }
+    }
+
+    #[test]
+    fn gantry_bytes_must_match_the_confirmation() {
+        // Rows: 80 % at 5 mm/s (F300) and 20 % at 33.3333 mm/s (F2000 written as F1999.998).
+        let summary = gantry_summary_with(vec![row(80.0, 5.0), row(20.0, 33.333_33)]);
+        let check = |text: &str| check_gantry_bytes(&summary, &gcode_decode(text, 1000));
+        assert!(check("G21 G90\nM3 S800\nG1 X10 Y0 F300\nM5\nM3 S200\nG1 X0 F1999.998\nM5\n").is_ok());
+        assert!(check("G0 X5 F9000\nM5\n").is_ok(), "travel never burns");
+        let code = |text: &str| check(text).unwrap_err().code;
+        // More power than any row shows.
+        assert_eq!(code("M3 S900\nG1 X10 F300\n"), RefusalCode::BytesMismatch);
+        // A shown power at a speed no row shows (slower = more energy per mm, faster = beyond what was confirmed).
+        assert_eq!(code("M3 S800\nG1 X10 F150\n"), RefusalCode::BytesMismatch);
+        assert_eq!(code("M3 S800\nG1 X10 F2000\n"), RefusalCode::BytesMismatch);
+        // A power and a speed that are each shown, but not together.
+        assert_eq!(code("M3 S800\nG1 X10 F1999.998\n"), RefusalCode::BytesMismatch);
+        // No feed, inverse time.
+        assert_eq!(code("M3 S800\nG1 X10\n"), RefusalCode::BytesMismatch);
+        assert_eq!(code("G93\nM3 S800\nG1 X10 F300\n"), RefusalCode::BytesMismatch);
+        // A program that burns while the confirmation shows nothing.
+        let empty = gantry_summary_with(Vec::new());
+        assert!(check_gantry_bytes(&empty, &gcode_decode("M3 S1\nG1 X1 F300\n", 1000)).is_err());
+        assert!(check_gantry_bytes(&empty, &gcode_decode("G0 X1\n", 1000)).is_ok());
     }
 
     #[test]
