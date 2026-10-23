@@ -671,9 +671,10 @@ fn engine_env(sim: openlaser_lmc_sim::SimConfig) -> Env {
     }
 }
 
-/// Waits (real time) for the first executed pass, then presses Enter.
+/// Presses Enter every second for a minute: the first one after an executed pass is accepted, the earlier ones are
+/// refused (as a person would retry), and the rest are ignored while marking.
 fn enter_after_frame() -> Vec<Key> {
-    vec![Key::Wait(400), Key::Enter]
+    (0..60).flat_map(|_| [Key::Wait(200), Key::Enter]).collect()
 }
 
 #[test]
