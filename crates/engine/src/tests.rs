@@ -439,6 +439,21 @@ fn driver_events_fold_into_status_receipts_and_requests() {
 fn stop_never_refused() {
     let stop_ids: Vec<&str> = registry().specs().iter().filter(|s| s.access == Access::Stop).map(|s| s.id).collect();
     assert!(stop_ids.contains(&"laser.stop") && stop_ids.contains(&"laser.frameStop"));
+    // Good params, then adversarial ones: every one trips before anything looks at it (§1.3 rule 5).
+    let all_params = [
+        Value::Null,
+        json!({ "machine": "jpt-m7-200-sim" }),
+        json!({ "machine": "jpt-m7-200" }),
+        json!({ "machine": "no-such-machine" }),
+        json!({ "bogus": 1 }),
+        json!({ "machine": 5 }),
+        json!({ "coalesce": 7 }),
+        json!({ "dryRun": true }),
+        json!({ "machine": "jpt-m7-200-sim", "all": true }),
+        json!([]),
+        json!("stop"),
+        json!(42),
+    ];
     for with_device in [false, true] {
         for with_doc_open in [false, true] {
             let mut s = if with_device { human().0 } else { Session::new(config(Origin::Human, true, DeviceAccess::None)) };
@@ -450,17 +465,33 @@ fn stop_never_refused() {
             }
             for origin in [Origin::Human, Origin::Synthetic, Origin::Headless, Origin::Replay] {
                 for id in &stop_ids {
-                    for params in [Value::Null, json!({ "machine": "jpt-m7-200-sim" })] {
+                    for params in &all_params {
                         if let Some(slot) = s.hub.first_mut() {
                             slot.status.state = MachineState::Running { packets_acked: 1, total: 9 };
                         }
                         plant_pending_if_doc(&mut s);
-                        match s.execute_as(origin, id, params.clone()) {
-                            Ok(_) => assert!(s.pending_arm().is_none(), "{id} {origin:?}: a stop voids the pending ARM"),
+                        let trips = s.stop_registry().trips();
+                        let out = s.execute_as(origin, id, params.clone());
+                        assert!(s.stop_registry().trips() > trips, "{id} {origin:?} ({params}): nothing was tripped");
+                        assert!(s.pending_arm().is_none(), "{id} {origin:?} ({params}): a stop voids the pending ARM");
+                        match out {
+                            Ok(v) => {
+                                assert!(with_device, "{id} {origin:?} ({params})");
+                                // The running sim machine is stopped whatever machine was named.
+                                assert_eq!(v["stopped"][0]["machine"], "jpt-m7-200-sim", "{id} {origin:?} ({params}): {v}");
+                                assert_eq!(v["latched"], true, "{v}");
+                            }
                             Err(EngineError::NoDevice) => assert!(!with_device, "{id} {origin:?}"),
+                            Err(EngineError::BadParams { message, .. }) => {
+                                assert!(with_device, "{id} {origin:?} ({params})");
+                                assert!(message.contains("stopped anyway"), "{message}");
+                            }
                             Err(e) => panic!("{id} from {origin:?} ({params}) was refused: {e}"),
                         }
                         s.pending_arm = None;
+                        if let Some(slot) = s.hub.first_mut() {
+                            slot.status.fault = None;
+                        }
                     }
                     let row = s.command_list(origin, &crate::ListFilter::default()).into_iter().find(|r| r.id == *id).unwrap();
                     assert!(row.enabled, "{id} must never be disabled");
@@ -668,8 +699,19 @@ fn atomic_batch_rolls_back() {
     assert_eq!(s.active().unwrap().history.labels().len(), labels.len() + 1);
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!(*project(&s), *before);
+    // A stop is never refused there: it runs in its place (here, with no device, it fails with NoDevice and the
+    // batch rolls back).
+    let r = s.batch(
+        Origin::Headless,
+        vec![("tools.drawLines".into(), json!({ "pointsMm": [[0, 0], [1, 1]] })), ("laser.stop".into(), json!({}))],
+        true,
+        Some("x".into()),
+    );
+    assert_eq!((r.completed, r.failed, r.rolled_back), (1, 1, true), "{r:?}");
+    assert_eq!(r.results[1]["error"]["code"], "no_device");
+    assert_eq!(*project(&s), *before);
     // Device, file and request commands are refused inside an atomic batch, before anything runs.
-    for id in ["laser.stop", "file.save", "job.submit", "device.connect"] {
+    for id in ["file.save", "job.submit", "device.connect"] {
         let r = s.batch(
             Origin::Headless,
             vec![("tools.drawLines".into(), json!({ "pointsMm": [[0, 0], [1, 1]] })), (id.into(), json!({}))],

@@ -161,10 +161,13 @@ impl Session {
 
     /// Pipeline steps 2–9 for one resolved spec.
     pub(crate) fn run_spec(&mut self, spec: crate::command::CommandSpec, origin: Origin, parent: Option<Origin>, params: Value) -> Result<Value, EngineError> {
+        let effective = if origin == Origin::Replay { parent.unwrap_or(Origin::Replay) } else { origin };
+        if spec.access == Access::Stop {
+            return self.run_stop_spec(spec, origin, effective, params);
+        }
         // 2. params is an object or null; split the universal keys.
         let (params, coalesce, dry_run) = split_universal(spec.id, params)?;
         // 3. policy, before any decode or side effect.
-        let effective = if origin == Origin::Replay { parent.unwrap_or(Origin::Replay) } else { origin };
         policy(&spec, origin, effective, self.cfg.window)?;
         // 4. roots: a non-human Roots command needs filesystem authority.
         if spec.access == Access::Roots && effective != Origin::Human && matches!(self.cfg.files, FsAuthority::Denied) {
@@ -207,6 +210,28 @@ impl Session {
         result
     }
 
+    /// A Stop command is never refused, never disabled and never journaled (§1.3 rule 5): no policy, no split of the
+    /// universal keys, no decode here. Its `run` gets the raw params and trips the latches before it looks at them.
+    /// If it panics anyway, every latch is tripped before the error is returned.
+    fn run_stop_spec(&mut self, spec: crate::command::CommandSpec, origin: Origin, effective: Origin, params: Value) -> Result<Value, EngineError> {
+        let prev = self.ctx.replace(Ctx { origin, effective, coalesce: None, dry_run: false });
+        let run = spec.run;
+        let outcome = catch_unwind(AssertUnwindSafe(|| run(self, params)));
+        self.ctx = prev;
+        match outcome {
+            Ok(r) => r,
+            Err(_) => {
+                log::error!("{}: panicked; every machine is being stopped", spec.id);
+                let registry = Arc::clone(&self.stop_registry);
+                if catch_unwind(AssertUnwindSafe(|| registry.stop_all(crate::devices::STOP_WAIT))).is_err() {
+                    log::error!("{}: stop_all panicked too", spec.id);
+                }
+                self.void_pending_arm("stopped");
+                Err(EngineError::Internal(spec.id.to_owned()))
+            }
+        }
+    }
+
     /// Steps 6 and 7, called by every `command!` `run` after the strict decode: `enabled` (never for Stop commands)
     /// and the device-busy refusal for `Device(Light | Emit | Connect)`.
     pub(crate) fn pre_run(&mut self, id: &str) -> Result<(), EngineError> {
@@ -234,7 +259,8 @@ impl Session {
         match atomic {
             None => {
                 let mut out = BatchResult { completed: 0, failed: 0, rolled_back: false, results: Vec::with_capacity(steps.len()) };
-                for (id, params) in steps {
+                let mut steps = steps.into_iter().enumerate();
+                while let Some((_, (id, params))) = steps.next() {
                     match self.dispatch(Origin::Replay, Some(origin), &id, params) {
                         Ok(v) => {
                             out.completed += 1;
@@ -244,6 +270,7 @@ impl Session {
                             out.failed += 1;
                             out.results.push(step_error(&e));
                             if stop_on_error {
+                                self.run_skipped_stops(origin, steps, &mut out);
                                 break;
                             }
                         }
@@ -255,29 +282,59 @@ impl Session {
         }
     }
 
+    /// A Stop step is never skipped (§1.3 rule 5: a stop is never queued behind another request): when a batch ends
+    /// early (a failed step with `stop_on_error`, a rolled-back or refused atomic batch), the Stop steps it did not
+    /// reach still run, in order. Their results are appended with their `step` index.
+    fn run_skipped_stops(&mut self, origin: Origin, rest: impl Iterator<Item = (usize, (String, Value))>, out: &mut BatchResult) {
+        let reg = registry();
+        for (i, (id, params)) in rest {
+            if reg.find(&id).is_none_or(|s| s.access != Access::Stop) {
+                continue;
+            }
+            match self.dispatch(Origin::Replay, Some(origin), &id, params) {
+                Ok(v) => {
+                    out.completed += 1;
+                    out.results.push(serde_json::json!({ "ok": true, "step": i, "result": v }));
+                }
+                Err(e) => {
+                    out.failed += 1;
+                    out.results.push(serde_json::json!({ "ok": false, "step": i, "error": e.to_json() }));
+                }
+            }
+        }
+    }
+
     fn atomic_batch(&mut self, origin: Origin, steps: Vec<(String, Value)>, label: String) -> BatchResult {
         let reg = registry();
+        let mut refusal = None;
         for (id, _) in &steps {
-            let err = match reg.find(id) {
+            refusal = match reg.find(id) {
                 None => Some(EngineError::UnknownCommand { id: id.clone(), suggestions: reg.suggestions(id).into_iter().map(str::to_owned).collect() }),
+                // A stop is never refused: it runs in its place (rolling the batch back never un-stops anything).
+                Some(s) if s.access == Access::Stop => None,
                 Some(s) if matches!(s.kind, Kind::Device(_) | Kind::Io | Kind::Request) => Some(EngineError::refused(
                     openlaser_types::RefusalCode::UnsupportedMode,
                     format!("`{}` cannot run inside an atomic batch (device, file and request commands are refused there)", s.id),
                 )),
                 Some(_) => None,
             };
-            if let Some(e) = err {
-                return BatchResult { completed: 0, failed: 1, rolled_back: false, results: vec![step_error(&e)] };
+            if refusal.is_some() {
+                break;
             }
         }
-        if self.group.is_some() {
-            let e = EngineError::disabled("command_batch", "atomic batches do not nest");
-            return BatchResult { completed: 0, failed: 1, rolled_back: false, results: vec![step_error(&e)] };
+        if refusal.is_none() && self.group.is_some() {
+            refusal = Some(EngineError::disabled("command_batch", "atomic batches do not nest"));
+        }
+        if let Some(e) = refusal {
+            let mut out = BatchResult { completed: 0, failed: 1, rolled_back: false, results: vec![step_error(&e)] };
+            self.run_skipped_stops(origin, steps.into_iter().enumerate(), &mut out);
+            return out;
         }
         let base = self.snapshot();
         self.group = Some(Group);
         let mut out = BatchResult { completed: 0, failed: 0, rolled_back: false, results: Vec::with_capacity(steps.len()) };
-        for (id, params) in steps {
+        let mut steps = steps.into_iter().enumerate();
+        for (_, (id, params)) in steps.by_ref() {
             match self.dispatch(Origin::Replay, Some(origin), &id, params) {
                 Ok(v) => {
                     out.completed += 1;
@@ -294,6 +351,7 @@ impl Session {
         self.group = None;
         if out.rolled_back {
             self.restore(base, true);
+            self.run_skipped_stops(origin, steps, &mut out);
             return out;
         }
         // One history state per changed document, labelled with the batch label.
@@ -725,7 +783,7 @@ impl Session {
 }
 
 /// Splits the universal keys off the params (pipeline step 2).
-fn split_universal(id: &str, params: Value) -> Result<(Value, Option<String>, bool), EngineError> {
+pub(crate) fn split_universal(id: &str, params: Value) -> Result<(Value, Option<String>, bool), EngineError> {
     match params {
         Value::Null => Ok((Value::Null, None, false)),
         Value::Object(mut m) => {
