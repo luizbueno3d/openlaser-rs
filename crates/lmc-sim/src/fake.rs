@@ -127,7 +127,8 @@ impl FakeLmc {
     pub fn set_hook(&self, hook: WireHook) {
         *self.hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
-    pub(crate) fn set_field_mm(&mut self, field_mm: [f64; 2]) {
+    /// The effective field F per axis (machine `field_f()`), used to report emission in mm. Default 236.68.
+    pub fn set_field_mm(&mut self, field_mm: [f64; 2]) {
         self.field_mm = field_mm;
     }
     fn check(&self) -> Result<(), XferError> {
@@ -146,8 +147,10 @@ impl FakeLmc {
             && self.queue.len() < usize::from(self.cfg.buffer_depth)
             && self.packet_pending.is_none()
     }
+    /// `status_extra_bits` adds unknown bits (an idle 0x0220 board); it can never claim READY or BUSY, which come only
+    /// from the board model.
     fn status(&self) -> u16 {
-        self.cfg.status_extra_bits
+        self.cfg.status_extra_bits & !(openlaser_lmc::StatusWord::READY | openlaser_lmc::StatusWord::BUSY)
             | if self.ready() { openlaser_lmc::StatusWord::READY } else { 0 }
             | if self.executing { openlaser_lmc::StatusWord::BUSY } else { 0 }
     }
@@ -162,11 +165,11 @@ impl FakeLmc {
         r.writes_while_not_ready = r.writes_while_not_ready.saturating_add(1);
     }
     fn set_mo(&mut self, open: bool, at: MonoTime) {
+        let mut r = self.recorder.recording.lock().unwrap_or_else(|e| e.into_inner());
         if open && !self.mo {
             self.mo_since = Some(at);
         }
         if !open && self.mo {
-            let mut r = self.recorder.recording.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(start) = self.mo_since.take() {
                 r.mo_open.push((start, at));
             }
@@ -175,6 +178,12 @@ impl FakeLmc {
             }
         }
         self.mo = open;
+        r.mo = open;
+        r.mo_open_since = self.mo_since;
+    }
+    fn set_port(&mut self, port: u16) {
+        self.port = port;
+        self.recorder.recording.lock().unwrap_or_else(|e| e.into_inner()).port = port;
     }
     // Decode the raw wire independently: no lmc decoder, disassembler or plan estimator.
     fn accept(&mut self, packet: &Packet, slots: usize) {
@@ -264,6 +273,16 @@ impl FakeLmc {
     /// Successive polls extend one segment; changing the emission gate starts a separate segment.
     fn record_progress(&mut self, a: &mut Active, now: MonoTime) {
         let w = a.words;
+        if w[0] == op::LIST_LASER_ON_POINT {
+            // The laser fires in place for the command's duration: a zero-length burn where the galvo is.
+            if a.burn.is_none() && self.mo && self.port & 1 != 0 {
+                let here = [(self.position[0] - 32768.0) * self.field_mm[0] / 65535.0, (self.position[1] - 32768.0) * self.field_mm[1] / 65535.0];
+                let mut r = self.recorder.recording.lock().unwrap_or_else(|e| e.into_inner());
+                a.burn = Some(r.burned.len());
+                r.burned.push(EmittedSegment { a: here, b: here, power_pct: f64::from(self.mark_current) * 100.0 / 4095.0 });
+            }
+            return;
+        }
         if !matches!(w[0], op::LIST_MARK_TO | op::LIST_JUMP_TO) {
             return;
         }
@@ -302,7 +321,7 @@ impl FakeLmc {
     }
     fn apply(&mut self, w: [u16; 6], at: MonoTime) {
         match w[0] {
-            op::LIST_WRITE_PORT => self.port = w[1],
+            op::LIST_WRITE_PORT => self.set_port(w[1]),
             op::LIST_MARK_CURRENT => self.mark_current = w[1],
             op::LIST_MARK_SPEED => self.mark_speed = w[1],
             op::LIST_JUMP_SPEED => self.jump_speed = w[1],
@@ -328,7 +347,7 @@ impl LmcTransport for FakeLmc {
         self.notify(SimWire::Single { at, words: cmd.0 });
         match cmd.0[0] {
             op::FIBER_SET_MO => self.set_mo(cmd.0[1] != 0, at),
-            op::WRITE_PORT => self.port = cmd.0[1],
+            op::WRITE_PORT => self.set_port(cmd.0[1]),
             op::EXECUTE_LIST => {
                 self.executing = true;
                 self.stopping = false;
@@ -342,7 +361,7 @@ impl LmcTransport for FakeLmc {
                 self.queue.clear();
                 if cmd.0[0] == op::RESET {
                     self.set_mo(false, at);
-                    self.port = 0;
+                    self.set_port(0);
                 }
             }
             _ => {}
@@ -436,11 +455,18 @@ pub struct Recording {
     pub error: Option<XferError>,
     /// single/packet/read with virtual timestamps (for T6 ordering asserts).
     pub wire: Vec<SimWire>,
-    /// MarkTo while executing, MO open, port bit 0 set.
+    /// MarkTo while executing, MO open, port bit 0 set (and LaserOnPoint, as a zero-length segment).
     pub burned: Vec<EmittedSegment>,
     /// Red-light traces (port bit 8 set, JumpTo).
     pub lit: Vec<[[f64; 2]; 2]>,
+    /// Closed MO-open intervals.
     pub mo_open: Vec<(MonoTime, MonoTime)>,
+    /// The start of an MO-open interval that has not closed yet (`None` while MO is closed).
+    pub mo_open_since: Option<MonoTime>,
+    /// The board's current (at the end: final) MO state.
+    pub mo: bool,
+    /// The board's current (at the end: final) output port word.
+    pub port: u16,
     /// Must stay 0.
     pub writes_while_not_ready: u32,
     /// Must stay 0 unless stopping.
@@ -516,7 +542,7 @@ pub fn simulate_job(job: &LmcJob, m: &GalvoMachine) -> Recording {
     if let Err(error) = run(&mut board) {
         board.executing = false;
         board.set_mo(false, clock.now());
-        board.port = 0;
+        board.set_port(0);
         board.recorder.recording.lock().unwrap_or_else(|e| e.into_inner()).error = Some(error);
     }
     board.recorder().snapshot()

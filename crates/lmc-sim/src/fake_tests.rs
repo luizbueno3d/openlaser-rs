@@ -63,27 +63,68 @@ fn fake_records_mark_box10_emission() {
     assert_eq!(r.mo_closed_while_busy, 0);
     assert_eq!(r.mo_open.len(), 1);
 }
+fn sim_machine() -> openlaser_machine::GalvoMachine {
+    let openlaser_machine::Kinematics::Galvo(m) = openlaser_machine::jpt_m7_200_sim().kind else { panic!("the sim profile is a galvo") };
+    m
+}
+/// Runs one list as the session does (ResetList, GetVersion, packets with SetEndOfList, ExecuteList after the first),
+/// then waits until the board is no longer BUSY.
+fn run_list(b: &mut FakeLmc, clock: &VirtualClock, packets: &[Packet]) {
+    single(b, op::RESET_LIST, 0);
+    for (i, p) in packets.iter().enumerate() {
+        while !status(b).ready() {
+            clock.advance(Duration::from_millis(5));
+        }
+        submit(b, p);
+        single(b, op::SET_END_OF_LIST, 0);
+        if i == 0 {
+            single(b, op::EXECUTE_LIST, 0);
+        }
+    }
+    for _ in 0..100_000 {
+        if !status(b).busy() {
+            return;
+        }
+        clock.advance(Duration::from_millis(5));
+    }
+    panic!("the list never finished");
+}
+
+/// The shipping frame lists (`encode_frame` on the T1 frame inputs) burn nothing, even on a board whose MO is open and
+/// whose laser bit is set when the frame starts (what a frame after a crashed job would meet), and they never open MO.
 #[test]
 fn fake_frame_records_zero_emission() {
+    let m = sim_machine();
     for name in ["frame_box10", "bc_frame"] {
-        let clock = Arc::new(VirtualClock::new());
-        let mut b = FakeLmc::new(config(), clock.clone());
-        for (i, p) in golden(name).iter().enumerate() {
-            while !status(&mut b).ready() {
-                clock.advance(Duration::from_millis(5));
+        let s = openlaser_testkit::t1::load("v1", name).unwrap_or_else(|e| panic!("{e}"));
+        let paths = openlaser_testkit::t1::polylines(&s).unwrap_or_else(|e| panic!("{e}"));
+        let plan = openlaser_safety::testing::frame_plan_unchecked(
+            paths.into_iter().map(openlaser_safety::Polyline).collect(),
+            openlaser_types::Fingerprint([1; 32]),
+            openlaser_types::MachineId("jpt-m7-200-sim".into()),
+            openlaser_types::FrameStyle::Contour,
+            openlaser_types::FrameSource::Job,
+        );
+        let job = openlaser_lmc::encode_frame(&plan, &m).unwrap_or_else(|e| panic!("{e}"));
+        for mo_already_open in [true, false] {
+            let clock = Arc::new(VirtualClock::new());
+            let mut b = FakeLmc::new(config(), clock.clone());
+            b.set_field_mm(m.field_f());
+            if mo_already_open {
+                single(&mut b, op::FIBER_SET_MO, 1);
+                single(&mut b, op::WRITE_PORT, 1);
             }
-            submit(&mut b, p);
-            if i == 0 {
-                single(&mut b, op::EXECUTE_LIST, 0);
-            }
+            let opened_at = b.recorder().snapshot().mo_open_since;
+            run_list(&mut b, &clock, &job.once);
+            run_list(&mut b, &clock, &job.pass);
+            let r = b.recorder().snapshot();
+            assert!(r.burned.is_empty(), "{name}: a frame burned {:?}", r.burned.first());
+            assert!(!r.lit.is_empty(), "{name}: the red light traced nothing");
+            assert_eq!(r.port & 1, 0, "{name}: the frame left the laser bit set");
+            assert!(r.mo_open.is_empty(), "{name}: the frame closed or opened MO");
+            assert_eq!((r.mo, r.mo_open_since), (mo_already_open, opened_at), "{name}: the frame changed MO");
+            assert_eq!(r.writes_while_not_ready, 0);
         }
-        clock.advance(Duration::from_secs(30));
-        assert!(!status(&mut b).busy());
-        let r = b.recorder().snapshot();
-        assert!(r.burned.is_empty());
-        assert!(r.mo_open.is_empty());
-        assert!(!r.lit.is_empty());
-        assert_eq!(r.writes_while_not_ready, 0);
     }
 }
 #[test]
@@ -305,4 +346,63 @@ fn independent_emission_matches_all_marking_scenario_paths() {
         assert_eq!(r.mo_closed_while_busy, 0);
         assert_eq!(r.writes_while_not_ready, 0);
     }
+}
+
+#[test]
+fn status_extra_bits_never_claim_ready_or_busy() {
+    let mut cfg = config();
+    cfg.status_extra_bits = 0xFFFF;
+    cfg.faults = vec![Fault::ReadyNeverReturns { after_execute: false }];
+    let mut b = FakeLmc::new(cfg, Arc::new(VirtualClock::new()));
+    let s = status(&mut b);
+    assert!(!s.ready() && !s.busy(), "{:#06x}", s.0);
+    assert_eq!(s.0 & 0x0200, 0x0200, "unknown bits are kept");
+}
+
+#[test]
+fn laser_on_point_is_recorded_as_emission() {
+    let clock = Arc::new(VirtualClock::new());
+    let mut b = FakeLmc::new(config(), clock.clone());
+    b.set_field_mm([200.0, 200.0]);
+    single(&mut b, op::FIBER_SET_MO, 1);
+    submit(
+        &mut b,
+        &packet(&[
+            [op::LIST_WRITE_PORT, 1, 0, 0, 0, 0],
+            [op::LIST_MARK_CURRENT, 4095, 0, 0, 0, 0],
+            [op::LIST_JUMP_TO, 32768 + 3277, 32768, 0, 3277, 0],
+            [op::LIST_LASER_ON_POINT, 100, 0, 0, 0, 0],
+        ]),
+    );
+    single(&mut b, op::EXECUTE_LIST, 0);
+    clock.advance(Duration::from_secs(1));
+    assert!(!status(&mut b).busy());
+    let r = b.recorder().snapshot();
+    assert_eq!(r.burned.len(), 1);
+    let at = r.burned[0];
+    assert_eq!(at.a, at.b);
+    assert!((at.a[0] - 3277.0 * 200.0 / 65535.0).abs() < 1e-9, "{at:?}: reported in the field set by set_field_mm");
+    assert_eq!(at.power_pct, 100.0);
+}
+
+#[test]
+fn an_mo_left_open_and_the_final_port_are_recorded() {
+    let clock = Arc::new(VirtualClock::new());
+    let mut b = FakeLmc::new(config(), clock.clone());
+    let r = b.recorder().snapshot();
+    assert_eq!((r.mo, r.mo_open_since, r.port), (false, None, 0));
+    clock.advance(Duration::from_secs(3));
+    single(&mut b, op::FIBER_SET_MO, 1);
+    single(&mut b, op::WRITE_PORT, 0x0101);
+    clock.advance(Duration::from_secs(4));
+    let r = b.recorder().snapshot();
+    assert!(r.mo_open.is_empty(), "the interval has not closed");
+    assert_eq!(r.mo_open_since, Some(MonoTime(Duration::from_secs(3))));
+    assert_eq!((r.mo, r.port), (true, 0x0101));
+    single(&mut b, op::FIBER_SET_MO, 0);
+    let r = b.recorder().snapshot();
+    assert_eq!(r.mo_open, [(MonoTime(Duration::from_secs(3)), MonoTime(Duration::from_secs(7)))]);
+    assert_eq!((r.mo, r.mo_open_since), (false, None));
+    single(&mut b, op::RESET, 0);
+    assert_eq!(b.recorder().snapshot().port, 0);
 }
