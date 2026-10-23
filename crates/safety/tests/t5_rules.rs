@@ -215,6 +215,21 @@ fn safety_plus_half_field_refused() {
 }
 
 #[test]
+#[ignore = "needs I1"]
+fn safety_not_encodable_refused() {
+    // A word that does not fit 16 bits is refused, never wrapped (OM's `& 0xFFFF` wraps 0.2 kHz): 20000 / 0.2 kHz
+    // = 100000. The frequency rule fires too; the encodability rule names the word.
+    let m = jpt();
+    let mut q = default_words(&m);
+    q.frequency = Hz::new(200).unwrap();
+    q.q_period = 0;
+    let p = job(&m, vec![section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(q))]);
+    let r = validate(&p, &m).unwrap_err();
+    assert!(r.refusals.iter().any(|x| x.code == RefusalCode::NotEncodable && x.message.contains("frequency")), "{:?}", r.refusals);
+    assert!(r.refusals.iter().any(|x| x.code == RefusalCode::FrequencyOutOfRange));
+}
+
+#[test]
 fn safety_non_finite_refused() {
     let (m, p) = galvo_job(vec![line(&[[0.0, 0.0], [f64::NAN, 1.0]]), line(&[[f64::INFINITY, 0.0], [0.0, 0.0]])]);
     let c = codes(&validate(&p, &m));
