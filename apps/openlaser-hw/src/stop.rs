@@ -7,7 +7,7 @@
 //! - **Panics.** A panic hook stops every machine (≤ 500 ms) before the previous hook runs.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -33,6 +33,39 @@ impl StopTarget for StopRegistry {
 
     fn stop_and_wait(&self, max: Duration) -> Vec<(MachineId, StopAck)> {
         self.stop_all(max)
+    }
+}
+
+/// Counts every stop asked for through it (the key thread, the signal watcher, the panic hook and the flow), then
+/// forwards it. The driver clears its latch for a command queued after a trip (SPEC §5.3), so a stop that lands
+/// between the typed `ARM <challenge>` and the run being queued would be lost; the flow compares this count before
+/// and after queueing to refuse or re-trip instead (see `flow::start_marking`).
+pub struct CountingStop {
+    inner: Arc<dyn StopTarget>,
+    requests: AtomicU64,
+}
+
+impl CountingStop {
+    pub fn new(inner: Arc<dyn StopTarget>) -> Self {
+        CountingStop { inner, requests: AtomicU64::new(0) }
+    }
+
+    /// Stops asked for so far.
+    pub fn requests(&self) -> u64 {
+        self.requests.load(Ordering::SeqCst)
+    }
+}
+
+impl StopTarget for CountingStop {
+    /// Counts first, then trips: whoever reads an unchanged count knows the trip has not happened yet.
+    fn stop_now(&self) {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        self.inner.stop_now();
+    }
+
+    fn stop_and_wait(&self, max: Duration) -> Vec<(MachineId, StopAck)> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        self.inner.stop_and_wait(max)
     }
 }
 

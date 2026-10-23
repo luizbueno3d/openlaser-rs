@@ -14,14 +14,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use openlaser_arm::HumanConfirm;
-use openlaser_arm::testing::confirm_for_tests;
+use openlaser_arm::testing::{confirm_for_tests, token_for_tests};
 use openlaser_engine::{
     ArmToken, EmissionSummary, Fingerprint, FrameMode, FrameReceipt, FrameSource, FrameStyle, MachineId, MonoTime, SessionId, StopAck, StopReport,
 };
 use openlaser_hw::args::JobSource;
 use openlaser_hw::builtin::Builtin;
+use openlaser_hw::flow::start_marking;
 use openlaser_hw::rig::{ArmView, EngineRigs, Rig, RigEvent, RigFactory, RigSpec};
-use openlaser_hw::stop::StopTarget;
+use openlaser_hw::stop::{CountingStop, StopTarget};
 use openlaser_hw::trace::{TraceWriter, from_t1};
 use openlaser_hw::tty_arm::arm_line_matches;
 use openlaser_hw::{EXIT_FAIL, EXIT_OK, EXIT_USAGE, Env, HwError, KeyPoll, KeySession, StopFn, StopKey, Terminal, default_sim_config, run_with};
@@ -198,6 +199,8 @@ struct Script {
     opened: u32,
     /// What `stop_and_wait` answers instead of one confirmed report (a driver that never reported, say).
     stop_acks: Option<Vec<(MachineId, StopAck)>>,
+    /// A stop that lands while `run_armed` is queueing the job (the key thread racing the main thread).
+    stop_during_run_armed: Option<Arc<dyn StopTarget>>,
 }
 
 type Shared = Arc<Mutex<Script>>;
@@ -302,6 +305,10 @@ impl Rig for FakeRig {
 
     fn run_armed(&mut self, token: ArmToken) -> Result<(), HwError> {
         self.call(&format!("run_armed {}", token.fingerprint().short()));
+        let racing = self.s.lock().unwrap().stop_during_run_armed.clone();
+        if let Some(stop) = racing {
+            stop.stop_now();
+        }
         self.s
             .lock()
             .unwrap()
@@ -506,6 +513,64 @@ fn unconfirmed_frame_stop_never_reaches_arm() {
         assert!(!has(&calls(&s), "request_arm"), "{acks:?}: {:?}", calls(&s));
         assert!(term.challenges.is_empty());
     }
+}
+
+fn armed_token() -> ArmToken {
+    token_for_tests(FP, Fingerprint([0x43; 32]), MachineId("jpt-m7-200-sim".into()), SessionId(1), MonoTime(Duration::from_secs(60)), 7)
+}
+
+fn fake_rig(s: &Shared) -> Box<dyn Rig> {
+    FakeRigs(Arc::clone(s)).open(&RigSpec { purpose: openlaser_hw::rig::Purpose::Run, device: Default::default(), extent: None }).unwrap()
+}
+
+#[test]
+fn stop_after_the_frame_was_accepted_marks_nothing() {
+    // Space between the accepted frame and queueing the run: the driver would clear its latch for a command queued
+    // after the trip (SPEC §5.3), so the CLI refuses to queue it at all.
+    let s: Shared = Arc::new(Mutex::new(Script::default()));
+    let mut rig = fake_rig(&s);
+    let stops = CountingStop::new(rig.stopper());
+    let before = stops.requests();
+    stops.stop_now();
+    let err = start_marking(rig.as_mut(), &stops, before, armed_token()).unwrap_err();
+    assert!(err.to_string().contains("nothing was marked"), "{err}");
+    assert!(!has(&calls(&s), "run_armed"), "{:?}", calls(&s));
+}
+
+#[test]
+fn stop_racing_the_queued_run_trips_again_after_it() {
+    // The key thread trips the latch while the main thread is queueing the run: the CLI trips it again once the run
+    // exists, so the stop cancels it instead of being cleared for it.
+    let s: Shared = Arc::new(Mutex::new(Script::default()));
+    let mut rig = fake_rig(&s);
+    let stops = Arc::new(CountingStop::new(rig.stopper()));
+    s.lock().unwrap().stop_during_run_armed = Some(Arc::clone(&stops) as Arc<dyn StopTarget>);
+    let before = stops.requests();
+    start_marking(rig.as_mut(), &stops, before, armed_token()).unwrap();
+    let c = calls(&s);
+    let queued = c.iter().position(|x| x.starts_with("run_armed")).unwrap();
+    let after: Vec<&String> = c.iter().skip(queued + 1).filter(|x| *x == "stop_now").collect();
+    assert_eq!(after.len(), 2, "the racing stop and the re-trip after queueing: {c:?}");
+    // Without a stop nothing is tripped.
+    let s: Shared = Arc::new(Mutex::new(Script::default()));
+    let mut rig = fake_rig(&s);
+    let stops = CountingStop::new(rig.stopper());
+    start_marking(rig.as_mut(), &stops, stops.requests(), armed_token()).unwrap();
+    assert!(!has(&calls(&s), "stop_now"), "{:?}", calls(&s));
+}
+
+#[test]
+fn enter_read_with_the_first_receipt_is_judged_before_it() {
+    // The board's first executed pass and an Enter arrive in the same poll: the Enter was pressed before the CLI saw
+    // the pass, so it does not accept the frame.
+    let script = Script { batches: VecDeque::from([vec![RigEvent::FrameCompleted(receipt(1, FrameSource::Job))]]), power_pct: 1.0, ..Script::default() };
+    let (mut env, s) = fake_env(script);
+    let mut term = Scripted::new(true, &[Key::Enter, Key::Wait(2), Key::Stop(StopKey::Esc)]);
+    assert_eq!(run_with(&argv("run --builtin dot --sim --allow-emission"), &mut term, &mut env), EXIT_FAIL);
+    let out = term.output();
+    assert!(out.contains("Enter ignored (frame_required)"), "{out}");
+    assert!(!out.contains("Frame accepted"), "{out}");
+    assert!(!has(&calls(&s), "request_arm"));
 }
 
 #[test]

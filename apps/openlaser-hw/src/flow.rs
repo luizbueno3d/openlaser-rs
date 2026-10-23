@@ -10,12 +10,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use openlaser_engine::{FrameMode, FrameReceipt};
+use openlaser_engine::{ArmToken, FrameMode, FrameReceipt};
 use openlaser_types::RefusalCode;
 
 use crate::args::{FrameOpts, RunOpts, StatusOpts};
 use crate::rig::{Purpose, Rig, RigEvent, RigSpec};
-use crate::stop::{self, STOP_WAIT, StopTarget};
+use crate::stop::{self, CountingStop, STOP_WAIT, StopTarget};
 use crate::{Env, HwError, KeyPoll, KeySession, StopFn, StopKey, Terminal, require_tty, summary};
 
 /// Signal handlers, the watcher and the panic hook, held for the length of a device command.
@@ -120,6 +120,29 @@ fn frame_phase(
     let mut accepted: Option<FrameReceipt> = None;
     let mut announced_passes = 0u32;
     loop {
+        // Keys first: an Enter is judged against the passes seen before it was read, never against a receipt that
+        // arrives in the same iteration (S20: the pass must have executed before the person accepts it).
+        match keys.poll() {
+            KeyPoll::Enter if accept_on_enter => match accepted.as_ref().map(|r| summary::receipt_accepts(r, &fp)) {
+                Some(Ok(())) => {
+                    if let Some(r) = accepted.take() {
+                        return Ok(Phase::Accepted(r));
+                    }
+                }
+                Some(Err(refusal)) => term.write(&format!("Enter ignored ({}): {}\n", refusal.code.as_str(), refusal.message)),
+                None => term.write(&format!(
+                    "Enter ignored ({}): no frame pass has been executed by the board yet; wait for one full pass.\n",
+                    RefusalCode::FrameRequired.as_str()
+                )),
+            },
+            KeyPoll::Enter | KeyPoll::Nothing => {}
+            KeyPoll::Closed => {
+                term.write("The key reader closed: stopping.\n");
+                let acks = target.stop_and_wait(STOP_WAIT);
+                print_stop(term, &acks);
+                return Ok(Phase::Stopped);
+            }
+        }
         for ev in rig.poll() {
             match ev {
                 RigEvent::FrameCompleted(r) => {
@@ -144,27 +167,6 @@ fn frame_phase(
                 }
                 RigEvent::Warning(w) => term.write(&format!("warning: {w}\n")),
                 RigEvent::Progress { .. } | RigEvent::Finished(_) | RigEvent::ArmVoided(_) => {}
-            }
-        }
-        match keys.poll() {
-            KeyPoll::Enter if accept_on_enter => match accepted.as_ref().map(|r| summary::receipt_accepts(r, &fp)) {
-                Some(Ok(())) => {
-                    if let Some(r) = accepted.take() {
-                        return Ok(Phase::Accepted(r));
-                    }
-                }
-                Some(Err(refusal)) => term.write(&format!("Enter ignored ({}): {}\n", refusal.code.as_str(), refusal.message)),
-                None => term.write(&format!(
-                    "Enter ignored ({}): no frame pass has been executed by the board yet; wait for one full pass.\n",
-                    RefusalCode::FrameRequired.as_str()
-                )),
-            },
-            KeyPoll::Enter | KeyPoll::Nothing => {}
-            KeyPoll::Closed => {
-                term.write("The key reader closed: stopping.\n");
-                let acks = target.stop_and_wait(STOP_WAIT);
-                print_stop(term, &acks);
-                return Ok(Phase::Stopped);
             }
         }
         env.clock.sleep(env.poll);
@@ -240,18 +242,38 @@ fn stop_framing(rig: &mut dyn Rig, term: &mut dyn Terminal, env: &Env, target: &
     }
 }
 
+/// Queues the armed job, unless a stop was asked for since `stops_before` (counted by `stops`). The driver clears its
+/// latch for a command queued after a trip (SPEC §5.3 generations), so a stop that landed before the run was queued
+/// would otherwise be lost: one seen before queueing refuses; one that raced the queueing trips the latch again, after
+/// the run exists, which cancels it (`StoppedAfterQueue`) or stops it.
+pub fn start_marking(rig: &mut dyn Rig, stops: &CountingStop, stops_before: u64, token: ArmToken) -> Result<(), HwError> {
+    if stops.requests() != stops_before {
+        drop(token);
+        return Err(HwError::Failed("a stop was asked for after the frame was accepted; nothing was marked".to_owned()));
+    }
+    rig.run_armed(token)?;
+    if stops.requests() != stops_before {
+        stops.stop_now();
+    }
+    Ok(())
+}
+
 /// `openlaser-hw run`.
 pub fn run(o: &RunOpts, term: &mut dyn Terminal, env: &mut Env) -> Result<(), HwError> {
     require_tty(term, "run")?;
     let mut rig = env.rigs.open(&RigSpec { purpose: Purpose::Run, device: o.device.clone(), extent: None })?;
-    let target = rig.stopper();
+    // Every stop goes through the counter: keys, signals, the panic hook and the flow itself.
+    let stops = Arc::new(CountingStop::new(rig.stopper()));
+    let target: Arc<dyn StopTarget> = Arc::clone(&stops) as Arc<dyn StopTarget>;
     let _guards = guards(env, &target)?;
-    let r = run_inner(rig.as_mut(), o, term, env, &target);
+    let r = run_inner(rig.as_mut(), o, term, env, &stops);
     rig.disconnect();
     r
 }
 
-fn run_inner(rig: &mut dyn Rig, o: &RunOpts, term: &mut dyn Terminal, env: &Env, target: &Arc<dyn StopTarget>) -> Result<(), HwError> {
+fn run_inner(rig: &mut dyn Rig, o: &RunOpts, term: &mut dyn Terminal, env: &Env, stops: &Arc<CountingStop>) -> Result<(), HwError> {
+    let target_arc: Arc<dyn StopTarget> = Arc::clone(stops) as Arc<dyn StopTarget>;
+    let target = &target_arc;
     rig.load(&o.job, o.layers.as_deref(), o.repeats, o.power_pct, None)?;
     let planned = rig.summary()?;
     term.write(&summary::text(&planned));
@@ -264,6 +286,8 @@ fn run_inner(rig: &mut dyn Rig, o: &RunOpts, term: &mut dyn Terminal, env: &Env,
         _ => return Err(HwError::Failed("stopped while framing; nothing was marked".to_owned())),
     };
     stop_framing(rig, term, env, target)?;
+    // From here on any stop request, from any thread, means nothing is marked.
+    let stops_before_arm = stops.requests();
     term.write(&format!("Frame accepted after {} executed pass(es); framing stopped.\n", receipt.full_passes));
     if !o.allow_emission {
         return Err(HwError::refused(
@@ -292,7 +316,7 @@ fn run_inner(rig: &mut dyn Rig, o: &RunOpts, term: &mut dyn Terminal, env: &Env,
 
     // Keys first, so a stop works from the first packet.
     let mut keys = term.keys(stop_fn(target)).map_err(|e| HwError::Failed(format!("cannot read keys: {e}")))?;
-    rig.run_armed(token)?;
+    start_marking(rig, stops, stops_before_arm, token)?;
     term.write("Marking. Esc, Space or Ctrl-C stops.\n");
     match mark_phase(rig, term, env, target, keys.as_mut())? {
         Phase::Finished(d) => {
