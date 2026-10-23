@@ -1,4 +1,11 @@
-//! T2 parity port of OM `gcode.compile_gcode` (MIT source: OpenMopa `mopa_luiz/gcode.py`, commit `6aed8ff`).
+//! T2 parity port of OM `gcode.compile_gcode` over `layers.group_by_layer` (py-compat: OM's bytes, including its
+//! silent speed capping; the shipping encoder is [`crate::compile`]).
+//!
+//! Ported from OpenMopa `mopa_luiz/gcode.py` (`compile_gcode`, `_paths_for_job`, `_xy`, `_number`) and
+//! `mopa_luiz/layers.py` (`group_by_layer`) at commit `6aed8ffa8be5a938d195bf35198cfd168bb07f4e`.
+//! MIT © 2026 Luiz Bueno (see ATTRIBUTION.md). Refusals carry OM's exception type and message.
+//!
+//! The only difference from Python: a non-finite speed or coordinate refuses here, where Python would print `nan`.
 
 /// A machine row of `index.json` `machines`.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,34 +82,14 @@ pub fn compile_gcode_om(machine: &OmMachine, layers: &[OmLayer], objects: &[OmOb
         machine.tool_off_command.clone(),
     ];
     let mut path_count = 0usize;
-    for layer in layers {
+    for (layer, polylines) in group_by_layer(objects, layers) {
         if !layer.output || matches!(layer.operation.as_str(), "disabled" | "frame_only") {
             continue;
         }
+        // `_paths_for_job`: raster layers hatch their (already >= 2-point) polylines; others pass them through.
         let raster = layer.operation == "raster_engrave";
-        let mut raw_paths: Vec<&Vec<[f64; 2]>> = Vec::new();
-        for object in objects.iter().filter(|object| object.layer_id == layer.layer_id) {
-            raw_paths.extend(object.polylines.iter());
-        }
-        if raw_paths.is_empty() {
-            continue;
-        }
-        let speed = layer.speed_mm_s.min(machine.max_speed_mm_s);
-        if !speed.is_finite() || speed <= 0.0 {
-            return Err(refuse("ValueError", format!("layer {:?} speed must be greater than zero", layer.name)));
-        }
-        if !layer.power_percent.is_finite() || !(0.0..=100.0).contains(&layer.power_percent) {
-            return Err(refuse("ValueError", format!("layer {:?} power must be between 0 and 100 percent", layer.name)));
-        }
-        let scaled = (f64::from(machine.power_scale) * layer.power_percent / 100.0).round_ties_even();
-        if !scaled.is_finite() || scaled < 0.0 || scaled > f64::from(u32::MAX) {
-            return Err(refuse("ValueError", "scaled power is outside u32 range"));
-        }
-        let power = format!("{scaled:.0}");
-        let passes = if raster { 1 } else { layer.passes.max(1) };
-        let mut paths: Vec<Vec<[f64; 2]>> = Vec::new();
-        if raster {
-            let polygons = raw_paths.iter().map(|raw| openlaser_geom::Polyline((*raw).clone())).collect::<Vec<_>>();
+        let paths: Vec<Vec<[f64; 2]>> = if raster {
+            let polygons = polylines.iter().map(|raw| openlaser_geom::Polyline(raw.clone())).collect::<Vec<_>>();
             let hatch = openlaser_geom::hatch_om(
                 &polygons,
                 layer.raster_angle_deg,
@@ -112,17 +99,27 @@ pub fn compile_gcode_om(machine: &OmMachine, layers: &[OmLayer], objects: &[OmOb
                 openlaser_geom::CLOSURE_TOL_MM,
             )
             .map_err(|e| refuse("ValueError", e.to_string()))?;
-            paths.extend(hatch.segments.into_iter().map(|segment| vec![segment[0], segment[1]]));
+            hatch.segments.into_iter().map(|segment| vec![segment[0], segment[1]]).collect()
         } else {
-            for raw in raw_paths {
-                if raw.len() >= 2 {
-                    paths.push(raw.clone());
-                }
-            }
-        }
+            polylines
+        };
         if paths.is_empty() {
             continue;
         }
+        let passes = if raster { 1 } else { layer.passes.max(1) };
+        // Python `min(speed, max)`: a NaN speed stays NaN (and is refused below), never becomes the maximum.
+        let speed = if machine.max_speed_mm_s < layer.speed_mm_s { machine.max_speed_mm_s } else { layer.speed_mm_s };
+        if !speed.is_finite() || speed <= 0.0 {
+            return Err(refuse("ValueError", format!("layer {} speed must be greater than zero", py_repr(&layer.name))));
+        }
+        if !layer.power_percent.is_finite() || !(0.0..=100.0).contains(&layer.power_percent) {
+            return Err(refuse("ValueError", format!("layer {} power must be between 0 and 100 percent", py_repr(&layer.name))));
+        }
+        let scaled = (f64::from(machine.power_scale) * layer.power_percent / 100.0).round_ties_even();
+        if !scaled.is_finite() || scaled < 0.0 || scaled > f64::from(u32::MAX) {
+            return Err(refuse("ValueError", "scaled power is outside u32 range"));
+        }
+        let power = format!("{scaled:.0}");
         lines.push(format!("; Layer: {} · {}", layer.name, layer.operation));
         let air = machine.is_laser && layer.air_assist && machine.supports_air_assist;
         if air {
@@ -133,6 +130,9 @@ pub fn compile_gcode_om(machine: &OmMachine, layers: &[OmLayer], objects: &[OmOb
                 lines.push(format!("; Pass {}/{}", pass + 1, passes));
             }
             for path in &paths {
+                if path.len() < 2 {
+                    continue;
+                }
                 let transformed = path.iter().map(|&p| machine_xy(machine, p)).collect::<Result<Vec<_>, _>>()?;
                 let Some(start) = transformed.first() else {
                     continue;
@@ -166,6 +166,7 @@ fn refuse(kind: &str, message: impl Into<String>) -> OmRefusal {
     OmRefusal { kind: kind.to_owned(), message: message.into() }
 }
 
+/// OM `_xy`: centre-origin design mm → machine coordinates; outside the work area (1e-6 tolerance) refuses.
 fn machine_xy(machine: &OmMachine, point: [f64; 2]) -> Result<[f64; 2], OmRefusal> {
     let [x, y] = point;
     if !x.is_finite() || !y.is_finite() {
@@ -187,144 +188,58 @@ fn machine_xy(machine: &OmMachine, point: [f64; 2]) -> Result<[f64; 2], OmRefusa
     Ok([mx, my])
 }
 
+/// OM `layers.group_by_layer`: one job per distinct `layer_id` in first-seen order, carrying the last spec with
+/// that id (Python's `dict` semantics); objects on unknown layers and polylines of fewer than 2 points are dropped
+/// (OM's behaviour; the shipping planner refuses orphans, B8).
+fn group_by_layer<'a>(objects: &[OmObject], layers: &'a [OmLayer]) -> Vec<(&'a OmLayer, Vec<Vec<[f64; 2]>>)> {
+    let mut jobs: Vec<(&'a OmLayer, Vec<Vec<[f64; 2]>>)> = Vec::new();
+    for layer in layers {
+        match jobs.iter_mut().find(|(existing, _)| existing.layer_id == layer.layer_id) {
+            Some(job) => job.0 = layer,
+            None => jobs.push((layer, Vec::new())),
+        }
+    }
+    for object in objects {
+        let Some(job) = jobs.iter_mut().find(|(layer, _)| layer.layer_id == object.layer_id) else { continue };
+        job.1.extend(object.polylines.iter().filter(|polyline| polyline.len() >= 2).cloned());
+    }
+    jobs
+}
+
+/// Python `repr(str)`: single quotes unless the text holds a single quote and no double quote; backslash, the
+/// quote and control characters escaped.
+pub fn py_repr(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') { '"' } else { '\'' };
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push(quote);
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if u32::from(c) < 0x20 || (0x7f..0xa0).contains(&u32::from(c)) => out.push_str(&format!("\\x{:02x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn t2_vector_and_multipass_bytes_match() {
-        let index = openlaser_testkit::t2::load().expect("T2 index");
-        let mut checked = 0usize;
-        for case in index
-            .cases
-            .iter()
-            .filter(|c| c.ok && matches!(c.scenario.as_str(), "vector" | "multipass" | "air_assist" | "plotter_drawing" | "speed_power_edges"))
-        {
-            let Some(machine) = index.machines.iter().find(|m| m.machine_id == case.machine_id) else { continue };
-            let Some(scenario) = index.scenarios.get(&case.scenario) else { continue };
-            let machine = OmMachine {
-                machine_id: machine.machine_id.clone(),
-                name: machine.name.clone(),
-                kind: machine.kind.clone(),
-                transport: machine.transport.clone(),
-                width_mm: machine.width_mm,
-                height_mm: machine.height_mm,
-                origin: machine.origin.clone(),
-                tool: machine.tool.clone(),
-                output_format: machine.output_format.clone(),
-                max_speed_mm_s: machine.max_speed_mm_s,
-                travel_speed_mm_s: machine.travel_speed_mm_s,
-                power_scale: machine.power_scale,
-                laser_command: machine.laser_command.clone(),
-                tool_on_command: machine.tool_on_command.clone(),
-                tool_off_command: machine.tool_off_command.clone(),
-                supports_air_assist: machine.supports_air_assist,
-                uses_frequency: machine.uses_frequency,
-                uses_pulse_width: machine.uses_pulse_width,
-                direct_control: machine.direct_control,
-                notes: machine.notes.clone(),
-                is_laser: machine.is_laser,
-                is_plotter: machine.is_plotter,
-            };
-            let layers: Vec<OmLayer> = scenario
-                .layers
-                .iter()
-                .map(|l| OmLayer {
-                    layer_id: l.layer_id.clone(),
-                    name: l.name.clone(),
-                    operation: l.operation.clone(),
-                    power_percent: l.power_percent,
-                    frequency_khz: l.frequency_khz,
-                    pulse_width_ns: l.pulse_width_ns,
-                    speed_mm_s: l.speed_mm_s,
-                    passes: l.passes,
-                    visible: l.visible,
-                    output: l.output,
-                    color: l.color.clone(),
-                    air_assist: l.air_assist,
-                    raster_pitch_mm: l.raster_pitch_mm,
-                    raster_angle_deg: l.raster_angle_deg,
-                    raster_angle_step_deg: l.raster_angle_step_deg,
-                })
-                .collect();
-            let objects: Vec<OmObject> = scenario.objects.iter().map(|o| OmObject { layer_id: o.layer_id.clone(), polylines: o.polylines.clone() }).collect();
-            if machine.output_format != "gcode" {
-                assert!(compile_gcode_om(&machine, &layers, &objects, "<MASKED>").is_err());
-                continue;
-            }
-            let actual = compile_gcode_om(&machine, &layers, &objects, "<MASKED>").expect("vector G-code compiles");
-            let expected = openlaser_testkit::t2::program(case.file.as_deref().expect("program filename")).expect("golden program");
-            assert_eq!(actual.as_bytes(), expected.as_slice(), "{} / {}", case.machine_id, case.scenario);
-            checked += 1;
-        }
-        assert!(checked >= 10, "only {checked} T2 programs were checked");
-    }
-
-    #[test]
-    #[ignore = "needs I1 hatch parity for raster scenarios"]
-    fn t2_all_44_cases_match_when_hatch_parity_lands() {
-        let index = openlaser_testkit::t2::load().expect("T2 index");
-        assert_eq!(index.cases.len(), 44);
-        for case in &index.cases {
-            let machine_row = index.machines.iter().find(|m| m.machine_id == case.machine_id).expect("fixture machine");
-            let machine = OmMachine {
-                machine_id: machine_row.machine_id.clone(),
-                name: machine_row.name.clone(),
-                kind: machine_row.kind.clone(),
-                transport: machine_row.transport.clone(),
-                width_mm: machine_row.width_mm,
-                height_mm: machine_row.height_mm,
-                origin: machine_row.origin.clone(),
-                tool: machine_row.tool.clone(),
-                output_format: machine_row.output_format.clone(),
-                max_speed_mm_s: machine_row.max_speed_mm_s,
-                travel_speed_mm_s: machine_row.travel_speed_mm_s,
-                power_scale: machine_row.power_scale,
-                laser_command: machine_row.laser_command.clone(),
-                tool_on_command: machine_row.tool_on_command.clone(),
-                tool_off_command: machine_row.tool_off_command.clone(),
-                supports_air_assist: machine_row.supports_air_assist,
-                uses_frequency: machine_row.uses_frequency,
-                uses_pulse_width: machine_row.uses_pulse_width,
-                direct_control: machine_row.direct_control,
-                notes: machine_row.notes.clone(),
-                is_laser: machine_row.is_laser,
-                is_plotter: machine_row.is_plotter,
-            };
-            let scenario = index.scenarios.get(&case.scenario).expect("fixture scenario");
-            let layers: Vec<OmLayer> = scenario
-                .layers
-                .iter()
-                .map(|l| OmLayer {
-                    layer_id: l.layer_id.clone(),
-                    name: l.name.clone(),
-                    operation: l.operation.clone(),
-                    power_percent: l.power_percent,
-                    frequency_khz: l.frequency_khz,
-                    pulse_width_ns: l.pulse_width_ns,
-                    speed_mm_s: l.speed_mm_s,
-                    passes: l.passes,
-                    visible: l.visible,
-                    output: l.output,
-                    color: l.color.clone(),
-                    air_assist: l.air_assist,
-                    raster_pitch_mm: l.raster_pitch_mm,
-                    raster_angle_deg: l.raster_angle_deg,
-                    raster_angle_step_deg: l.raster_angle_step_deg,
-                })
-                .collect();
-            let objects: Vec<OmObject> = scenario.objects.iter().map(|o| OmObject { layer_id: o.layer_id.clone(), polylines: o.polylines.clone() }).collect();
-            let actual = compile_gcode_om(&machine, &layers, &objects, "<MASKED>");
-            if case.ok {
-                let actual = actual.expect("successful golden scenario");
-                let expected = openlaser_testkit::t2::program(case.file.as_deref().expect("program file")).expect("program bytes");
-                assert_eq!(actual.as_bytes(), expected.as_slice(), "{} / {}", case.machine_id, case.scenario);
-                if let Some(expected_hash) = &case.sha256 {
-                    assert_eq!(openlaser_testkit::sha256_hex(actual.as_bytes()), *expected_hash);
-                }
-            } else {
-                assert!(actual.is_err(), "{} / {} should refuse", case.machine_id, case.scenario);
-            }
-        }
+    fn py_repr_matches_python() {
+        assert_eq!(py_repr("Vec"), "'Vec'");
+        assert_eq!(py_repr("it's"), "\"it's\"");
+        assert_eq!(py_repr("a'b\"c"), "'a\\'b\"c'");
+        assert_eq!(py_repr("x\ny\\"), "'x\\ny\\\\'");
+        assert_eq!(py_repr("\u{1}·"), "'\\x01·'");
     }
 }

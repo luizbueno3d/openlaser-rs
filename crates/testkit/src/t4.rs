@@ -1,4 +1,4 @@
-//! T4 importer fixture loader.
+//! T4 importer fixture loader (`tests/golden/t4_import/`; SPEC §6.2). Owned by WP2.
 
 use std::fs;
 

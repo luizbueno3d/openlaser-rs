@@ -1,4 +1,4 @@
-//! T2 G-code fixture loader.
+//! T2 G-code fixture loader (`tests/golden/t2_gcode/`; SPEC §6.2). Owned by WP2.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -93,8 +93,11 @@ pub struct Index {
     pub cases: Vec<Case>,
 }
 
+/// `number_format.json`: `rows` are `[input, expected]`; `inputs_f64_sha256` is the sha256 of the inputs'
+/// little-endian IEEE-754 bit patterns in row order (recompute it to prove every input parsed exactly).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct NumberTable {
+    pub n_rows: usize,
     pub inputs_f64_sha256: String,
     pub rows: Vec<(f64, String)>,
 }

@@ -1,12 +1,22 @@
-//! Importers (SPEC §3.6).
+//! Importers (SPEC §3.6): SVG through usvg at true scale, DXF (the OM parser port plus an evaluated-SPLINE shipping
+//! variant), raster images and the prototype's (OM) `workspace.json` + `layer_settings.json`.
+//!
+//! Every import is bounded (SPEC §1.3 rule 6, never crash): the input size, the SVG nesting depth and `<use>`
+//! expansion, the number of output points (per entity and in total), the curve-evaluation work and the raster
+//! size are capped, and a file over a cap is refused with [`Error::TooLarge`]. Coordinates that are not finite
+//! after unit scaling and placement are refused, never passed on. Nothing in a file is dropped silently: what is
+//! not imported is either a refusal or a numbered [`Notice`].
 #![forbid(unsafe_code)]
 
+use std::collections::{BTreeSet, HashMap};
+use std::io::Cursor;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use image::GenericImageView;
 use openlaser_doc::{Affine, AssetId, BezPath, BitmapData, Geom, PALETTE};
 use openlaser_geom::P2;
 use openlaser_types::{NoticeCode, ObjectId, Percent};
+use usvg::roxmltree;
 
 pub mod dxf_om;
 pub mod om;
@@ -16,6 +26,39 @@ pub use openlaser_geom::Polyline;
 pub use openlaser_types::{Bounds, LayerKey, Notice};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// Largest SVG, DXF or OM workspace / layer-settings file accepted, in bytes.
+pub const MAX_VECTOR_FILE_BYTES: usize = 32 * 1024 * 1024;
+/// Largest raster file accepted, in bytes.
+pub const MAX_RASTER_FILE_BYTES: usize = 64 * 1024 * 1024;
+/// Most output points one import may produce, all shapes together.
+pub const MAX_IMPORT_POINTS: usize = 2_000_000;
+/// Most points one entity (a DXF entity, an SVG path, an OM object) may produce.
+pub const MAX_ENTITY_POINTS: usize = 200_000;
+/// Most curve-evaluation steps (spline sampling) one import may spend.
+pub const MAX_IMPORT_WORK: u64 = 50_000_000;
+/// Deepest SVG element nesting accepted, counted before and after entity and `<use>` expansion. usvg and the
+/// tree walk recurse per level; this keeps them far inside a 2 MiB thread stack.
+pub const MAX_SVG_DEPTH: usize = 256;
+/// Most SVG elements after `<use>` and marker expansion (a bound computed before usvg expands anything).
+pub const MAX_SVG_ELEMENTS: u64 = 500_000;
+/// Most XML nodes (elements, text, comments) roxmltree may build.
+pub const MAX_SVG_XML_NODES: u32 = 1_000_000;
+/// Largest total size of the CSS in `<style>` elements, in bytes.
+pub const MAX_SVG_STYLE_BYTES: usize = 64 * 1024;
+/// Most pixels a raster image may have (16 Mpx).
+pub const MAX_RASTER_PIXELS: u64 = 16_777_216;
+/// Longest raster side, in pixels.
+pub const MAX_RASTER_SIDE: u32 = 16_384;
+/// Most bytes the image decoder may allocate.
+pub const MAX_RASTER_ALLOC: u64 = 256 * 1024 * 1024;
+/// Largest coordinate magnitude accepted after placement, in mm (1000 km): beyond it, downstream bounds arithmetic
+/// could overflow.
+pub const MAX_COORD_MM: f64 = 1e9;
+
+/// The notice code used where an importer assumed a default (DXF units, raster DPI, OM built-in layers).
+/// `openlaser-types` (WP1) has no dedicated code yet; the integrator swaps this one line when it lands.
+const ASSUMED_DEFAULT: NoticeCode = NoticeCode::ImportEntitySkipped;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -118,7 +161,7 @@ pub fn sniff(name: &str, bytes: &[u8]) -> Option<Format> {
         _ if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") => Some(Format::Gif),
         _ if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") => Some(Format::Tiff),
         _ if bytes.get(0..4) == Some(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") => Some(Format::Webp),
-        _ if String::from_utf8_lossy(bytes).trim_start().starts_with("<svg") || String::from_utf8_lossy(bytes).contains("<svg") => Some(Format::Svg),
+        _ if contains(bytes.get(..bytes.len().min(1 << 20)).unwrap_or(bytes), b"<svg") => Some(Format::Svg),
         _ => None,
     }
 }
@@ -132,13 +175,9 @@ pub fn import(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Imported
         Format::OmWorkspace => {
             let workspace = om::parse_workspace(bytes)?;
             let mut imported = om::to_imported(&workspace, &om::builtin_layers())?;
-            imported.notices.push(Notice {
-                n: 1,
-                code: NoticeCode::ImportEntitySkipped,
-                message: "layer_settings.json was not supplied; OM built-in layers were used".to_owned(),
-                object: None,
-                layer: None,
-            });
+            let mut notices = Notices(std::mem::take(&mut imported.notices));
+            notices.push(ASSUMED_DEFAULT, "layer_settings.json was not supplied; OM's four built-in layers were used".to_owned(), None);
+            imported.notices = notices.0;
             Ok(imported)
         }
     }
@@ -152,80 +191,527 @@ fn validate_options(opts: &ImportOptions) -> Result<()> {
         return Err(Error::Malformed { format: "import options", message: "flatten tolerance must be finite and positive".to_owned() });
     }
     if let Some([x, y]) = opts.center_at
-        && (!x.is_finite() || !y.is_finite())
+        && (!x.is_finite() || !y.is_finite() || x.abs() > MAX_COORD_MM || y.abs() > MAX_COORD_MM)
     {
-        return Err(Error::Malformed { format: "import options", message: "centre must be finite".to_owned() });
+        return Err(Error::Malformed { format: "import options", message: format!("centre must be finite and within ±{MAX_COORD_MM} mm") });
     }
     Ok(())
 }
 
-fn looks_like_workspace(bytes: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(bytes).ok().and_then(|value| value.get("objects").cloned()).is_some_and(|objects| objects.is_array())
+/// Work and size limits of one import (see the crate docs).
+pub(crate) struct Budget {
+    points_left: usize,
+    work_left: u64,
 }
+
+impl Budget {
+    pub(crate) fn new() -> Self {
+        Budget { points_left: MAX_IMPORT_POINTS, work_left: MAX_IMPORT_WORK }
+    }
+
+    /// Accounts one finished entity of `n` points.
+    pub(crate) fn entity(&mut self, n: usize) -> Result<()> {
+        check_entity_points(n)?;
+        self.points_left = self.points_left.checked_sub(n).ok_or_else(|| Error::TooLarge(format!("the file produces more than {MAX_IMPORT_POINTS} points")))?;
+        Ok(())
+    }
+
+    /// Accounts `steps` of curve evaluation, before doing them.
+    pub(crate) fn work(&mut self, steps: u64) -> Result<()> {
+        self.work_left = self
+            .work_left
+            .checked_sub(steps)
+            .ok_or_else(|| Error::TooLarge(format!("evaluating the file's curves would take more than {MAX_IMPORT_WORK} steps")))?;
+        Ok(())
+    }
+}
+
+/// Refuses an entity that has (or is about to have) more than [`MAX_ENTITY_POINTS`] points.
+pub(crate) fn check_entity_points(n: usize) -> Result<()> {
+    if n > MAX_ENTITY_POINTS {
+        return Err(Error::TooLarge(format!("one entity has {n} points; the limit is {MAX_ENTITY_POINTS}")));
+    }
+    Ok(())
+}
+
+pub(crate) fn check_vector_size<'a>(format: &'static str, bytes: &'a [u8]) -> Result<&'a [u8]> {
+    if bytes.len() > MAX_VECTOR_FILE_BYTES {
+        return Err(Error::TooLarge(format!("{format} file is {} bytes; the limit is {MAX_VECTOR_FILE_BYTES}", bytes.len())));
+    }
+    Ok(bytes)
+}
+
+/// A finite placed coordinate within ±[`MAX_COORD_MM`].
+pub(crate) fn check_placed(x: f64, y: f64, what: &str) -> Result<()> {
+    if !x.is_finite() || !y.is_finite() {
+        return Err(Error::Malformed { format: "geometry", message: format!("{what} has a coordinate that is not finite after unit scaling and placement") });
+    }
+    if x.abs() > MAX_COORD_MM || y.abs() > MAX_COORD_MM {
+        return Err(Error::TooLarge(format!("{what} reaches ({x}, {y}) mm, beyond ±{MAX_COORD_MM} mm")));
+    }
+    Ok(())
+}
+
+/// Numbered notices of one import (n = 1, 2, …).
+#[derive(Default)]
+pub(crate) struct Notices(pub(crate) Vec<Notice>);
+
+impl Notices {
+    pub(crate) fn push(&mut self, code: NoticeCode, message: String, layer: Option<LayerKey>) {
+        let n = u32::try_from(self.0.len()).map_or(u32::MAX, |len| len.saturating_add(1));
+        self.0.push(Notice { n, code, message, object: None, layer });
+    }
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+fn looks_like_workspace(bytes: &[u8]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        #[allow(dead_code)]
+        objects: Vec<serde::de::IgnoredAny>,
+    }
+    bytes.len() <= MAX_VECTOR_FILE_BYTES && serde_json::from_slice::<Probe>(bytes).is_ok()
+}
+
+// ---- DXF ------------------------------------------------------------------------------------------------------
 
 fn import_dxf(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Imported> {
-    let unit_scale = match opts.dxf_units {
-        DxfUnits::Auto => dxf_om::dxf_units_to_mm(bytes)?,
-        DxfUnits::Mm => 1.0,
-        DxfUnits::Inch => 25.4,
+    let text = dxf_om::decode_ignore(check_vector_size("DXF", bytes)?);
+    let pairs = dxf_om::dxf_pairs(&text)?;
+    let (unit_scale, assumed) = match opts.dxf_units {
+        DxfUnits::Auto => dxf_om::dxf_units(&pairs)?,
+        DxfUnits::Mm => (1.0, false),
+        DxfUnits::Inch => (25.4, false),
     };
-    let mut polylines = dxf_om::parse_dxf_shipping(bytes, opts.flatten_tol_mm / unit_scale)?;
-    if polylines.is_empty() {
+    let mut budget = Budget::new();
+    let parsed = dxf_om::parse_entities(&pairs, dxf_om::Splines::Evaluate(opts.flatten_tol_mm / unit_scale), &mut budget)?;
+    if parsed.polylines.is_empty() {
         return Err(Error::Malformed { format: "DXF", message: format!("no usable geometry found in {name}") });
     }
-    transform_polylines(&mut polylines, unit_scale * opts.scale, opts.center_at, false)?;
-    paths_to_imported(polylines, opts.layer.unwrap_or(opts.current_layer), Vec::new())
+    let mut polylines = parsed.polylines;
+    place_polylines(&mut polylines, unit_scale, opts.scale, opts.center_at)?;
+    let layer = opts.layer.unwrap_or(opts.current_layer);
+    let mut notices = Notices::default();
+    if assumed {
+        notices.push(ASSUMED_DEFAULT, format!("{name} gives no known drawing units ($INSUNITS); millimetres were assumed"), Some(layer));
+    }
+    if parsed.degenerate > 0 {
+        notices.push(NoticeCode::ImportEntitySkipped, format!("{} DXF entities with fewer than 2 points were skipped", parsed.degenerate), Some(layer));
+    }
+    let unsupported = dxf_om::unsupported_entities(&pairs);
+    if !unsupported.is_empty() {
+        let list = unsupported.iter().map(|(kind, count)| format!("{kind} ×{count}")).collect::<Vec<_>>().join(", ");
+        let total: usize = unsupported.values().sum();
+        notices.push(NoticeCode::ImportEntitySkipped, format!("{total} DXF entities were not imported (unsupported types: {list})"), Some(layer));
+    }
+    paths_to_imported(polylines, layer, notices.0)
 }
 
+/// File units → mm first (so the centre is in mm too), then `scale` about the drawing's centre, moved to
+/// `center_at` when given. With `center_at: None` and `scale == 1` the file's coordinates are kept exactly
+/// (in mm).
+fn place_polylines(polylines: &mut [Polyline], unit_to_mm: f64, scale: f64, center_at: Option<P2>) -> Result<()> {
+    for line in polylines.iter_mut() {
+        for point in &mut line.0 {
+            let [x, y] = *point;
+            *point = [x * unit_to_mm, y * unit_to_mm];
+            if !point[0].is_finite() || !point[1].is_finite() {
+                return Err(Error::Malformed { format: "DXF", message: format!("point ({x}, {y}) is not finite in millimetres") });
+            }
+        }
+    }
+    let bounds = polyline_bounds(polylines).ok_or_else(|| Error::Malformed { format: "geometry", message: "no finite points".to_owned() })?;
+    if scale != 1.0 || center_at.is_some() {
+        let source = [bounds.min[0] / 2.0 + bounds.max[0] / 2.0, bounds.min[1] / 2.0 + bounds.max[1] / 2.0];
+        let target = center_at.unwrap_or(source);
+        for line in polylines.iter_mut() {
+            for point in &mut line.0 {
+                let [x, y] = *point;
+                *point = [(x - source[0]) * scale + target[0], (y - source[1]) * scale + target[1]];
+            }
+        }
+    }
+    for line in polylines.iter() {
+        for &[x, y] in &line.0 {
+            check_placed(x, y, "the DXF drawing")?;
+        }
+    }
+    Ok(())
+}
+
+// ---- SVG ------------------------------------------------------------------------------------------------------
+
 fn import_svg(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Imported> {
-    let source = std::str::from_utf8(bytes).map_err(|e| Error::Malformed { format: "SVG", message: e.to_string() })?;
-    if opts.svg_units == SvgUnits::RequirePhysical && !svg_has_physical_size(source) {
+    let source = std::str::from_utf8(check_vector_size("SVG", bytes)?).map_err(|e| Error::Malformed { format: "SVG", message: e.to_string() })?;
+    svg_scan_depth(source)?;
+    let xml_opts = roxmltree::ParsingOptions { allow_dtd: true, nodes_limit: MAX_SVG_XML_NODES };
+    let doc = roxmltree::Document::parse_with_options(source, xml_opts).map_err(|e| match e {
+        roxmltree::Error::NodesLimitReached => Error::TooLarge(format!("SVG has more than {MAX_SVG_XML_NODES} XML nodes")),
+        other => Error::Malformed { format: "SVG", message: other.to_string() },
+    })?;
+    let facts = svg_facts(&doc)?;
+    if opts.svg_units == SvgUnits::RequirePhysical && !svg_root_has_physical_size(doc.root_element()) {
         return Err(Error::Unitless(name.to_owned()));
     }
-    let dpi = match opts.svg_units {
+    let dpi: f32 = match opts.svg_units {
         SvgUnits::Px72 => 72.0,
         SvgUnits::RequirePhysical | SvgUnits::Px96 => 96.0,
     };
-    let parser_opts = usvg::Options { dpi, ..usvg::Options::default() };
-    let tree = usvg::Tree::from_data(bytes, &parser_opts).map_err(|e| Error::Malformed { format: "SVG", message: e.to_string() })?;
+    let refused_images = Arc::new(AtomicUsize::new(0));
+    let parser_opts = svg_parser_options(dpi, Arc::clone(&refused_images));
+    let tree = usvg::Tree::from_xmltree(&doc, &parser_opts).map_err(|e| match e {
+        usvg::Error::ElementsLimitReached | usvg::Error::ParsingFailed(roxmltree::Error::NodesLimitReached) => {
+            Error::TooLarge("SVG nesting or <use> expansion is too large".to_owned())
+        }
+        other => Error::Malformed { format: "SVG", message: other.to_string() },
+    })?;
     let mm_per_px = 25.4 / f64::from(dpi);
-    let mut imported = Imported { shapes: Vec::new(), layers: Vec::new(), notices: Vec::new(), bounds: None };
-    let mut notice_n = 1u32;
-    if source.contains("<text") {
-        imported.notices.push(Notice {
-            n: notice_n,
-            code: NoticeCode::ImportTextIgnored,
-            message: "SVG text was ignored; convert text to paths before importing".to_owned(),
-            object: None,
-            layer: None,
-        });
-        notice_n += 1;
-    }
-    collect_svg_nodes(tree.root(), opts, mm_per_px, &mut imported, &mut notice_n)?;
-    if imported.shapes.is_empty() {
-        return Err(Error::Malformed { format: "SVG", message: format!("no usable paths found in {name}") });
-    }
-    imported.bounds = shape_bounds(&imported.shapes, opts.flatten_tol_mm);
-    recenter_shapes(&mut imported.shapes, imported.bounds, opts.center_at, opts.scale)?;
-    imported.bounds = shape_bounds(&imported.shapes, opts.flatten_tol_mm);
-    Ok(imported)
-}
-
-fn collect_svg_nodes(group: &usvg::Group, opts: &ImportOptions, mm_per_px: f64, imported: &mut Imported, notice_n: &mut u32) -> Result<()> {
-    for node in group.children() {
+    let mut shapes = Vec::new();
+    let mut budget = Budget::new();
+    let mut unmatched: BTreeSet<String> = BTreeSet::new();
+    let mut unmatched_paths = 0usize;
+    let mut stack = vec![tree.root().children().iter()];
+    while let Some(top) = stack.last_mut() {
+        let Some(node) = top.next() else {
+            stack.pop();
+            continue;
+        };
         match node {
-            usvg::Node::Group(child) => collect_svg_nodes(child, opts, mm_per_px, imported, notice_n)?,
+            usvg::Node::Group(group) => stack.push(group.children().iter()),
             usvg::Node::Path(path) => {
-                let layer = opts.layer.unwrap_or_else(|| svg_layer(path, opts.current_layer, imported, notice_n));
                 let bez = svg_bez_path(path, mm_per_px)?;
-                if !bez.is_empty() {
-                    imported.shapes.push(shape(layer, Geom::Path(Arc::new(bez)), Affine::IDENTITY)?);
+                if bez.elements().is_empty() {
+                    continue;
                 }
+                budget.entity(bez_point_count(&bez))?;
+                let layer = match opts.layer {
+                    Some(layer) => layer,
+                    None => match svg_palette_layer(path) {
+                        Ok(layer) => layer,
+                        Err(colour) => {
+                            unmatched.insert(colour);
+                            unmatched_paths += 1;
+                            opts.current_layer
+                        }
+                    },
+                };
+                shapes.push(shape(layer, Geom::Path(Arc::new(bez)), Affine::IDENTITY)?);
             }
             usvg::Node::Image(_) | usvg::Node::Text(_) => {}
         }
     }
+    if shapes.is_empty() {
+        return Err(Error::Malformed { format: "SVG", message: format!("no usable paths found in {name}") });
+    }
+    let bounds = shape_bounds(&shapes);
+    recenter_shapes(&mut shapes, bounds, opts.center_at, opts.scale);
+    let bounds = shape_bounds(&shapes);
+    if let Some(b) = bounds {
+        check_placed(b.min[0], b.min[1], "the SVG drawing")?;
+        check_placed(b.max[0], b.max[1], "the SVG drawing")?;
+    }
+    let mut notices = Notices::default();
+    if facts.texts > 0 {
+        notices.push(NoticeCode::ImportTextIgnored, format!("{} SVG text elements were ignored; convert text to paths before importing", facts.texts), None);
+    }
+    let images = facts.images.max(refused_images.load(Ordering::Relaxed));
+    if images > 0 {
+        notices.push(
+            NoticeCode::ImportEntitySkipped,
+            format!("{images} SVG <image> elements were ignored (embedded and linked images are never loaded; import the image file itself)"),
+            None,
+        );
+    }
+    if unmatched_paths > 0 {
+        let colours = unmatched.iter().take(8).cloned().collect::<Vec<_>>().join(", ");
+        let more = if unmatched.len() > 8 { format!(" and {} more", unmatched.len() - 8) } else { String::new() };
+        notices.push(
+            NoticeCode::ImportColorUnmatched,
+            format!(
+                "{unmatched_paths} SVG paths have colours that are not in the layer palette ({colours}{more}); they were assigned to {}",
+                opts.current_layer
+            ),
+            Some(opts.current_layer),
+        );
+    }
+    Ok(Imported { shapes, layers: Vec::new(), notices: notices.0, bounds })
+}
+
+/// usvg options for import: never reads a file or decodes an image for `<image>` (both href resolvers return
+/// `None`; usvg's defaults would `std::fs::read` any path, including `/dev/zero` or a UNC share). Each refused href
+/// is counted for the notice.
+pub(crate) fn svg_parser_options(dpi: f32, refused_images: Arc<AtomicUsize>) -> usvg::Options<'static> {
+    let data_count = Arc::clone(&refused_images);
+    usvg::Options {
+        dpi,
+        resources_dir: None,
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: Box::new(move |_, _, _| {
+                data_count.fetch_add(1, Ordering::Relaxed);
+                None
+            }),
+            resolve_string: Box::new(move |_, _| {
+                refused_images.fetch_add(1, Ordering::Relaxed);
+                None
+            }),
+        },
+        ..usvg::Options::default()
+    }
+}
+
+/// Raw-text pre-scan, before roxmltree or usvg see the document: refuses element nesting deeper than
+/// [`MAX_SVG_DEPTH`]. Comments, CDATA, processing instructions and the DOCTYPE (with its internal subset) are
+/// skipped; quoted attribute values may contain `>`. Entity expansion is checked again on the parsed tree.
+pub(crate) fn svg_scan_depth(source: &str) -> Result<()> {
+    let bytes = source.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    let find = |from: usize, needle: &[u8]| -> usize {
+        bytes.get(from..).and_then(|rest| rest.windows(needle.len()).position(|w| w == needle)).map_or(bytes.len(), |p| from + p + needle.len())
+    };
+    while i < bytes.len() {
+        let Some(offset) = bytes.get(i..).and_then(|rest| rest.iter().position(|&b| b == b'<')) else { break };
+        i += offset;
+        let rest = bytes.get(i..).unwrap_or_default();
+        if rest.starts_with(b"<!--") {
+            i = find(i + 4, b"-->");
+        } else if rest.starts_with(b"<![CDATA[") {
+            i = find(i + 9, b"]]>");
+        } else if rest.starts_with(b"<?") {
+            i = find(i + 2, b"?>");
+        } else if rest.starts_with(b"<!") {
+            i = skip_markup_declaration(bytes, i + 2);
+        } else if rest.starts_with(b"</") {
+            depth = depth.saturating_sub(1);
+            i = skip_tag(bytes, i + 2).0;
+        } else {
+            // Every element counts, a self-closing leaf included (as on the parsed tree).
+            let (end, self_closing) = skip_tag(bytes, i + 1);
+            if depth + 1 > MAX_SVG_DEPTH {
+                return Err(Error::TooLarge(format!("SVG elements are nested more than {MAX_SVG_DEPTH} deep")));
+            }
+            if !self_closing {
+                depth += 1;
+            }
+            i = end;
+        }
+    }
     Ok(())
+}
+
+/// Index after the `>` closing a tag that starts at `from` (quotes honoured), and whether it ended in `/>`.
+fn skip_tag(bytes: &[u8], from: usize) -> (usize, bool) {
+    let mut quote: Option<u8> = None;
+    let mut previous = 0u8;
+    let mut i = from;
+    while let Some(&b) = bytes.get(i) {
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None if b == b'"' || b == b'\'' => quote = Some(b),
+            None if b == b'>' => return (i + 1, previous == b'/'),
+            None => {}
+        }
+        previous = b;
+        i += 1;
+    }
+    (bytes.len(), false)
+}
+
+/// Skips `<!DOCTYPE …>` / `<!ENTITY …>`-style declarations, including a bracketed internal subset with its own
+/// comments and quoted values.
+fn skip_markup_declaration(bytes: &[u8], from: usize) -> usize {
+    let mut quote: Option<u8> = None;
+    let mut brackets = 0usize;
+    let mut i = from;
+    while let Some(&b) = bytes.get(i) {
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None => {
+                if bytes.get(i..).is_some_and(|rest| rest.starts_with(b"<!--")) {
+                    i = bytes.get(i + 4..).and_then(|rest| rest.windows(3).position(|w| w == b"-->")).map_or(bytes.len(), |p| i + 4 + p + 3);
+                    continue;
+                }
+                match b {
+                    b'"' | b'\'' => quote = Some(b),
+                    b'[' => brackets += 1,
+                    b']' => brackets = brackets.saturating_sub(1),
+                    b'>' if brackets == 0 => return i + 1,
+                    _ => {}
+                }
+            }
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// What the parsed SVG holds that usvg drops or that bounds its work.
+#[derive(Debug, Default)]
+pub(crate) struct SvgFacts {
+    pub images: usize,
+    pub texts: usize,
+}
+
+#[derive(Clone, Copy)]
+enum Visit {
+    Active,
+    Done { cost: u64, depth: usize, vertices: u64 },
+}
+
+/// Checks the parsed tree before usvg converts it: the root is `<svg>`; the nesting depth with entities and
+/// `<use>` references expanded stays within [`MAX_SVG_DEPTH`]; no `<use>` reference is recursive; the element count
+/// after `<use>` and marker expansion stays within [`MAX_SVG_ELEMENTS`]; the CSS stays within
+/// [`MAX_SVG_STYLE_BYTES`]. Iterative: a hostile file cannot exhaust the stack here.
+pub(crate) fn svg_facts(doc: &roxmltree::Document<'_>) -> Result<SvgFacts> {
+    let root = doc.root_element();
+    if root.tag_name().name() != "svg" {
+        return Err(Error::Malformed { format: "SVG", message: format!("the root element is <{}>, not <svg>", root.tag_name().name()) });
+    }
+    let mut facts = SvgFacts::default();
+    let mut ids: HashMap<&str, Vec<roxmltree::Node<'_, '_>>> = HashMap::new();
+    let mut markers = Vec::new();
+    let mut style_bytes = 0usize;
+    let mut style_mentions_marker = false;
+    let mut markers_used = false;
+    for node in doc.descendants().filter(roxmltree::Node::is_element) {
+        if let Some(id) = node.attribute("id") {
+            ids.entry(id).or_default().push(node);
+        }
+        if has_marker_property(node) {
+            markers_used = true;
+        }
+        match node.tag_name().name() {
+            "image" => facts.images += 1,
+            "text" => facts.texts += 1,
+            "marker" => markers.push(node),
+            "style" => {
+                for text in node.descendants().filter_map(|t| t.text().filter(|_| t.is_text())) {
+                    style_bytes = style_bytes.saturating_add(text.len());
+                    style_mentions_marker |= text.contains("marker");
+                }
+            }
+            _ => {}
+        }
+    }
+    if style_bytes > MAX_SVG_STYLE_BYTES {
+        return Err(Error::TooLarge(format!("SVG style sheets hold {style_bytes} bytes; the limit is {MAX_SVG_STYLE_BYTES}")));
+    }
+    let mut memo: HashMap<roxmltree::NodeId, Visit> = HashMap::new();
+    let mut stack = vec![(root, false)];
+    while let Some((node, expanded)) = stack.pop() {
+        let use_targets = svg_use_targets(node, &ids);
+        if !expanded {
+            match memo.get(&node.id()) {
+                Some(Visit::Done { .. }) => continue,
+                Some(Visit::Active) => return Err(recursive_use()),
+                None => {}
+            }
+            memo.insert(node.id(), Visit::Active);
+            stack.push((node, true));
+            for next in node.children().filter(roxmltree::Node::is_element).chain(use_targets.iter().copied()) {
+                match memo.get(&next.id()) {
+                    Some(Visit::Active) => return Err(recursive_use()),
+                    Some(Visit::Done { .. }) => {}
+                    None => stack.push((next, false)),
+                }
+            }
+            continue;
+        }
+        let (mut cost, mut depth, mut vertices) = (1u64, 1usize, svg_vertex_bound(node));
+        for (next, via_use) in node.children().filter(roxmltree::Node::is_element).map(|n| (n, false)).chain(use_targets.iter().map(|n| (*n, true))) {
+            let Some(Visit::Done { cost: c, depth: d, vertices: v }) = memo.get(&next.id()).copied() else { return Err(recursive_use()) };
+            cost = cost.saturating_add(c);
+            depth = depth.max(d.saturating_add(if via_use { 2 } else { 1 }));
+            vertices = vertices.saturating_add(v);
+        }
+        if depth > MAX_SVG_DEPTH {
+            return Err(Error::TooLarge(format!("SVG elements are nested more than {MAX_SVG_DEPTH} deep once entities and <use> are expanded")));
+        }
+        if cost > MAX_SVG_ELEMENTS {
+            return Err(Error::TooLarge(format!("SVG expands to more than {MAX_SVG_ELEMENTS} elements once <use> references are expanded")));
+        }
+        memo.insert(node.id(), Visit::Done { cost, depth, vertices });
+    }
+    let Some(Visit::Done { cost: root_cost, vertices: root_vertices, .. }) = memo.get(&root.id()).copied() else { return Err(recursive_use()) };
+    if !markers.is_empty() && (markers_used || style_mentions_marker) {
+        let nested = style_mentions_marker
+            || markers.iter().any(|marker| marker.descendants().chain(marker.ancestors()).filter(roxmltree::Node::is_element).any(has_marker_property));
+        if nested {
+            return Err(Error::NotImplemented("SVG markers that can apply inside markers (or markers set from a <style> sheet); convert markers to paths"));
+        }
+        let largest = markers
+            .iter()
+            .filter_map(|marker| match memo.get(&marker.id()) {
+                Some(Visit::Done { cost, .. }) => Some(*cost),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let total = root_cost.saturating_add(root_vertices.saturating_mul(3).saturating_mul(largest));
+        if total > MAX_SVG_ELEMENTS {
+            return Err(Error::TooLarge(format!("SVG markers could expand to more than {MAX_SVG_ELEMENTS} elements")));
+        }
+    }
+    Ok(facts)
+}
+
+fn recursive_use() -> Error {
+    Error::Malformed { format: "SVG", message: "a <use> element references itself or one of its ancestors".to_owned() }
+}
+
+fn has_marker_property(node: roxmltree::Node<'_, '_>) -> bool {
+    node.attributes()
+        .any(|a| matches!(a.name(), "marker" | "marker-start" | "marker-mid" | "marker-end") || (a.name() == "style" && a.value().contains("marker")))
+}
+
+/// The elements a `<use>` instantiates (every element carrying the referenced id, to stay conservative).
+fn svg_use_targets<'a, 'input>(node: roxmltree::Node<'a, 'input>, ids: &HashMap<&str, Vec<roxmltree::Node<'a, 'input>>>) -> Vec<roxmltree::Node<'a, 'input>> {
+    if node.tag_name().name() != "use" {
+        return Vec::new();
+    }
+    let Some(href) = node.attributes().find(|a| a.name() == "href").map(|a| a.value()) else { return Vec::new() };
+    let Some(id) = href.trim().strip_prefix('#') else { return Vec::new() };
+    ids.get(id.trim()).cloned().unwrap_or_default()
+}
+
+/// An upper bound on the vertices markers could be drawn at: every vertex needs a command letter or a number
+/// (one or more digits).
+fn svg_vertex_bound(node: roxmltree::Node<'_, '_>) -> u64 {
+    let data = match node.tag_name().name() {
+        "path" => node.attribute("d"),
+        "polyline" | "polygon" => node.attribute("points"),
+        "line" => return 2,
+        _ => None,
+    };
+    let Some(data) = data else { return 0 };
+    let mut count = 0u64;
+    let mut in_digits = false;
+    for b in data.bytes() {
+        let digit = b.is_ascii_digit();
+        if (digit && !in_digits) || b.is_ascii_alphabetic() {
+            count += 1;
+        }
+        in_digits = digit;
+    }
+    count
+}
+
+/// Width and height of the root `<svg>` element only (never a child's `width=`, never `stroke-width=`), both in
+/// physical units.
+pub(crate) fn svg_root_has_physical_size(root: roxmltree::Node<'_, '_>) -> bool {
+    [root.attribute("width"), root.attribute("height")].into_iter().all(|value| value.is_some_and(is_physical_length))
+}
+
+fn is_physical_length(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    ["mm", "cm", "in", "pt", "pc"]
+        .iter()
+        .any(|unit| value.strip_suffix(unit).is_some_and(|number| number.parse::<f64>().is_ok_and(|n| n.is_finite() && n > 0.0)))
 }
 
 fn svg_bez_path(path: &usvg::Path, scale: f64) -> Result<BezPath> {
@@ -234,72 +720,85 @@ fn svg_bez_path(path: &usvg::Path, scale: f64) -> Result<BezPath> {
     let mut bez = BezPath::new();
     for segment in path.data().segments() {
         match segment {
-            PathSegment::MoveTo(p) => bez.move_to(svg_point(p, t, scale)),
-            PathSegment::LineTo(p) => bez.line_to(svg_point(p, t, scale)),
-            PathSegment::QuadTo(p1, p2) => bez.quad_to(svg_point(p1, t, scale), svg_point(p2, t, scale)),
-            PathSegment::CubicTo(p1, p2, p3) => bez.curve_to(svg_point(p1, t, scale), svg_point(p2, t, scale), svg_point(p3, t, scale)),
+            PathSegment::MoveTo(p) => bez.move_to(svg_point(p, t, scale)?),
+            PathSegment::LineTo(p) => bez.line_to(svg_point(p, t, scale)?),
+            PathSegment::QuadTo(p1, p2) => bez.quad_to(svg_point(p1, t, scale)?, svg_point(p2, t, scale)?),
+            PathSegment::CubicTo(p1, p2, p3) => bez.curve_to(svg_point(p1, t, scale)?, svg_point(p2, t, scale)?, svg_point(p3, t, scale)?),
             PathSegment::Close => bez.close_path(),
         }
-    }
-    if bez.elements().len() > 2_000_000 {
-        return Err(Error::TooLarge("SVG contains more than 2,000,000 path elements".to_owned()));
     }
     Ok(bez)
 }
 
-fn svg_point(p: usvg::tiny_skia_path::Point, t: usvg::Transform, scale: f64) -> openlaser_geom::Point {
+fn svg_point(p: usvg::tiny_skia_path::Point, t: usvg::Transform, scale: f64) -> Result<openlaser_geom::Point> {
     let x = f64::from(t.sx) * f64::from(p.x) + f64::from(t.kx) * f64::from(p.y) + f64::from(t.tx);
     let y = f64::from(t.ky) * f64::from(p.x) + f64::from(t.sy) * f64::from(p.y) + f64::from(t.ty);
-    openlaser_geom::Point::new(x * scale, -y * scale)
+    let (x, y) = (x * scale, -y * scale);
+    check_placed(x, y, "an SVG path")?;
+    Ok(openlaser_geom::Point::new(x, y))
 }
 
-fn svg_layer(path: &usvg::Path, current: LayerKey, imported: &mut Imported, notice_n: &mut u32) -> LayerKey {
+fn bez_point_count(bez: &BezPath) -> usize {
+    bez.elements()
+        .iter()
+        .map(|element| match element {
+            openlaser_geom::PathEl::MoveTo(_) | openlaser_geom::PathEl::LineTo(_) => 1,
+            openlaser_geom::PathEl::QuadTo(..) => 2,
+            openlaser_geom::PathEl::CurveTo(..) => 3,
+            openlaser_geom::PathEl::ClosePath => 0,
+        })
+        .sum()
+}
+
+/// The palette layer whose colour exactly matches the path's stroke (else fill); `Err` carries the colour
+/// (`#rrggbb`, or a description) for the unmatched-colour notice.
+fn svg_palette_layer(path: &usvg::Path) -> Result<LayerKey, String> {
     let paint = path.stroke().map(usvg::Stroke::paint).or_else(|| path.fill().map(usvg::Fill::paint));
-    if let Some(usvg::Paint::Color(color)) = paint {
-        let rgb = [color.red, color.green, color.blue];
-        if let Some(index) = PALETTE.iter().position(|candidate| candidate.0 == rgb)
-            && let Ok(index) = u8::try_from(index)
-        {
-            return LayerKey::Color(index);
+    match paint {
+        Some(usvg::Paint::Color(color)) => {
+            let rgb = [color.red, color.green, color.blue];
+            PALETTE
+                .iter()
+                .position(|candidate| candidate.0 == rgb)
+                .and_then(|index| u8::try_from(index).ok())
+                .map(LayerKey::Color)
+                .ok_or_else(|| format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]))
         }
+        Some(_) => Err("a gradient or pattern".to_owned()),
+        None => Err("no stroke or fill".to_owned()),
     }
-    imported.notices.push(Notice {
-        n: *notice_n,
-        code: NoticeCode::ImportColorUnmatched,
-        message: format!("SVG colour did not exactly match the palette; assigned to {current}"),
-        object: None,
-        layer: Some(current),
-    });
-    *notice_n = notice_n.saturating_add(1);
-    current
 }
 
-fn svg_has_physical_size(source: &str) -> bool {
-    ["mm", "cm", "in", "pt", "pc"].iter().any(|unit| {
-        ["width", "height"].iter().all(|attribute| attribute_value(source, attribute).is_some_and(|value| value.trim().to_ascii_lowercase().ends_with(unit)))
-    })
-}
-
-fn attribute_value<'a>(source: &'a str, attribute: &str) -> Option<&'a str> {
-    let marker = format!("{attribute}=");
-    let rest = source.split_once(&marker)?.1.trim_start();
-    let quote = rest.chars().next()?;
-    if quote != '\'' && quote != '"' {
-        return None;
-    }
-    rest.get(1..)?.split_once(quote).map(|(value, _)| value)
-}
+// ---- raster ---------------------------------------------------------------------------------------------------
 
 fn import_raster(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Imported> {
-    let image = image::load_from_memory(bytes).map_err(|e| Error::Malformed { format: "image", message: e.to_string() })?;
-    let (width, height) = image.dimensions();
-    let pixels = u64::from(width) * u64::from(height);
-    if pixels == 0 || pixels > 16_777_216 {
-        return Err(Error::TooLarge(format!("image has {pixels} pixels; maximum is 16777216")));
+    if bytes.len() > MAX_RASTER_FILE_BYTES {
+        return Err(Error::TooLarge(format!("image file is {} bytes; the limit is {MAX_RASTER_FILE_BYTES}", bytes.len())));
     }
-    let dpi = raster_dpi(bytes).unwrap_or(254.0);
+    let format = image::guess_format(bytes).map_err(|e| Error::Malformed { format: "image", message: e.to_string() })?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_RASTER_SIDE);
+    limits.max_image_height = Some(MAX_RASTER_SIDE);
+    limits.max_alloc = Some(MAX_RASTER_ALLOC);
+    // The header alone first: the size limits apply before any pixel is decoded.
+    let mut header = image::ImageReader::with_format(Cursor::new(bytes), format);
+    header.limits(limits.clone());
+    let (width, height) = header.into_dimensions().map_err(image_error)?;
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels == 0 || pixels > MAX_RASTER_PIXELS {
+        return Err(Error::TooLarge(format!("image has {width} × {height} = {pixels} pixels; the limit is {MAX_RASTER_PIXELS}")));
+    }
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
+    reader.limits(limits);
+    let image = reader.decode().map_err(image_error)?;
+    let file_dpi = raster_dpi(bytes);
+    let dpi = file_dpi.unwrap_or(254.0);
     let size_mm = [f64::from(width) * 25.4 / dpi * opts.scale, f64::from(height) * 25.4 / dpi * opts.scale];
     let gray: Arc<[u8]> = image.to_luma8().into_raw().into();
+    let [cx, cy] = opts.center_at.unwrap_or([0.0, 0.0]);
+    let bounds = Bounds { min: [cx - size_mm[0] / 2.0, cy - size_mm[1] / 2.0], max: [cx + size_mm[0] / 2.0, cy + size_mm[1] / 2.0] };
+    check_placed(bounds.min[0], bounds.min[1], "the image")?;
+    check_placed(bounds.max[0], bounds.max[1], "the image")?;
     let bitmap = BitmapData {
         asset: AssetId(*blake3::hash(bytes).as_bytes()),
         px: [width, height],
@@ -307,25 +806,20 @@ fn import_raster(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Impor
         gray,
         source_ext: name.rsplit_once('.').map_or("image", |(_, ext)| ext).to_ascii_lowercase(),
     };
-    let [cx, cy] = opts.center_at.unwrap_or([0.0, 0.0]);
-    let xform = Affine::translate((cx - size_mm[0] / 2.0, cy - size_mm[1] / 2.0));
     let layer = opts.layer.unwrap_or(opts.current_layer);
-    let mut notices = Vec::new();
-    if raster_dpi(bytes).is_none() {
-        notices.push(Notice {
-            n: 1,
-            code: NoticeCode::ImportEntitySkipped,
-            message: "Image has no usable DPI metadata; imported at 254 DPI (10 px/mm)".to_owned(),
-            object: None,
-            layer: Some(layer),
-        });
+    let mut notices = Notices::default();
+    if file_dpi.is_none() {
+        notices.push(ASSUMED_DEFAULT, "Image has no usable DPI metadata; imported at 254 DPI (10 px/mm)".to_owned(), Some(layer));
     }
-    Ok(Imported {
-        shapes: vec![shape(layer, Geom::Bitmap(Arc::new(bitmap)), xform)?],
-        layers: Vec::new(),
-        notices,
-        bounds: Some(Bounds { min: [cx - size_mm[0] / 2.0, cy - size_mm[1] / 2.0], max: [cx + size_mm[0] / 2.0, cy + size_mm[1] / 2.0] }),
-    })
+    let xform = Affine::translate((bounds.min[0], bounds.min[1]));
+    Ok(Imported { shapes: vec![shape(layer, Geom::Bitmap(Arc::new(bitmap)), xform)?], layers: Vec::new(), notices: notices.0, bounds: Some(bounds) })
+}
+
+fn image_error(e: image::ImageError) -> Error {
+    match e {
+        image::ImageError::Limits(limit) => Error::TooLarge(format!("image exceeds the decoder limits ({limit}): at most {MAX_RASTER_SIDE} px a side")),
+        other => Error::Malformed { format: "image", message: other.to_string() },
+    }
 }
 
 fn raster_dpi(bytes: &[u8]) -> Option<f64> {
@@ -456,14 +950,17 @@ fn tiff_dpi(bytes: &[u8]) -> Option<f64> {
     (dpi.is_finite() && dpi > 0.0).then_some(dpi)
 }
 
+// ---- shared ---------------------------------------------------------------------------------------------------
+
 fn paths_to_imported(polylines: Vec<Polyline>, layer: LayerKey, notices: Vec<Notice>) -> Result<Imported> {
     let bounds = polyline_bounds(&polylines);
     let mut shapes = Vec::with_capacity(polylines.len());
     for polyline in polylines {
+        let mut points = polyline.0.into_iter();
+        let Some([first_x, first_y]) = points.next() else { continue };
         let mut path = BezPath::new();
-        let Some([first_x, first_y]) = polyline.0.first().copied() else { continue };
         path.move_to((first_x, first_y));
-        for [x, y] in polyline.0.into_iter().skip(1) {
+        for [x, y] in points {
             path.line_to((x, y));
         }
         shapes.push(shape(layer, Geom::Path(Arc::new(path)), Affine::IDENTITY)?);
@@ -474,20 +971,6 @@ fn paths_to_imported(polylines: Vec<Polyline>, layer: LayerKey, notices: Vec<Not
 fn shape(layer: LayerKey, geom: Geom, xform: Affine) -> Result<Shape> {
     let power_scale = Percent::new(100.0).map_err(|e| Error::Malformed { format: "shape", message: e.to_string() })?;
     Ok(Shape { id: ObjectId(0), name: None, layer, xform, geom, locked: false, power_scale, priority: 0 })
-}
-
-fn transform_polylines(polylines: &mut [Polyline], scale: f64, center_at: Option<P2>, flip_y: bool) -> Result<()> {
-    let bounds = polyline_bounds(polylines).ok_or_else(|| Error::Malformed { format: "geometry", message: "no finite points".to_owned() })?;
-    let source_center = [(bounds.min[0] + bounds.max[0]) / 2.0, (bounds.min[1] + bounds.max[1]) / 2.0];
-    let target = center_at.unwrap_or(source_center);
-    for line in polylines {
-        for point in &mut line.0 {
-            let [x, y] = *point;
-            let y = if flip_y { -y } else { y };
-            *point = [(x - source_center[0]) * scale + target[0], (y - source_center[1]) * scale + target[1]];
-        }
-    }
-    Ok(())
 }
 
 fn polyline_bounds(polylines: &[Polyline]) -> Option<Bounds> {
@@ -506,102 +989,112 @@ fn polyline_bounds(polylines: &[Polyline]) -> Option<Bounds> {
     bounds
 }
 
-fn shape_bounds(shapes: &[Shape], tolerance: f64) -> Option<Bounds> {
-    let _ = tolerance;
+/// Bounds of the shapes' path control points (a superset of the curves), after each shape's transform.
+fn shape_bounds(shapes: &[Shape]) -> Option<Bounds> {
     let mut bounds: Option<Bounds> = None;
     for shape in shapes {
-        if let Geom::Path(path) = &shape.geom {
-            for element in path.elements() {
-                let ps: Vec<openlaser_geom::Point> = match element {
-                    openlaser_geom::PathEl::MoveTo(p) | openlaser_geom::PathEl::LineTo(p) => vec![*p],
-                    openlaser_geom::PathEl::QuadTo(p1, p2) => vec![*p1, *p2],
-                    openlaser_geom::PathEl::CurveTo(p1, p2, p3) => vec![*p1, *p2, *p3],
-                    openlaser_geom::PathEl::ClosePath => continue,
-                };
-                for p in ps {
-                    let p = shape.xform * p;
-                    let point = [p.x, p.y];
-                    bounds = Some(match bounds {
-                        None => Bounds { min: point, max: point },
-                        Some(old) => {
-                            Bounds { min: [old.min[0].min(point[0]), old.min[1].min(point[1])], max: [old.max[0].max(point[0]), old.max[1].max(point[1])] }
-                        }
-                    });
-                }
+        let Geom::Path(path) = &shape.geom else { continue };
+        for element in path.elements() {
+            let points: &[openlaser_geom::Point] = match element {
+                openlaser_geom::PathEl::MoveTo(p) | openlaser_geom::PathEl::LineTo(p) => std::slice::from_ref(p),
+                openlaser_geom::PathEl::QuadTo(p1, p2) => &[*p1, *p2],
+                openlaser_geom::PathEl::CurveTo(p1, p2, p3) => &[*p1, *p2, *p3],
+                openlaser_geom::PathEl::ClosePath => &[],
+            };
+            for p in points {
+                let p = shape.xform * *p;
+                bounds = Some(match bounds {
+                    None => Bounds { min: [p.x, p.y], max: [p.x, p.y] },
+                    Some(old) => Bounds { min: [old.min[0].min(p.x), old.min[1].min(p.y)], max: [old.max[0].max(p.x), old.max[1].max(p.y)] },
+                });
             }
         }
     }
     bounds
 }
 
-fn recenter_shapes(shapes: &mut [Shape], bounds: Option<Bounds>, center_at: Option<P2>, scale: f64) -> Result<()> {
-    let Some(bounds) = bounds else { return Ok(()) };
-    let source = [(bounds.min[0] + bounds.max[0]) / 2.0, (bounds.min[1] + bounds.max[1]) / 2.0];
+/// `scale` about the drawing's centre, moved to `center_at` when given (SVG keeps its coordinates otherwise).
+fn recenter_shapes(shapes: &mut [Shape], bounds: Option<Bounds>, center_at: Option<P2>, scale: f64) {
+    let Some(bounds) = bounds else { return };
+    if scale == 1.0 && center_at.is_none() {
+        return;
+    }
+    let source = [bounds.min[0] / 2.0 + bounds.max[0] / 2.0, bounds.min[1] / 2.0 + bounds.max[1] / 2.0];
     let target = center_at.unwrap_or(source);
     let transform = Affine::translate((target[0], target[1])) * Affine::scale(scale) * Affine::translate((-source[0], -source[1]));
     for shape in shapes {
         shape.xform = transform * shape.xform;
     }
-    Ok(())
+}
+
+/// How many notices of each code an import produced (tests).
+#[cfg(test)]
+fn notice_counts(imported: &Imported) -> HashMap<NoticeCode, usize> {
+    let mut map = HashMap::new();
+    for notice in &imported.notices {
+        *map.entry(notice.code).or_insert(0) += 1;
+    }
+    map
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn svg_true_scale_mm() {
-        let bytes = include_bytes!("../../../tests/fixtures/square10mm.svg");
-        let imported = import("square10mm.svg", bytes, &ImportOptions::default()).expect("valid SVG");
-        let bounds = imported.bounds.expect("path bounds");
-        assert!((bounds.max[0] - bounds.min[0] - 10.0).abs() < 1e-6, "bounds: {bounds:?}");
-        assert!((bounds.max[1] - bounds.min[1] - 10.0).abs() < 1e-6);
+    fn svg(body: &str) -> Vec<u8> {
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="20mm" height="20mm" viewBox="0 0 20 20">{body}</svg>"#
+        )
+        .into_bytes()
     }
 
     #[test]
-    fn svg_unitless_refused_unless_explicit_units() {
-        let bytes = include_bytes!("../../../tests/fixtures/unitless.svg");
-        assert!(matches!(import("unitless.svg", bytes, &ImportOptions::default()), Err(Error::Unitless(_))));
-        let opts = ImportOptions { svg_units: SvgUnits::Px96, ..ImportOptions::default() };
-        assert!(import("unitless.svg", bytes, &opts).is_ok());
+    fn svg_image_href_resolver_never_reads_files() {
+        // usvg's default resolver would read this file (std::fs::read on any href) and return Some(PNG).
+        let png = openlaser_testkit::fixture("gray64.png");
+        let png_bytes = std::fs::read(&png).expect("fixture");
+        let refused = Arc::new(AtomicUsize::new(0));
+        let opts = svg_parser_options(96.0, Arc::clone(&refused));
+        assert!((opts.image_href_resolver.resolve_string)(png.to_str().expect("utf-8 path"), &opts).is_none());
+        assert!((opts.image_href_resolver.resolve_data)("image/png", Arc::new(png_bytes), &opts).is_none());
+        assert_eq!(refused.load(Ordering::Relaxed), 2);
     }
 
     #[test]
-    fn om_malformed_point_is_a_b9_refusal() {
-        let bytes = br#"{"version":1,"objects":[{"name":"bad-shape","layer_id":"x","polylines":[[[0,1,2]]],"x":0,"y":0,"scale":1,"rotation":0}]}"#;
-        assert!(matches!(om::parse_workspace(bytes), Err(Error::MalformedPoint { object, .. }) if object == "bad-shape"));
+    fn svg_image_elements_are_ignored_with_a_notice() {
+        let png = openlaser_testkit::fixture("gray64.png");
+        let body = format!(
+            r##"<image href="{}" width="5" height="5"/><image xlink:href="data:image/png;base64,iVBORw0KGgo=" width="5" height="5"/><path d="M1 1L9 9" stroke="#000000"/>"##,
+            png.display()
+        );
+        let imported = import("image.svg", &svg(&body), &ImportOptions::default()).expect("SVG with images imports");
+        assert_eq!(imported.shapes.len(), 1);
+        let notice = imported.notices.iter().find(|n| n.message.contains("<image>")).expect("image notice");
+        assert!(notice.message.starts_with("2 SVG <image>"), "{}", notice.message);
+        assert_eq!(notice.code, NoticeCode::ImportEntitySkipped);
     }
 
     #[test]
-    fn om_fixture_import_preserves_objects_and_layers() {
-        let root = openlaser_testkit::fixture("om_small");
-        let workspace = std::fs::read(root.join("workspace.json")).expect("fixture workspace");
-        let layer_data = std::fs::read(root.join("layer_settings.json")).expect("fixture settings");
-        let ws = om::parse_workspace(&workspace).expect("workspace parses");
-        let layers = om::parse_layer_settings(&layer_data).expect("settings parse");
-        let imported = om::to_imported(&ws, &layers).expect("workspace imports");
-        assert_eq!(imported.shapes.len(), 3);
-        assert_eq!(imported.layers.len(), 3);
+    fn svg_depth_scan_skips_comments_quotes_and_doctype() {
+        let ok = r#"<!DOCTYPE svg [ <!ENTITY a "x>y"> <!-- it's ] > --> ]><svg a="<g>" b='>'><!-- <g><g> --><![CDATA[<g>]]><?pi <g>?><g/><g></g></svg>"#;
+        assert!(svg_scan_depth(ok).is_ok());
+        let deep = format!("<svg>{}{}</svg>", "<g>".repeat(MAX_SVG_DEPTH), "</g>".repeat(MAX_SVG_DEPTH));
+        assert!(matches!(svg_scan_depth(&deep), Err(Error::TooLarge(_))));
+        let at_limit = format!("<svg>{}<path/>{}</svg>", "<g>".repeat(MAX_SVG_DEPTH - 2), "</g>".repeat(MAX_SVG_DEPTH - 2));
+        assert!(svg_scan_depth(&at_limit).is_ok());
+        let leaf_over = format!("<svg>{}<path/>{}</svg>", "<g>".repeat(MAX_SVG_DEPTH - 1), "</g>".repeat(MAX_SVG_DEPTH - 1));
+        assert!(svg_scan_depth(&leaf_over).is_err());
     }
 
     #[test]
-    fn om_business_card_imports_403_objects_and_3057_paths() {
-        let root = openlaser_testkit::golden_dir().join("inputs");
-        let workspace = std::fs::read(root.join("workspace.json")).expect("business card workspace");
-        let layer_data = std::fs::read(root.join("layer_settings.json")).expect("business card settings");
-        let ws = om::parse_workspace(&workspace).expect("workspace parses");
-        let layers = om::parse_layer_settings(&layer_data).expect("settings parse");
-        let imported = om::to_imported(&ws, &layers).expect("business card imports");
-        assert_eq!(imported.shapes.len(), 403);
-        assert_eq!(ws.objects.iter().flat_map(|object| &object.polylines).map(Vec::len).sum::<usize>(), 3057);
-        assert_eq!(imported.layers.len(), 3);
-    }
-
-    #[test]
-    fn svg_palette_match_uses_exact_rgb_value() {
-        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm"><path d="M1 1L9 9" stroke="#000000" fill="none"/></svg>"##;
-        let imported = import("palette.svg", svg, &ImportOptions::default()).expect("SVG imports");
-        assert_eq!(imported.shapes.first().map(|shape| shape.layer), Some(LayerKey::Color(0)));
+    fn notices_are_counted_by_code() {
+        let body = r##"<path d="M1 1L9 9" stroke="#123456"/><path d="M2 2L8 8" stroke="#654321"/><text x="1" y="1">hi</text>"##;
+        let imported = import("colours.svg", &svg(body), &ImportOptions::default()).expect("imports");
+        let counts = notice_counts(&imported);
+        assert_eq!(counts.get(&NoticeCode::ImportColorUnmatched), Some(&1), "one aggregated notice: {:?}", imported.notices);
+        assert_eq!(counts.get(&NoticeCode::ImportTextIgnored), Some(&1));
+        let numbers: Vec<u32> = imported.notices.iter().map(|n| n.n).collect();
+        assert_eq!(numbers, (1..=u32::try_from(numbers.len()).expect("few")).collect::<Vec<_>>());
     }
 
     #[test]
@@ -623,15 +1116,5 @@ mod tests {
         let riff_size = (webp.len() - 8) as u32;
         webp[4..8].copy_from_slice(&riff_size.to_le_bytes());
         assert!((raster_dpi(&webp).expect("WebP EXIF DPI") - 100.0).abs() < 1e-9);
-    }
-
-    proptest::proptest! {
-        #![proptest_config(proptest::test_runner::Config { cases: 256, .. proptest::test_runner::Config::default() })]
-        #[test]
-        fn prop_importers_never_panic(bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..4096)) {
-            let _ = import("random.unknown", &bytes, &ImportOptions::default());
-            let _ = dxf_om::parse_dxf_om(&bytes);
-            let _ = om::parse_workspace(&bytes);
-        }
     }
 }
