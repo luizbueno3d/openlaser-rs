@@ -58,6 +58,8 @@ pub fn resolve_timings(m: &GalvoMachine) -> Result<ResolvedTimings, QuantiseErro
     let polygon = galvo::delay_word(t.polygon_us).map_err(|e| qerr("polygon delay", e))?;
     let jump_delay_short = galvo::delay_word(t.jump_delay_short_us).map_err(|e| qerr("jump delay", e))?;
     // The long delay opens every list's first jump (SPEC §5.2 rule 6); it is the first-jump setting.
+    // `timings.jump_delay_long_us` is not sent: it is fingerprinted with the rest of the profile, but the word
+    // comes from `first_jump.delay_us` (both 200 µs in the built-in profiles until H3/H19 settle the first jump).
     let jump_delay_long = galvo::delay_word(m.first_jump.delay_us).map_err(|e| qerr("first-jump delay", e))?;
     let jump_speed_units = galvo::speed_to_units(m.jump_speed.get(), speed_field_mm(m)).map_err(|e| qerr("jump speed", e))?;
     let mo_settle_10us = ten_us_word(m.mo_settle.get())
