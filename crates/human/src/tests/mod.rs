@@ -383,6 +383,21 @@ fn arm_dialog_forgets_input_when_what_is_confirmed_changes() {
 }
 
 #[test]
+fn close_arm_dialog_forgets_input_even_for_an_identical_model() {
+    // The app voids the PendingArm (an undo then redo bumps the revision twice and rebuilds the same job) and calls
+    // close_arm_dialog; the dialog drawn again with an identical model is a new opening.
+    let (mut h, clock) = harness();
+    human_fills(&mut h);
+    h.state_mut().human.close_arm_dialog();
+    h.run();
+    assert_eq!(field_value(&h), "");
+    assert_eq!(ticks(&h), vec![false, false]);
+    clock.advance(Duration::from_secs(1));
+    click_confirm(&mut h);
+    assert_eq!(mints(), 0);
+}
+
+#[test]
 fn one_undrawn_pass_closes_the_arm_dialog() {
     // Exactly one pass without the dialog (a stop voided the PendingArm), then drawn again: a new opening.
     let (mut h, _clock) = harness();

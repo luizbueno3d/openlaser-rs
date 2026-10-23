@@ -79,6 +79,13 @@ impl Human {
         self.mark_shown(pass);
     }
 
+    /// Forgets the ARM dialog's typed text and ticks at once. The app calls it whenever it voids the PendingArm (any
+    /// revision bump, any stop): `ArmModel` carries no revision, so this is what makes even a new PendingArm that is
+    /// identical to the voided one, drawn in the very next pass, a new opening.
+    pub fn close_arm_dialog(&mut self) {
+        self.arm.forget();
+    }
+
     pub(crate) fn mark_shown(&self, pass: u64) {
         let mut s = self.surfaces.get();
         s.shown(pass);

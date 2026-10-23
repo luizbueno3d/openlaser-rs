@@ -63,7 +63,7 @@ pub fn note(text: &str) -> String {
 /// Bidirectional overrides, isolates and zero-width characters: they change how the rest of a line reads (or hide
 /// text) without being visible themselves, so an agent's note never carries them.
 fn invisible_format(c: char) -> bool {
-    matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
+    matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
 }
 
 /// The rows above the S23 first-emission cap, as "C00 at 50.00 % is above the 10 % cap".
@@ -133,6 +133,7 @@ mod tests {
         assert_eq!(note("a\u{1b}[31mb\nc"), "a[31mbc");
         // A right-to-left override would make "Approve 05%" read backwards; zero-width characters hide text.
         assert_eq!(note("power \u{202E}%05\u{202C} ok\u{200B}\u{2066}x\u{2069}\u{FEFF}"), "power %05 okx");
+        assert_eq!(note("line\u{2028}para\u{2029}end"), "lineparaend");
         assert_eq!(note("Visitenkarte, Ébauche, 名刺 ok"), "Visitenkarte, Ébauche, 名刺 ok");
     }
 }
