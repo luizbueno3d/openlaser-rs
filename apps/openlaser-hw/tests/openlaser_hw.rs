@@ -515,6 +515,28 @@ fn unconfirmed_frame_stop_never_reaches_arm() {
     }
 }
 
+#[test]
+fn frame_stop_the_engine_does_not_report_refuses_to_arm() {
+    // The driver confirmed the stop, but the engine never reports it (or reports it unconfirmed): the wait runs out
+    // or the report says no, and the run ends before the ARM step instead of going on.
+    let confirmed_ack = vec![(MachineId("jpt-m7-200-sim".into()), StopAck { latched: true, report: Some(confirmed()), elapsed_ms: 40 })];
+    let unconfirmed = StopReport { confirmed: false, ..confirmed() };
+    let fc = || RigEvent::FrameCompleted(receipt(1, FrameSource::Job));
+    for (batches, says) in [
+        (VecDeque::from([vec![], vec![], vec![fc()]]), "did not report the frame stop within 1000 ms"),
+        (VecDeque::from([vec![], vec![], vec![fc()], vec![], vec![RigEvent::Stopped(unconfirmed)]]), "the frame stop was not confirmed"),
+    ] {
+        let script = Script { batches, power_pct: 1.0, stop_acks: Some(confirmed_ack.clone()), ..Script::default() };
+        let (mut env, s) = fake_env(script);
+        let mut term = Scripted::new(true, &[Key::Wait(4), Key::Enter]);
+        term.typing = Some(|c| format!("ARM {c:06}"));
+        assert_eq!(run_with(&argv("run --builtin dot --sim --allow-emission"), &mut term, &mut env), EXIT_FAIL);
+        let out = term.output();
+        assert!(out.contains(says), "{out}");
+        assert!(!has(&calls(&s), "request_arm"), "{:?}", calls(&s));
+    }
+}
+
 fn armed_token() -> ArmToken {
     token_for_tests(FP, Fingerprint([0x43; 32]), MachineId("jpt-m7-200-sim".into()), SessionId(1), MonoTime(Duration::from_secs(60)), 7)
 }

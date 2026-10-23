@@ -224,19 +224,24 @@ fn stop_framing(rig: &mut dyn Rig, term: &mut dyn Terminal, env: &Env, target: &
         print_stop(term, &acks);
         return Err(HwError::Failed(format!("the frame stop was not confirmed within {} ms; nothing was armed or marked", STOP_WAIT.as_millis())));
     }
-    // The confirmed report is what clears the way. Waiting for the engine's own Stopped event only orders it before
-    // `request_arm`; if it is late, it voids the PendingArm and `run_armed` refuses (fail closed), so going on is safe.
-    let deadline = env.clock.now().plus(STOP_WAIT.saturating_mul(2));
+    // The engine must see the stop too, before `request_arm` (a Stopped it saw later would void the PendingArm). A
+    // wait that runs out refuses like any other (AGENTS.md §1 rule 3), even though the driver confirmed the stop.
+    let wait = STOP_WAIT.saturating_mul(2);
+    let deadline = env.clock.now().plus(wait);
     loop {
         for ev in rig.poll() {
             match ev {
-                RigEvent::Stopped(_) => return Ok(()),
+                RigEvent::Stopped(r) if r.confirmed => return Ok(()),
+                RigEvent::Stopped(r) => {
+                    print_report(term, &r);
+                    return Err(HwError::Failed("the frame stop was not confirmed; nothing was armed or marked".to_owned()));
+                }
                 RigEvent::Fault(e) => return Err(HwError::Failed(format!("machine fault while stopping the frame: {e}"))),
                 _ => {}
             }
         }
         if env.clock.now() >= deadline {
-            return Ok(());
+            return Err(HwError::Failed(format!("the engine did not report the frame stop within {} ms; nothing was armed or marked", wait.as_millis())));
         }
         env.clock.sleep(env.poll);
     }
