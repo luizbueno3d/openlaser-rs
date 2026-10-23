@@ -200,3 +200,25 @@ impl<'de> Deserialize<'de> for Fingerprint {
         Fingerprint::from_hex(&s).map_err(de::Error::custom)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_json_is_64_hex() {
+        let fp = Fingerprint([0xab; 32]);
+        let json = serde_json::to_string(&fp).unwrap();
+        assert_eq!(json, format!("\"{}\"", "ab".repeat(32)));
+        assert_eq!(serde_json::from_str::<Fingerprint>(&json).unwrap(), fp);
+        assert!(Fingerprint::from_hex(&"AB".repeat(32)).is_err());
+    }
+
+    #[test]
+    fn layer_keys_parse_and_display_canonically() {
+        assert_eq!("c5".parse::<LayerKey>().unwrap().to_string(), "C05");
+        assert_eq!("05".parse::<LayerKey>().unwrap(), LayerKey::Color(5));
+        assert_eq!("t2".parse::<LayerKey>().unwrap().palette_slot(), 31);
+        assert!("30".parse::<LayerKey>().is_err());
+    }
+}

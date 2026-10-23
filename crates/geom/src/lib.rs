@@ -1,20 +1,25 @@
 //! Geometry (SPEC §3.2; owned by WP1).
 //!
-//! WP0 stubs: the trivial `Polyline` helpers are implemented; the algorithms (flatten, join, close, dedupe,
-//! hatch, even-odd, hit index) return neutral values or `Error::NotImplemented`.
+//! Polylines in f64 millimetres (Y up), kurbo flattening, transforms, bounds, the clean-up operations (Auto-Join
+//! as an exact OM `geometry.join_lines` port, Close Path, Delete Duplicates), the hatch generators (`hatch_om`,
+//! the exact OM `raster.hatch_polylines` port checked by T3, and LightBurn Fill `hatch`), the even-odd region
+//! test and the canvas `HitIndex`.
 #![forbid(unsafe_code)]
 
 mod hatch;
 mod hit;
 mod ops;
+#[cfg(test)]
+mod props;
 
 pub use kurbo::{Affine, BezPath, PathEl, Point, Rect, Vec2};
 pub use openlaser_types::emission::Bounds;
 use serde::{Deserialize, Serialize};
 
-pub use hatch::{HatchParams, HatchResult, OmHatch, hatch, hatch_om, inside_even_odd};
-pub use hit::HitIndex;
-pub use ops::{bounds_of, close_paths, duplicates, flatten, join_lines};
+pub use hatch::{HATCH_OM_MAX_LINES, HatchParams, HatchResult, OmHatch, hatch, hatch_om, inside_even_odd};
+pub use hit::{HIT_MAX_COORD_MM, HitIndex};
+pub use openlaser_types::ids::ObjectId;
+pub use ops::{JoinReport, MAX_CURVE_SEGMENTS, MIN_FLATTEN_TOL_MM, bounds_of, close_paths, duplicates, flatten, join_lines, join_lines_report};
 
 pub type P2 = [f64; 2];
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -42,8 +47,10 @@ impl Polyline {
 
     /// OM `is_closed`: at least 3 points and |first − last| <= tol.
     pub fn is_closed(&self, tol_mm: f64) -> bool {
-        let _ = tol_mm;
-        false
+        match (self.0.first(), self.0.last()) {
+            (Some(a), Some(b)) if self.0.len() >= 3 => (a[0] - b[0]).hypot(a[1] - b[1]) <= tol_mm,
+            _ => false,
+        }
     }
 
     pub fn transformed(&self, a: &Affine) -> Polyline {

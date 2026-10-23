@@ -1,7 +1,5 @@
 //! The project model (SPEC §3.3; owned by WP1). Pure data.
 //!
-//! WP0 stubs: the data types are complete; `Project::new` builds an empty table (WP1 adds the 30 colour layers
-//! from the defaults), and the queries return neutral values.
 #![forbid(unsafe_code)]
 
 mod layers;
@@ -20,6 +18,11 @@ pub use openlaser_geom::Polyline;
 pub use openlaser_types::{Bounds, Deg, FrameSource, FrameStyle, Hz, LayerKey, MachineId, Mm, MmPerS, Ns, ObjectId, Percent, Rgb, Us};
 
 pub const FORMAT_VERSION: u32 = 1;
+
+/// Deserialize JSON with the workspace's float-roundtrip parser.
+pub fn deserialize_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+    serde_json::from_slice(bytes).map_err(|error| error.to_string())
+}
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 

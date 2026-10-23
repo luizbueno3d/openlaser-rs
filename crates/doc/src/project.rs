@@ -3,12 +3,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use kurbo::{Affine, BezPath};
-use openlaser_geom::Polyline;
+use kurbo::{Affine, BezPath, Ellipse, Point, Rect, RoundedRect, Shape as KurboShape};
+use openlaser_geom::{DEFAULT_FLATTEN_TOL_MM, Polyline, bounds_of, flatten};
 use openlaser_types::{Bounds, FrameSource, FrameStyle, LayerKey, MachineId, Mm, ObjectId, Percent};
 use serde::{Deserialize, Serialize};
 
-use crate::layers::{ColorLayer, CutTable, LayerDefaults, ToolLayer};
+use crate::COLOR_LAYERS;
+use crate::layers::{ColorLayer, CutMode, CutOp, CutTable, ImageCut, ImageMode, LayerDefaults, ToolLayer};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Project {
@@ -120,14 +121,14 @@ pub struct Selection {
 }
 
 impl Project {
-    /// 30 colour layers + T1/T2, next_id = 1. WP0 stub: T1/T2 only; WP1 adds the colour layers from `defaults`.
+    /// 30 colour layers + T1/T2, next_id = 1.
     pub fn new(workspace: Workspace, defaults: &LayerDefaults) -> Self {
-        let _ = defaults;
         let tool = |which: u8| ToolLayer { which, name: format!("T{which}"), show: true };
+        let colors = (0..COLOR_LAYERS).filter_map(|index| u8::try_from(index).ok()).map(|index| color_layer(index, defaults)).collect();
         Project {
             name: String::new(),
             shapes: Vec::new(),
-            layers: CutTable { colors: Vec::new(), tools: [tool(1), tool(2)], order: Vec::new() },
+            layers: CutTable { colors, tools: [tool(1), tool(2)], order: Vec::new() },
             workspace,
             device_hint: None,
             job: JobSettings { repeats: 1, cut_selected: false, frame_style: FrameStyle::Contour, frame_source: FrameSource::Job },
@@ -156,32 +157,227 @@ impl Project {
     }
 
     pub fn used_layers(&self) -> Vec<LayerKey> {
-        Vec::new()
+        let mut used = Vec::new();
+        for shape in &self.shapes {
+            collect_layers(shape, &mut used);
+        }
+        used
     }
 
     /// Flattened world polylines (design mm) of one shape, groups expanded; bitmaps give their outline rectangle.
     pub fn world_polylines(&self, id: ObjectId, tol_mm: f64) -> Vec<Polyline> {
-        let _ = (id, tol_mm);
-        Vec::new()
+        let Some(shape) = find_shape(&self.shapes, id) else { return Vec::new() };
+        let mut out = Vec::new();
+        append_world_polylines(shape, Affine::IDENTITY, tol_mm, &mut out);
+        out
     }
 
     pub fn bounds(&self, ids: &[ObjectId]) -> Option<Bounds> {
-        let _ = ids;
-        None
+        let polys: Vec<Polyline> = ids.iter().flat_map(|id| self.world_polylines(*id, DEFAULT_FLATTEN_TOL_MM)).collect();
+        bounds_of(&polys)
     }
 
     /// Keeps `layers.order` consistent with the shapes (appends newly used layers). Call after every edit.
-    pub fn normalize(&mut self) {}
+    pub fn normalize(&mut self) {
+        let used = self.used_layers();
+        self.layers.order.retain(|key| used.contains(key));
+        for key in used {
+            if !self.layers.order.contains(&key) {
+                self.layers.order.push(key);
+            }
+        }
+    }
 }
 
 impl Geom {
-    /// Parametric shapes stay parametric until Convert to Path. WP0 stub: an empty path.
+    /// Parametric shapes stay parametric until Convert to Path.
     pub fn to_bez(&self) -> BezPath {
-        BezPath::new()
+        match self {
+            Geom::Path(path) => path.as_ref().clone(),
+            Geom::Rect { w, h, corner_radius } => {
+                let (hw, hh) = (w.get() / 2.0, h.get() / 2.0);
+                let rect = Rect::new(-hw, -hh, hw, hh).abs();
+                let radius = corner_radius.get().max(0.0).min(rect.width().abs() / 2.0).min(rect.height().abs() / 2.0);
+                RoundedRect::from_rect(rect, radius).to_path(DEFAULT_FLATTEN_TOL_MM)
+            }
+            Geom::Ellipse { rx, ry } => Ellipse::new(Point::ORIGIN, (rx.get().abs(), ry.get().abs()), 0.0).to_path(DEFAULT_FLATTEN_TOL_MM),
+            Geom::Polygon { sides, radius } => polygon_path(*sides, radius.get()),
+            Geom::Bitmap(bitmap) => {
+                let [w, h] = bitmap.size_mm;
+                Rect::new(-w / 2.0, -h / 2.0, w / 2.0, h / 2.0).abs().to_path(DEFAULT_FLATTEN_TOL_MM)
+            }
+            Geom::Group(_) => BezPath::new(),
+        }
     }
 }
 
 /// "C00".."C29", "T1", "T2".
 pub fn default_layer_name(k: LayerKey) -> String {
     k.to_string()
+}
+
+fn color_layer(index: u8, defaults: &LayerDefaults) -> ColorLayer {
+    let op = CutOp {
+        name: default_layer_name(LayerKey::Color(index)),
+        enabled: true,
+        mode: CutMode::Line,
+        passes: 1,
+        galvo: defaults.galvo.clone(),
+        gantry: defaults.gantry.clone(),
+        fill: defaults.fill.clone(),
+    };
+    ColorLayer {
+        index,
+        name: default_layer_name(LayerKey::Color(index)),
+        output: true,
+        show: true,
+        ops: vec![op],
+        global_passes: 1,
+        image: ImageCut {
+            mode: ImageMode::Threshold,
+            interval: defaults.fill.interval,
+            angle: defaults.fill.angle,
+            bidirectional: defaults.fill.bidirectional,
+            negative: false,
+            threshold: 128,
+            passes: 1,
+            galvo: defaults.galvo.clone(),
+            gantry: defaults.gantry.clone(),
+        },
+        air_assist: false,
+    }
+}
+
+fn collect_layers(shape: &Shape, out: &mut Vec<LayerKey>) {
+    if !out.contains(&shape.layer) {
+        out.push(shape.layer);
+    }
+    if let Geom::Group(children) = &shape.geom {
+        for child in children {
+            collect_layers(child, out);
+        }
+    }
+}
+
+fn find_shape(shapes: &[Arc<Shape>], id: ObjectId) -> Option<&Arc<Shape>> {
+    for shape in shapes {
+        if shape.id == id {
+            return Some(shape);
+        }
+        if let Geom::Group(children) = &shape.geom
+            && let Some(found) = find_shape(children, id)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn append_world_polylines(shape: &Shape, parent: Affine, tol_mm: f64, out: &mut Vec<Polyline>) {
+    let xform = parent * shape.xform;
+    match &shape.geom {
+        Geom::Group(children) => {
+            for child in children {
+                append_world_polylines(child, xform, tol_mm, out);
+            }
+        }
+        geom => out.extend(flatten(&geom.to_bez(), tol_mm).into_iter().map(|poly| poly.transformed(&xform))),
+    }
+}
+
+fn polygon_path(sides: u16, radius: f64) -> BezPath {
+    let mut path = BezPath::new();
+    if sides < 3 || !radius.is_finite() {
+        return path;
+    }
+    let radius = radius.abs();
+    for i in 0..sides {
+        let angle = std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * f64::from(i) / f64::from(sides);
+        let point = Point::new(radius * angle.cos(), radius * angle.sin());
+        if i == 0 {
+            path.move_to(point);
+        } else {
+            path.line_to(point);
+        }
+    }
+    path.close_path();
+    path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openlaser_types::{Deg, Hz, MmPerS, Ns};
+
+    fn defaults() -> LayerDefaults {
+        LayerDefaults {
+            galvo: crate::GalvoParams {
+                speed: MmPerS::new(1000.0).unwrap(),
+                power: Percent::new(30.0).unwrap(),
+                min_power: Percent::new(0.0).unwrap(),
+                frequency: Hz::new(30_000).unwrap(),
+                q_pulse: Some(Ns::new(200.0).unwrap()),
+                timings: None,
+                wobble: None,
+            },
+            gantry: crate::GantryParams {
+                speed: MmPerS::new(100.0).unwrap(),
+                power_max: Percent::new(20.0).unwrap(),
+                power_min: Percent::new(0.0).unwrap(),
+                constant_power: false,
+            },
+            fill: crate::FillParams {
+                interval: Mm::new(0.1).unwrap(),
+                angle: Deg::new(0.0).unwrap(),
+                angle_increment: Deg::new(90.0).unwrap(),
+                bidirectional: true,
+                cross_hatch: false,
+            },
+        }
+    }
+
+    fn workspace() -> Workspace {
+        Workspace { kind: DeviceKind::GalvoLmc, size_mm: [200.0, 200.0], origin: WorkspaceOrigin::Center }
+    }
+
+    #[test]
+    fn new_has_all_layers_and_independent_defaults() {
+        let mut project = Project::new(workspace(), &defaults());
+        assert_eq!(project.layers.colors.len(), 30);
+        assert_eq!(project.layers.tools[0].name, "T1");
+        assert_eq!(project.next_id, 1);
+        project.layers.colors[0].ops[0].galvo.power = Percent::new(70.0).unwrap();
+        assert_eq!(project.layers.colors[1].ops[0].galvo.power.get(), 30.0);
+    }
+
+    #[test]
+    fn world_polylines_expand_groups_and_normalize_layers() {
+        let mut project = Project::new(workspace(), &defaults());
+        let child = Arc::new(Shape {
+            id: ObjectId(2),
+            name: None,
+            layer: LayerKey::Color(2),
+            xform: Affine::translate((5.0, 0.0)),
+            geom: Geom::Rect { w: Mm::new(2.0).unwrap(), h: Mm::new(4.0).unwrap(), corner_radius: Mm::new(0.0).unwrap() },
+            locked: false,
+            power_scale: Percent::new(100.0).unwrap(),
+            priority: 0,
+        });
+        project.shapes.push(Arc::new(Shape {
+            id: ObjectId(1),
+            name: None,
+            layer: LayerKey::Tool(1),
+            xform: Affine::translate((10.0, 20.0)),
+            geom: Geom::Group(vec![child]),
+            locked: false,
+            power_scale: Percent::new(100.0).unwrap(),
+            priority: 0,
+        }));
+        project.normalize();
+        assert_eq!(project.layers.order, vec![LayerKey::Tool(1), LayerKey::Color(2)]);
+        let bounds = project.bounds(&[ObjectId(1)]).unwrap();
+        assert_eq!(bounds.min, [14.0, 18.0]);
+        assert_eq!(bounds.max, [16.0, 22.0]);
+        assert!(!project.world_polylines(ObjectId(2), 0.01).is_empty());
+    }
 }
