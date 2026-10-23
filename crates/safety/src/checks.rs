@@ -1,5 +1,7 @@
 //! The checks behind `validate` and `validate_frame`. Each collects; nothing stops at the first problem.
 
+use std::collections::HashSet;
+
 use openlaser_geom::{Bounds, Polyline, bounds_of};
 use openlaser_machine::{GalvoMachine, GantryMachine, JobLimits, Kinematics, LaserSource, MachineProfile};
 use openlaser_plan::quantise::{self, pulse_request, pulse_word, speed_field_mm};
@@ -15,14 +17,17 @@ pub const MAX_REPEATS: u16 = 999;
 /// A quantised speed this far from the requested one (relative) gets a `speed_quantized` notice.
 pub const SPEED_NOTICE_REL: f64 = 0.01;
 
+type NoticeKey = (NoticeCode, String, Option<ObjectId>, Option<LayerKey>);
+
 pub(crate) struct Out {
     pub refusals: Vec<Refusal>,
-    notices: Vec<(NoticeCode, String, Option<ObjectId>, Option<LayerKey>)>,
+    notices: Vec<NoticeKey>,
+    seen: HashSet<NoticeKey>,
 }
 
 impl Out {
     pub fn new() -> Self {
-        Out { refusals: Vec::new(), notices: Vec::new() }
+        Out { refusals: Vec::new(), notices: Vec::new(), seen: HashSet::new() }
     }
 
     pub fn refuse(&mut self, r: Refusal) {
@@ -33,7 +38,7 @@ impl Out {
 
     fn notice(&mut self, code: NoticeCode, message: String, object: Option<ObjectId>, layer: Option<LayerKey>) {
         let n = (code, message, object, layer);
-        if !self.notices.contains(&n) {
+        if self.seen.insert(n.clone()) {
             self.notices.push(n);
         }
     }

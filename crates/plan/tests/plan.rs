@@ -154,8 +154,10 @@ fn close_enough(a: &[[f64; 2]], b: &[[f64; 2]], tol: f64) -> bool {
 
 // ---- the business card (OM oracle) -------------------------------------------------------------------------------
 
+/// `rel` is `/`-separated; it is joined component by component (no `/` literals in paths, SPEC §2.6).
 fn golden_json(rel: &str) -> serde_json::Value {
-    let bytes = std::fs::read(openlaser_testkit::golden_dir().join(rel)).unwrap();
+    let path = rel.split('/').fold(openlaser_testkit::golden_dir(), |p, c| p.join(c));
+    let bytes = std::fs::read(path).unwrap();
     serde_json::from_slice(&bytes).unwrap()
 }
 

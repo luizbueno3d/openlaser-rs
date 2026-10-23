@@ -3,7 +3,7 @@
 //! Every shape lands in exactly one place: a burn section, the frame, the tool frame, or a fact that `safety`
 //! turns into a refusal or a numbered notice. Nothing is dropped silently, clamped or truncated.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
 
 use openlaser_doc::{ColorLayer, CutMode, CutOp, DeviceKind, Geom, Project, Shape, ToolLayer};
@@ -146,6 +146,9 @@ struct Ctx<'a> {
     out_of_budget: bool,
     frame_outlines: Vec<Polyline>,
     tool_outlines: Vec<Polyline>,
+    /// Membership mirrors of `facts.non_finite_objects` / `facts.open_fill_shapes` (no quadratic scans).
+    non_finite_seen: HashSet<ObjectId>,
+    open_seen: HashSet<(ObjectId, LayerKey)>,
 }
 
 impl<'a> Ctx<'a> {
@@ -187,7 +190,7 @@ impl<'a> Ctx<'a> {
                     out.push(Leaf { id: shape.id, layer: shape.layer, polys, bitmap });
                 }
                 Flat::NonFinite => {
-                    if !self.facts.non_finite_objects.contains(&shape.id) {
+                    if self.non_finite_seen.insert(shape.id) {
                         self.facts.non_finite_objects.push(shape.id);
                     }
                 }
@@ -296,7 +299,7 @@ impl<'a> Ctx<'a> {
         };
         for i in &r.open_inputs {
             if let Some(&id) = owner.get(*i)
-                && !self.facts.open_fill_shapes.contains(&(id, key))
+                && self.open_seen.insert((id, key))
             {
                 self.facts.open_fill_shapes.push((id, key));
             }
@@ -310,6 +313,9 @@ impl<'a> Ctx<'a> {
 
     /// Admits one more section of `paths` under the job's budget; past it, records one `unsupported` fact.
     fn admit(&mut self, key: LayerKey, pass: u16, paths: &[Polyline]) -> bool {
+        if self.out_of_budget {
+            return false;
+        }
         let pts: usize = paths.iter().map(Polyline::len).sum();
         if self.sections.len() >= MAX_SECTIONS || self.section_points.saturating_add(pts) > MAX_SECTION_POINTS {
             if !self.out_of_budget {
@@ -339,9 +345,6 @@ impl<'a> Ctx<'a> {
         if !layer.output {
             return Ok(());
         }
-        if !layer.show && !self.facts.hidden_output_layers.contains(&key) {
-            self.facts.hidden_output_layers.push(key);
-        }
         let images = leaves.iter().filter(|l| l.bitmap).count();
         if images > 0 {
             self.unsupported(
@@ -358,6 +361,10 @@ impl<'a> Ctx<'a> {
             layer.ops.iter().enumerate().filter(|(_, op)| op.enabled).filter_map(|(i, op)| Some((u8::try_from(i).ok()?, op))).collect();
         if enabled.is_empty() || vector.is_empty() {
             return Ok(());
+        }
+        // B6: this layer would burn, so it must be visible (it is framed either way).
+        if !layer.show && !self.facts.hidden_output_layers.contains(&key) {
+            self.facts.hidden_output_layers.push(key);
         }
         // Frame ⊇ burn: every outline of every vector shape on an emitting layer, whatever `show` says (B6).
         for l in &vector {
@@ -489,6 +496,8 @@ pub(crate) fn plan(project: &Project, machine: &MachineProfile, opts: &PlanOptio
         out_of_budget: false,
         frame_outlines: Vec::new(),
         tool_outlines: Vec::new(),
+        non_finite_seen: HashSet::new(),
+        open_seen: HashSet::new(),
     };
     if let Some(h) = &project.device_hint
         && h.kind != device
