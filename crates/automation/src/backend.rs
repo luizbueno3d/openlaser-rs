@@ -1,4 +1,4 @@
-//! The two tool backends. WP0 stubs.
+//! The headless engine backend and authenticated GUI bridge.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -76,6 +76,7 @@ impl Headless {
     /// Dispatch a raw control method through the same headless tool implementation as MCP.
     pub fn dispatch_control(&mut self, method: &str, params: serde_json::Value) -> ToolOutput {
         let tool = match method {
+            "app.new" => "doc_new",
             "engine.execute" => "command_run",
             "engine.commands" => "command_list",
             "engine.schema" => "command_schema",
@@ -157,28 +158,180 @@ impl ToolBackend for Headless {
             return ToolOutput::Error { message: format!("needs_bridge: `{tool}` requires the running OpenLaser window"), data: None };
         }
         let result = match tool {
-            "command_list" => Ok(serde_json::to_value(self.session.command_list(openlaser_engine::Origin::Headless, &openlaser_engine::ListFilter::default()))
-                .unwrap_or(serde_json::Value::Array(Vec::new()))),
+            "doc_new" => self.session.execute("file.new", args.clone()).map_err(|e| e.to_string()),
+            "doc_open" => self.session.execute("file.open", args.clone()).map_err(|e| e.to_string()),
+            "doc_import" => self.session.execute("file.import", args.clone()).map_err(|e| e.to_string()),
+            "doc_save" => if args.get("path").and_then(serde_json::Value::as_str).is_some() {
+                self.session.execute("file.saveAs", args.clone())
+            } else {
+                self.session.execute("file.save", serde_json::json!({}))
+            }
+            .map_err(|e| e.to_string()),
+            "doc_export" => self.session.execute("file.export", args.clone()).map_err(|e| e.to_string()),
+            "doc_select" => optional_index(&args)
+                .ok_or_else(|| "invalid params: index is required".to_owned())
+                .and_then(|index| self.session.select_doc(index).map(|_| session_list(&self.session)).map_err(|e| e.to_string())),
+            "doc_close" => self.session.close_doc(optional_index(&args)).map(|_| session_list(&self.session)).map_err(|e| e.to_string()),
+            "session_list" => Ok(session_list(&self.session)),
+            "jobs_list" => Ok(serde_json::json!([])),
+            "jobs_cancel" => Err("not supported: headless sessions have no background jobs".to_owned()),
+            "command_list" => Ok(serde_json::to_value(self.session.command_list(
+                openlaser_engine::Origin::Headless,
+                &openlaser_engine::ListFilter {
+                    filter: args.get("filter").and_then(serde_json::Value::as_str).map(str::to_owned),
+                    enabled_only: args.get("enabled_only").or_else(|| args.get("enabledOnly")).and_then(serde_json::Value::as_bool).unwrap_or(false),
+                    agent: None,
+                    schema: args.get("schema").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                },
+            ))
+            .unwrap_or(serde_json::Value::Array(Vec::new()))),
             "command_schema" => string_arg(&args, "id").and_then(|id| self.session.command_schema(id).map_err(|e| e.to_string())),
             "command_run" => string_arg(&args, "id")
                 .and_then(|id| self.session.execute(id, args.get("params").cloned().unwrap_or(serde_json::json!({}))).map_err(|e| e.to_string())),
-            "command_batch" => Err("not implemented: command_batch requires engine batch API support".to_owned()),
+            "command_batch" => {
+                let steps =
+                    args.get("steps").and_then(serde_json::Value::as_array).ok_or_else(|| "invalid params: steps is required".to_owned()).and_then(|items| {
+                        items
+                            .iter()
+                            .map(|item| {
+                                let id =
+                                    item.get("id").and_then(serde_json::Value::as_str).ok_or_else(|| "invalid params: every step needs an id".to_owned())?;
+                                Ok((id.to_owned(), item.get("params").cloned().unwrap_or_else(|| serde_json::json!({}))))
+                            })
+                            .collect::<Result<Vec<_>, String>>()
+                    });
+                steps.map(|steps| {
+                    let atomic = args
+                        .get("atomic")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                        .then(|| args.get("label").and_then(serde_json::Value::as_str).unwrap_or("Automation batch").to_owned());
+                    let result = self.session.batch(
+                        openlaser_engine::Origin::Headless,
+                        steps,
+                        args.get("stop_on_error").or_else(|| args.get("stopOnError")).and_then(serde_json::Value::as_bool).unwrap_or(true),
+                        atomic,
+                    );
+                    serde_json::to_value(result).unwrap_or(serde_json::Value::Null)
+                })
+            }
             "doc_inspect" => {
                 self.session.inspect(optional_index(&args), args.get("objects").and_then(serde_json::Value::as_str) == Some("all")).map_err(|e| e.to_string())
             }
             "machine_status" => Ok(serde_json::json!({"connected":false,"backend":"headless"})),
-            "machine_list" => Ok(serde_json::json!([{"id":"jpt-m7-200-sim","name":"JPT M7 · Simulator","kind":"galvo_lmc","connected":false}])),
-            "job_plan" => match self.session.build_job(optional_index(&args), &openlaser_engine::JobOptions::default()) {
+            "machine_list" => Ok(serde_json::to_value(self.session.machines()).unwrap_or(serde_json::Value::Array(Vec::new()))),
+            "job_plan" => match self.session.build_job(optional_index(&args), &job_options(&args)) {
                 Ok(built) => Ok(serde_json::json!({"ok":true,"fingerprint":built.plan.fingerprint,"summary":built.summary,"refusals":[]})),
                 Err(refused) => Ok(
                     serde_json::json!({"ok":false,"fingerprint":refused.fingerprint,"refusals":refused.refusals,"notices":refused.notices,"error":refused.error}),
                 ),
             },
-            "job_preview" | "job_estimate" | "job_simulate" => Err("not implemented: job pipeline is not available in this engine build".to_owned()),
+            "job_estimate" => match self.session.build_job(optional_index(&args), &job_options(&args)) {
+                Ok(built) => Ok(serde_json::json!({
+                    "fingerprint":built.summary.fingerprint.hex(), "estimateS":built.summary.estimate.as_secs_f64(),
+                    "crashBoundS":built.summary.crash_bound.as_secs_f64(),
+                    "perSection":built.summary.rows.iter().map(|row| serde_json::json!({"layer":row.layer,"pass":row.pass,"of":row.of,"estimateS":row.estimate.as_secs_f64(),"markMm":row.mark_mm,"paths":row.paths})).collect::<Vec<_>>()
+                })),
+                Err(refused) => Ok(serde_json::json!({"ok":false,"fingerprint":refused.fingerprint,"refusals":refused.refusals,"error":refused.error})),
+            },
+            "job_preview" => {
+                let built = self
+                    .session
+                    .build_job(optional_index(&args), &job_options(&args))
+                    .map_err(|refusal| serde_json::to_string(&refusal).unwrap_or_else(|_| "job refused".to_owned()));
+                built.and_then(|built| {
+                    let max_side = max_side(&args)?;
+                    let Some(profile) = self.session.machine_for(optional_index(&args)) else { return Err("no machine profile for document".to_owned()) };
+                    let names = args
+                        .get("show")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|items| items.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>());
+                    let show = openlaser_render::PlanShow {
+                        burn: names.as_ref().is_none_or(|items| items.contains(&"burn")),
+                        travel: names.as_ref().is_none_or(|items| items.contains(&"travel")),
+                        frame: names.as_ref().is_some_and(|items| items.contains(&"frame")),
+                        order: names.as_ref().is_some_and(|items| items.contains(&"order")),
+                    };
+                    let list = openlaser_render::plan_list(&built.plan, profile, &show);
+                    render_list(list, max_side, serde_json::json!({"fingerprint":built.summary.fingerprint.hex()}))
+                })
+            }
+            "job_simulate" => {
+                let built = self
+                    .session
+                    .build_job(optional_index(&args), &job_options(&args))
+                    .map_err(|refusal| serde_json::to_string(&refusal).unwrap_or_else(|_| "job refused".to_owned()));
+                built.and_then(|built| {
+                    let max_side = max_side(&args)?;
+                    let Some(profile) = self.session.machine_for(optional_index(&args)) else { return Err("no machine profile for document".to_owned()) };
+                    let (job, galvo) = match (&built.encoded, &profile.kind) {
+                        (openlaser_engine::Encoded::Lmc { job, .. }, openlaser_machine::Kinematics::Galvo(galvo)) => (job, galvo),
+                        _ => return Err("offline simulation currently supports galvo LMC jobs".to_owned()),
+                    };
+                    let recording = openlaser_lmc_sim::simulate_job(job, galvo);
+                    let light = recording.lit.to_vec();
+                    let list = openlaser_render::emission_list(&recording.burned, &light, profile);
+                    let mut note = serde_json::json!({
+                        "fingerprint":built.summary.fingerprint.hex(), "summary":built.summary,
+                        "wireEvents":recording.wire.len(), "burnedSegments":recording.burned.len()
+                    });
+                    if args.get("listing").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+                        let mut lines = Vec::new();
+                        let mut bytes = 0_usize;
+                        let mut truncated = false;
+                        for line in built.listing.lines.iter().take(2000) {
+                            if bytes.saturating_add(line.text.len()) > 256 * 1024 {
+                                truncated = true;
+                                break;
+                            }
+                            bytes = bytes.saturating_add(line.text.len());
+                            lines.push(line.text.clone());
+                        }
+                        truncated |= built.listing.lines.len() > lines.len();
+                        if let Some(object) = note.as_object_mut() {
+                            object.insert("listing".to_owned(), serde_json::json!({"lines":lines,"truncated":truncated}));
+                        }
+                    }
+                    render_list(list, max_side, note)
+                })
+            }
+            "job_export" => self.session.execute("job.dump", args.clone()).map_err(|e| e.to_string()),
+            "gcode_export" => self.session.execute("file.saveMachineFile", args.clone()).map_err(|e| e.to_string()),
+            "render_preview" => {
+                let max_side = match max_side(&args) {
+                    Ok(side) => side,
+                    Err(message) => return ToolOutput::Error { message, data: None },
+                };
+                let Some(doc) = optional_index(&args).and_then(|index| self.session.docs().get(index)).or_else(|| self.session.active()) else {
+                    return ToolOutput::Error { message: "no document open".to_owned(), data: None };
+                };
+                let profile = self.session.machines().iter().find(|machine| machine.id == doc.machine);
+                let opts = openlaser_render::ViewOpts {
+                    dark: false,
+                    selection: Vec::new(),
+                    refusals: Vec::new(),
+                    notices: Vec::new(),
+                    show_field: true,
+                    show_work_area: true,
+                };
+                let list = if args.get("view").and_then(serde_json::Value::as_str) == Some("toolpath") {
+                    let built = match self.session.build_job(optional_index(&args), &openlaser_engine::JobOptions::default()) {
+                        Ok(built) => built,
+                        Err(refused) => {
+                            return ToolOutput::Error { message: serde_json::to_string(&refused).unwrap_or_else(|_| "job refused".to_owned()), data: None };
+                        }
+                    };
+                    let Some(machine) = profile else { return ToolOutput::Error { message: "no machine profile for document".to_owned(), data: None } };
+                    openlaser_render::plan_list(&built.plan, machine, &openlaser_render::PlanShow { burn: true, travel: true, frame: false, order: false })
+                } else {
+                    openlaser_render::document_list(&doc.project, profile, &opts)
+                };
+                render_list(list, max_side, serde_json::json!({"document":doc.project.name}))
+            }
             "stop" => Err("needs_bridge: stop requires the running OpenLaser window".to_owned()),
             _ => Err(format!("not implemented: headless tool `{tool}`")),
         };
-        result.map(ToolOutput::Json).unwrap_or_else(|message| ToolOutput::Error { message, data: None })
+        result.map(tool_output).unwrap_or_else(|message| ToolOutput::Error { message, data: None })
     }
 
     fn stop_handle(&self) -> Option<StopHandle> {
@@ -291,6 +444,51 @@ fn string_arg<'a>(args: &'a serde_json::Value, name: &str) -> Result<&'a str, St
 fn optional_index(args: &serde_json::Value) -> Option<usize> {
     args.get("index").and_then(serde_json::Value::as_u64).and_then(|v| usize::try_from(v).ok())
 }
+
+fn max_side(args: &serde_json::Value) -> Result<u32, String> {
+    let Some(value) = args.get("max_side") else { return Ok(1024) };
+    let Some(side) = value.as_u64().and_then(|value| u32::try_from(value).ok()) else {
+        return Err("invalid params: max_side must be an integer from 1 to 2048".to_owned());
+    };
+    if (1..=2048).contains(&side) { Ok(side) } else { Err("invalid params: max_side must be an integer from 1 to 2048".to_owned()) }
+}
+
+fn session_list(session: &openlaser_engine::Session) -> serde_json::Value {
+    serde_json::json!({
+        "documents": session.docs().iter().enumerate().map(|(index, doc)| serde_json::json!({
+            "index":index, "name":doc.project.name, "path":doc.path, "dirty":doc.dirty(),
+            "revision":doc.revision, "machine":doc.machine.0
+        })).collect::<Vec<_>>(), "active":session.active_index()
+    })
+}
+
+fn job_options(args: &serde_json::Value) -> openlaser_engine::JobOptions {
+    openlaser_engine::JobOptions {
+        machine: args.get("machine").and_then(serde_json::Value::as_str).map(|id| openlaser_types::MachineId(id.to_owned())),
+        selected_only: args.get("selected_only").or_else(|| args.get("selectedOnly")).and_then(serde_json::Value::as_bool),
+    }
+}
+
+fn render_list(list: openlaser_render::DisplayList, max_side: u32, note: serde_json::Value) -> Result<serde_json::Value, String> {
+    let world = openlaser_render::fit(&list, 0.05).ok_or_else(|| "preview has no renderable geometry".to_owned())?;
+    let png = openlaser_render::render_png(&list, &openlaser_render::RenderView { world, max_side, background: openlaser_render::Rgba([255, 255, 255, 255]) })
+        .map_err(|error| error.to_string())?;
+    let mut note = note;
+    if let Some(object) = note.as_object_mut() {
+        object.insert("bounds".to_owned(), serde_json::to_value(world).unwrap_or(serde_json::Value::Null));
+    }
+    Ok(serde_json::json!({"__png":base64::Engine::encode(&base64::engine::general_purpose::STANDARD, png), "note":note}))
+}
+
+fn tool_output(value: serde_json::Value) -> ToolOutput {
+    if let Some(encoded) = value.get("__png").and_then(serde_json::Value::as_str) {
+        use base64::Engine as _;
+        if let Ok(png) = base64::engine::general_purpose::STANDARD.decode(encoded) {
+            return ToolOutput::Png { png, note: value.get("note").cloned().unwrap_or(serde_json::Value::Null) };
+        }
+    }
+    ToolOutput::Json(value)
+}
 fn args_to_control(tool: &str, args: serde_json::Value) -> serde_json::Value {
     let mut args = args;
     if let Some(obj) = args.as_object_mut()
@@ -341,6 +539,17 @@ mod tests {
         let mut backend = Headless::new(None, None).unwrap();
         let output = backend.call("frame_request", serde_json::json!({}), &ClientInfo { name: "test".into(), version: "0".into() });
         assert!(matches!(output, ToolOutput::Error { message, .. } if message.starts_with("needs_bridge:")));
+    }
+
+    #[test]
+    fn headless_document_create_and_list() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut backend = Headless::new(Some(temp.path()), Some(temp.path())).unwrap();
+        let client = ClientInfo { name: "test".into(), version: "0".into() };
+        assert!(matches!(backend.call("doc_new", serde_json::json!({"name":"WP7"}), &client), ToolOutput::Json(_)));
+        assert!(
+            matches!(backend.call("session_list", serde_json::json!({}), &client), ToolOutput::Json(value) if value["documents"].as_array().is_some_and(|docs| docs.len() == 1))
+        );
     }
 
     #[test]

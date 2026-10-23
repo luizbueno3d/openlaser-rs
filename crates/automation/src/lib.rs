@@ -1,7 +1,6 @@
 //! Agent automation (SPEC §3.18, §4; owned by WP7): the MCP server, the headless backend and the GUI bridge.
 //! This crate can never link `arm`, `human`, `transport` or a USB crate (§2.3 rule 5).
 //!
-//! WP0 stubs: the tool table is empty; servers and backends return `Error::NotImplemented`.
 #![forbid(unsafe_code)]
 
 mod backend;
@@ -206,12 +205,21 @@ fn mcp_tool_call(
         let Ok(mut guard) = backend.lock() else { return mcp_tool_error(id, "internal error: backend unavailable") };
         guard.call(name, args, &info)
     };
-    let (text, is_error) = match output {
-        ToolOutput::Json(value) => (serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned()), false),
-        ToolOutput::Png { note, .. } => (serde_json::to_string(&note).unwrap_or_else(|_| "{}".to_owned()), false),
-        ToolOutput::Error { message, .. } => (message, true),
-    };
-    serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":is_error}})
+    match output {
+        ToolOutput::Json(value) => {
+            let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned());
+            serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":false}})
+        }
+        ToolOutput::Png { png, note } => {
+            use base64::Engine as _;
+            let text = serde_json::to_string(&note).unwrap_or_else(|_| "{}".to_owned());
+            let image = base64::engine::general_purpose::STANDARD.encode(png);
+            serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text},{"type":"image","data":image,"mimeType":"image/png"}],"isError":false}})
+        }
+        ToolOutput::Error { message, .. } => {
+            serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":message}],"isError":true}})
+        }
+    }
 }
 
 fn mcp_tool_error(id: &serde_json::Value, message: &str) -> serde_json::Value {

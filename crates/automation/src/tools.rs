@@ -69,7 +69,8 @@ fn schema_by_name(name: &str) -> fn() -> serde_json::Value {
         "doc_save" => schema_save,
         "doc_import" => schema_import,
         "doc_inspect" => schema_inspect,
-        "doc_select" | "doc_close" => schema_index,
+        "doc_select" => schema_index,
+        "doc_close" => schema_optional_index,
         "render_preview" | "job_preview" => schema_preview,
         "command_list" => schema_command_list,
         "command_schema" => schema_id,
@@ -122,6 +123,9 @@ fn schema_inspect() -> serde_json::Value {
 }
 fn schema_index() -> serde_json::Value {
     schema(&[("index", p_index())], &["index"])
+}
+fn schema_optional_index() -> serde_json::Value {
+    schema(&[("index", p_index())], &[])
 }
 fn schema_preview() -> serde_json::Value {
     schema(
