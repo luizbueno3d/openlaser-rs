@@ -1,0 +1,46 @@
+# cargo-deny policy (PLAN §8): permissive licences and MPL-2.0 only; no GPL, AGPL or statically linked LGPL.
+# Run with `cargo deny check` when cargo-deny is installed; it is not part of the gate.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    # Native TLS/crypto would need a C toolchain for Windows targets (SPEC §2.6); none is wanted.
+    { name = "openssl-sys" },
+    { name = "ring" },
+    # libusb: nusb talks to the board directly (S4); rusb only if Windows ever needs it (PLAN §8).
+    { name = "rusb" },
+    { name = "libusb1-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/storytold/craft-libs"]

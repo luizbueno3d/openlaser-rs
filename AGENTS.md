@@ -15,8 +15,12 @@ This software controls a Class 4 laser that can blind, burn and start fires.
 
 1. **Agents never emit.** No AI agent, script, test or CI job may make the laser fire, and none may
    open the real laser USB device. Do not run any command that talks to real hardware. That includes:
-   - `openlaser-cli` frame, mark or run against a real device;
-   - anything built with the `hw` feature;
+   - `openlaser-hw`, or any binary built with `--features hw`;
+   - anything built with the `hw` feature (agents never build it: Luiz builds `hw` binaries into his own
+     target directory, `~/AI/OpenLaser/.target/hw`, never an agent lane);
+   - setting `OPENLASER_HW_PRESENT` (hardware is default-deny, SPEC S23: every USB or serial open needs
+     `OPENLASER_HW_PRESENT=1`, a `hw` build and a bench session; agents never set it, and always run with
+     `OPENLASER_NO_HW=1`);
    - galvoplotter's own tests;
    - the Python prototype's live mode.
 
@@ -28,7 +32,8 @@ This software controls a Class 4 laser that can blind, burn and start fires.
 3. **Refuse, never warn and continue.** Do not silently clamp out-of-field points, truncate jobs, or
    proceed after a wait times out. Refuse with an error the user can act on.
 4. **Bytes are the truth.** The LMC encoder must match the golden streams in `tests/golden/`
-   byte for byte, except for the intentional divergences listed in `tests/golden/README.md`.
+   byte for byte, except for the intentional divergences listed in `tests/golden/README.md` and
+   `docs/DIVERGENCES.md`.
    The confirmation the human sees is decoded from the exact bytes that will be sent.
 5. **The software stop is not the primary safety device.** The E-stop and key switch are.
 
@@ -48,9 +53,53 @@ Non-test code never panics: no `unwrap()`, `expect()`, `panic!`, `todo!`, `unimp
   galvoplotter and MeerK40t are MIT: ported code keeps their notice.
 - **Tests are the gate.** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
   `cargo test` must pass. Safety fixes get regression tests that fail without the fix.
-- **Disk is tight** (~25 GB free). Share one `CARGO_TARGET_DIR` across worktrees; do not build
+- **Disk is tight** (~25 GB free). Use the shared lanes of §5 across worktrees; do not build
   release binaries unless asked.
 
 ## 4. Toolchain
 
-Rust 1.99 lives in `~/.cargo/bin` (prepend it to `PATH`). Edition 2024. Licence `MIT OR Apache-2.0`.
+Rust 1.99 (the `stable` toolchain, pinned by `rust-toolchain.toml`) lives in `~/.cargo/bin` (prepend it to `PATH`).
+Edition 2024, workspace `rust-version` 1.95. Licence `MIT OR Apache-2.0`.
+
+## 5. Build lanes and the gate (SPEC §6.1, §6.7)
+
+Two shared target directories ("lanes"); never `cargo clean` in one, never `--release` unless asked, no
+`cargo doc`. Check `df -h /System/Volumes/Data` before a big build: below 8 GB free, stop and report.
+
+- **core lane** `~/AI/OpenLaser/.target/core`: WP1–WP7. It never builds the GUI stack: use `-p <crate>` for every
+  member except `openlaser-ui-egui`, `openlaser-human` and `openlaser` (the app); never `--workspace` there.
+- **gui lane** `~/AI/OpenLaser/.target/gui`: WP8, WP9 and the integrator (`--workspace` is fine here).
+- Luiz's `~/AI/OpenLaser/.target/hw` lane is his alone; agents never build or run anything there.
+
+The gate, before every hand-in (the integrator runs the workspace form, or `cargo xtask ci`, in the gui lane):
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+rustc --version                                             # must be >= 1.99
+export CARGO_TARGET_DIR="$HOME/AI/OpenLaser/.target/core"   # or .target/gui
+export OPENLASER_NO_HW=1
+unset OPENLASER_HW_PRESENT
+cargo fmt --all -- --check
+cargo clippy -p <your crates> --all-targets -- -D warnings
+cargo test -p <your crates>
+cargo xtask deps                                            # SPEC §2.2 edges and §2.3 rules 1–17
+cargo xtask golden-verify                                   # sha256 of every fixture in tests/golden/manifest.json
+```
+
+Never `--features hw`, never `--all-features` (it would enable `hw`), never `cargo update`. Work packages never
+change `Cargo.lock` or add a dependency that is not in `[workspace.dependencies]` (ask the integrator).
+
+**Binaries are tested in process**: through their `src/lib.rs` entry points with injected stdio and terminal. At most
+one smoke test per binary spawns `CARGO_BIN_EXE_*`, because the uplifted `target/debug/<bin>` is shared by every
+worktree in a lane and another worktree's build can replace it between build and spawn.
+
+## 6. Windows is required (SPEC §2.6, S19)
+
+The whole workspace builds and its tests pass on Windows 10/11 as well as macOS (Linux keeps compiling). No
+`#[cfg(unix)]`-only features: paths come from `craft-settings` app dirs and `Path::join` (never `/` literals);
+signals are `signal-hook` on unix and `ctrlc` on windows, both tripping the same latch; no crate may need a C
+toolchain for the Windows target (no `ring`/`openssl`; blake3 `pure`, flate2 `rust_backend`); text exports use
+`\n` on every OS and goldens are compared as bytes (`.gitattributes` keeps `tests/golden/**` binary-safe). The
+integrator checks it from the Mac in the gui lane, once per integration step, with ≥ 8 GB free:
+`cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings`. CI
+(`.github/workflows/ci.yml`) runs fmt, clippy, tests and `xtask deps` on macOS, Windows and Linux.

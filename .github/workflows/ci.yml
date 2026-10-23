@@ -1,0 +1,70 @@
+# OpenLaser CI (SPEC §2.6 item 2), modelled on PhotoCraft's. It runs once Luiz approves a private GitHub repository.
+#
+# Laser safety (AGENTS.md §1): CI never enables the `hw` feature or all features, never sets OPENLASER_HW_PRESENT,
+# and never runs a hardware command. OPENLASER_NO_HW=1 makes the transport refuse every device even if a test
+# reached it. Default features only.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  OPENLASER_NO_HW: "1"
+  # Line tables only: faster codegen and links (Windows PDBs most of all), smaller target dirs.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies (egui/winit/rfd)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+
+      # rust-toolchain.toml pins `stable` with rustfmt and clippy; rustup installs it on first use.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
+      - name: Toolchain
+        run: rustc --version
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Dependency rules (SPEC §2.3)
+        run: cargo xtask deps
+
+      - name: Golden fixtures
+        run: cargo xtask golden-verify
