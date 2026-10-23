@@ -5,8 +5,8 @@
 //!
 //! Single-command names follow galvoplotter's controller (meerk40t/galvoplotter, MIT), as R05 Appendix B lists them.
 
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, ErrorKind, Write};
 use std::path::Path;
 
 use openlaser_lmc_sim::SimWire;
@@ -138,8 +138,15 @@ pub struct TraceWriter {
 }
 
 impl TraceWriter {
+    /// Creates a new trace file. An existing file is never overwritten: a HIL trace is the record of a session.
     pub fn create(path: &Path) -> Result<Self, String> {
-        let f = File::create(path).map_err(|e| format!("cannot create the trace file {}: {e}", path.display()))?;
+        let f = OpenOptions::new().write(true).create_new(true).open(path).map_err(|e| {
+            if e.kind() == ErrorKind::AlreadyExists {
+                format!("the trace file {} already exists; traces are never overwritten, so give a new file name", path.display())
+            } else {
+                format!("cannot create the trace file {}: {e}", path.display())
+            }
+        })?;
         Ok(TraceWriter { out: BufWriter::new(f), origin: None, written: 0 })
     }
 
@@ -197,5 +204,10 @@ mod tests {
         assert_eq!(second["atS"], json!(1.5));
         assert_eq!(second["op"], json!("GetVersion"));
         assert_eq!(w.written(), 2);
+        // A second trace with the same name is refused and the first is kept.
+        drop(w);
+        let err = TraceWriter::create(&path).err().unwrap();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
     }
 }
