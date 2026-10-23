@@ -1,0 +1,22 @@
+[package]
+name = "openlaser-human"
+description = "Human-only surfaces and the input-provenance gate: ARM dialog, frame approval, connect, device-profile save; the synthetic-input injector (red zone)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+openlaser-types = { workspace = true }
+openlaser-ui-egui = { workspace = true }
+openlaser-arm = { workspace = true }
+egui = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { workspace = true }
+openlaser-arm = { workspace = true, features = ["test-witness"] }
+openlaser-testkit = { workspace = true }

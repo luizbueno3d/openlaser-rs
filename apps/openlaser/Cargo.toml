@@ -1,0 +1,47 @@
+[package]
+name = "openlaser"
+description = "OpenLaser: the GUI (LightBurn layout, egui)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Real USB (SPEC S4). Agents, tests and CI never enable it (AGENTS.md §1); only Luiz builds with it.
+hw = ["dep:openlaser-transport"]
+
+[dependencies]
+openlaser-types = { workspace = true }
+openlaser-engine = { workspace = true }
+openlaser-control = { workspace = true }
+openlaser-ui-egui = { workspace = true }
+openlaser-human = { workspace = true }
+openlaser-lmc-sim = { workspace = true }
+# Machine profile files and DirProfileStore (S24).
+openlaser-format = { workspace = true }
+openlaser-transport = { workspace = true, optional = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+rfd = { workspace = true }
+craft-quit = { workspace = true }
+craft-settings = { workspace = true }
+log = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { workspace = true }
+
+# §5.4: the signal watcher stops every machine before the process exits.
+[target.'cfg(unix)'.dependencies]
+signal-hook = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+ctrlc = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { workspace = true }
+openlaser-testkit = { workspace = true }
+tempfile = { workspace = true }

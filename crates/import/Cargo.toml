@@ -1,0 +1,27 @@
+[package]
+name = "openlaser-import"
+description = "Importers: SVG (usvg, true scale), DXF (OM parser port, T4), raster images, OM workspace.json + layer_settings.json"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+openlaser-types = { workspace = true }
+openlaser-geom = { workspace = true }
+openlaser-doc = { workspace = true }
+usvg = { workspace = true }
+image = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+openlaser-testkit = { workspace = true }
+proptest = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,103 @@
+//! Built-in profiles.
+
+use openlaser_doc::{FillParams, GalvoParams, GantryParams, LayerDefaults};
+use openlaser_types::galvo::JPT_M7_PULSES_NS;
+use openlaser_types::{Deg, Hz, MachineId, Mm, MmPerS, Ns, Percent, Us};
+
+use crate::profile::{
+    FieldCalibration, FieldRect, FirstJump, GalvoLink, GalvoMachine, GalvoTimingDefaults, JobLimits, Kinematics, LaserSource, LmcBoardFilter, MachineProfile,
+    PortMap, RedDotCal, RunAhead, SourceKind,
+};
+
+/// A unit literal checked at compile time: an out-of-range literal fails the build (the `None` arm is dead).
+macro_rules! lit {
+    ($t:ident, $v:expr) => {{
+        const _: () = assert!($t::new_const($v).is_some(), "built-in profile literal out of range");
+        const CHECKED: $t = match $t::new_const($v) {
+            Some(v) => v,
+            None => $t::MAX_VALID,
+        };
+        CHECKED
+    }};
+}
+
+/// id "jpt-m7-200": OM profile + calibration 1.1834, link Usb.
+pub fn jpt_m7_200() -> MachineProfile {
+    jpt_m7(MachineId("jpt-m7-200".to_owned()), "JPT M7 · USB", GalvoLink::Usb)
+}
+
+/// id "jpt-m7-200-sim": identical, link Sim (default in non-hw builds).
+pub fn jpt_m7_200_sim() -> MachineProfile {
+    jpt_m7(MachineId("jpt-m7-200-sim".to_owned()), "JPT M7 · Simulator", GalvoLink::Sim)
+}
+
+/// co2-grbl-600x400, diode-grbl-400x400, plotter-grbl-a4 (OM machines.py, T2). WP0 stub: none.
+pub fn om_gantries() -> Vec<MachineProfile> {
+    Vec::new()
+}
+
+fn jpt_m7(id: MachineId, name: &str, link: GalvoLink) -> MachineProfile {
+    let galvo = GalvoMachine {
+        board: LmcBoardFilter { vid: 0x9588, pid: 0x9899, serial: None },
+        link,
+        encoding_field: lit!(Mm, 200.0),
+        work_area: FieldRect { min: [-100.0, -100.0], max: [100.0, 100.0] },
+        h27_cleared: None,
+        cal: FieldCalibration { scale: [1.1834, 1.1834], offset_mm: [0.0, 0.0], angle_deg: 0.0, swap_xy: false, negate: [false, false] },
+        red_dot: RedDotCal { offset_mm: [0.0, 0.0], scale: [1.0, 1.0] },
+        source: LaserSource {
+            kind: SourceKind::MopaFiberJpt,
+            pulse_table_ns: JPT_M7_PULSES_NS.to_vec(),
+            freq_khz: [1.0, 4000.0],
+            max_power_pct: 100.0,
+            q_pulse_enabled: true,
+            mo_only_when_running: true,
+        },
+        timings: GalvoTimingDefaults { laser_on_us: 100.0, laser_off_us: 100.0, polygon_us: 100.0, jump_delay_short_us: 8.0, jump_delay_long_us: 200.0 },
+        first_jump: FirstJump { delay_us: 200.0, settle_10us: 100 },
+        jump_speed: lit!(MmPerS, 3000.0),
+        light_speed: lit!(MmPerS, 3000.0),
+        max_speed: lit!(MmPerS, 6000.0),
+        mo_settle: lit!(Us, 8000.0),
+        ports: PortMap { laser_bit: 0, red_bit: 8 },
+        run_ahead: RunAhead { max_packets: 3, max_emission_s: 2.0, watchdog_factor: 1.5, watchdog_slack_s: 2.0 },
+        transfer_timeout_ms: 250,
+        usb_set_configuration: false,
+    };
+    let layer_defaults = LayerDefaults {
+        galvo: GalvoParams {
+            speed: lit!(MmPerS, 1000.0),
+            power: lit!(Percent, 30.0),
+            min_power: lit!(Percent, 0.0),
+            frequency: hz(30_000),
+            q_pulse: Some(lit!(Ns, 200.0)),
+            timings: None,
+            wobble: None,
+        },
+        gantry: GantryParams { speed: lit!(MmPerS, 100.0), power_max: lit!(Percent, 30.0), power_min: lit!(Percent, 0.0), constant_power: false },
+        fill: FillParams { interval: lit!(Mm, 0.1), angle: lit!(Deg, 0.0), angle_increment: lit!(Deg, 90.0), bidirectional: true, cross_hatch: false },
+    };
+    MachineProfile {
+        id,
+        name: name.to_owned(),
+        kind: Kinematics::Galvo(galvo),
+        limits: JobLimits { max_paths: 3000, max_points_per_path: 2000, max_points_per_pass: 20000 },
+        layer_defaults,
+        checklist: vec![
+            "Key switch and E-stop within reach".to_owned(),
+            "Laser safety glasses on for everyone in the room".to_owned(),
+            "Material in place and focus checked".to_owned(),
+            "Fume extraction on".to_owned(),
+        ],
+    }
+}
+
+/// Compile-time checked frequency literal.
+const fn hz(v: u32) -> Hz {
+    match Hz::new_const(v) {
+        Some(h) => h,
+        None => Hz::MAX_VALID,
+    }
+}
+
+const _: () = assert!(Hz::new_const(30_000).is_some(), "built-in profile frequency out of range");

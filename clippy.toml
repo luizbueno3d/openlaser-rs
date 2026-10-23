@@ -2,3 +2,13 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
+
+# SPEC §2.3 rule 11: the ARM token and the human-confirmation witnesses are minted in exactly one file each.
+# `cargo xtask deps` fails if any other file contains `allow(clippy::disallowed_methods)`.
+disallowed-methods = [
+    { path = "openlaser_types::arm::ArmToken::issue", reason = "only crates/arm/src/mint.rs may create an ArmToken (SPEC §2.3 rule 11)" },
+    { path = "openlaser_arm::HumanConfirm::from_gui_gesture", reason = "only crates/human/src/gesture.rs may build a GUI confirmation (SPEC §2.3 rule 11)" },
+    { path = "openlaser_arm::GuiGestureWitness::new", reason = "only crates/human/src/gesture.rs may build a GUI gesture witness (SPEC §2.3 rule 11)" },
+    { path = "openlaser_arm::HumanConfirm::from_tty", reason = "only apps/openlaser-hw/src/tty_arm.rs may build a TTY confirmation (SPEC §2.3 rule 11)" },
+    { path = "openlaser_arm::TtyWitness::new", reason = "only apps/openlaser-hw/src/tty_arm.rs may build a TTY witness (SPEC §2.3 rule 11)" },
+]

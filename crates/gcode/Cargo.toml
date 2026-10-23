@@ -1,0 +1,27 @@
+[package]
+name = "openlaser-gcode"
+description = "GRBL G-code encoder (T2 parity; shipping refuses overspeed), number formatting, gantry frame program"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+openlaser-types = { workspace = true }
+openlaser-geom = { workspace = true }
+openlaser-machine = { workspace = true }
+openlaser-plan = { workspace = true }
+openlaser-safety = { workspace = true }
+serde = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+openlaser-safety = { workspace = true, features = ["unchecked-for-tests"] }
+openlaser-testkit = { workspace = true }
+proptest = { workspace = true }
+serde_json = { workspace = true }

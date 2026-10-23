@@ -1,0 +1,41 @@
+[package]
+name = "openlaser-hw"
+description = "OpenLaser's human-only hardware CLI: detect, status, frame, run, bench; TTY ARM; signal and key stop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Real USB (SPEC S4). Agents, tests and CI never enable it (AGENTS.md §1); only Luiz builds with it.
+hw = ["dep:openlaser-transport"]
+
+[dependencies]
+openlaser-types = { workspace = true }
+openlaser-machine = { workspace = true }
+openlaser-engine = { workspace = true }
+openlaser-driver = { workspace = true }
+openlaser-arm = { workspace = true }
+openlaser-lmc-sim = { workspace = true }
+# Machine profile files and DirProfileStore (S24).
+openlaser-format = { workspace = true }
+openlaser-transport = { workspace = true, optional = true }
+crossterm = { workspace = true }
+serde_json = { workspace = true }
+
+# §2.6: signals trip the same latch on every OS.
+[target.'cfg(unix)'.dependencies]
+signal-hook = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+ctrlc = { workspace = true }
+
+[dev-dependencies]
+# The scripted terminal in tests/ gets its HumanConfirm from arm::testing (SPEC §3.21).
+openlaser-arm = { workspace = true, features = ["test-witness"] }
+openlaser-testkit = { workspace = true }
+tempfile = { workspace = true }

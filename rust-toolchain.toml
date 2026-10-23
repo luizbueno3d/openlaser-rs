@@ -1,0 +1,6 @@
+# SPEC §2.5 (revision 2): `stable`, not a version number. On this Mac `stable` is rustc 1.99.0 and rustup does not
+# alias "1.99.0" to it, so a numeric pin would download a second toolchain onto a tight disk. The gate checks
+# `rustc --version` >= 1.99. The Windows check of the gate (§2.6) also needs: rustup target add x86_64-pc-windows-msvc
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,22 @@
+[package]
+name = "openlaser-types"
+description = "OpenLaser's shared vocabulary: units, ids, fingerprints, clocks, refusals, emission summaries, frame receipts, the opaque ArmToken and the T0 galvo encoders"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+# Dev-dependency cycles (testkit, arm → types) are used only from integration tests in tests/ (SPEC §2.3 rule 10).
+[dev-dependencies]
+openlaser-arm = { workspace = true, features = ["test-witness"] }
+openlaser-testkit = { workspace = true }
+proptest = { workspace = true }
+serde_json = { workspace = true }

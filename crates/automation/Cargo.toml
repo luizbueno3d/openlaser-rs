@@ -1,0 +1,36 @@
+[package]
+name = "openlaser-automation"
+description = "MCP server (rmcp, stdio), headless backend, bridge client, `serve` (JSON lines), tool table and strict schemas. Can never reach emission"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+openlaser-types = { workspace = true }
+openlaser-doc = { workspace = true }
+openlaser-machine = { workspace = true }
+openlaser-plan = { workspace = true }
+openlaser-engine = { workspace = true }
+openlaser-control = { workspace = true }
+openlaser-render = { workspace = true }
+openlaser-lmc = { workspace = true }
+openlaser-lmc-sim = { workspace = true }
+rmcp = { workspace = true }
+tokio = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+openlaser-testkit = { workspace = true }
+rmcp = { workspace = true, features = ["client"] }
+insta = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }

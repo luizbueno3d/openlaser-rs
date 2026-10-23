@@ -1,0 +1,30 @@
+[package]
+name = "openlaser-transport"
+description = "The only crate that touches devices: UsbLmc (nusb), serial/TCP links, read-only detect, board lock, bench session, keep-awake. Compiled, never run by agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+openlaser-types = { workspace = true }
+openlaser-machine = { workspace = true }
+openlaser-lmc = { workspace = true }
+openlaser-driver = { workspace = true }
+nusb = { workspace = true }
+serialport = { workspace = true }
+keepawake = { workspace = true }
+# App dirs for the board lock and the bench session (`craft_settings::data_dir("OpenLaser")`, §2.6).
+craft-settings = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+openlaser-testkit = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }

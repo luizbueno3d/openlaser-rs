@@ -1,0 +1,25 @@
+[package]
+name = "openlaser-cli"
+description = "OpenLaser's agent CLI and MCP server. Can never link arm, human, transport or a USB crate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+openlaser-types = { workspace = true }
+openlaser-engine = { workspace = true }
+openlaser-control = { workspace = true }
+openlaser-automation = { workspace = true }
+openlaser-render = { workspace = true }
+openlaser-lmc-sim = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+openlaser-testkit = { workspace = true }
+tempfile = { workspace = true }

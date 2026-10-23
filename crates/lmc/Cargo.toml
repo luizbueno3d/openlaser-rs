@@ -1,0 +1,36 @@
+[package]
+name = "openlaser-lmc"
+description = "Pure LMC protocol: opcodes, list builder, packetiser, job and frame encoders, disassembler, EmissionSummary from bytes, LmcTransport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Test-only (SPEC §2.3 rule 10, §5.5): reachable only through dev-dependencies (this crate's own self dev-dependency);
+# refuses to build without debug assertions.
+py-compat = []
+
+[dependencies]
+openlaser-types = { workspace = true }
+openlaser-geom = { workspace = true }
+openlaser-machine = { workspace = true }
+openlaser-plan = { workspace = true }
+openlaser-safety = { workspace = true }
+serde = { workspace = true }
+blake3 = { workspace = true }
+# SPEC-CHANGES: Packet's manual Debug shows a sha256 prefix (golden packet files are named by sha256).
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+openlaser-lmc = { path = ".", features = ["py-compat"] }
+openlaser-safety = { workspace = true, features = ["unchecked-for-tests"] }
+openlaser-testkit = { workspace = true }
+proptest = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }

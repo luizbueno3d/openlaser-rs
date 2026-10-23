@@ -1,0 +1,30 @@
+[package]
+name = "openlaser-driver"
+description = "Driver runtime: Backend, driver thread, StopLatch/Stopper, watchdog, dead-man rule, LMC session, GRBL streaming (red zone)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+openlaser-types = { workspace = true }
+openlaser-machine = { workspace = true }
+openlaser-lmc = { workspace = true }
+openlaser-gcode = { workspace = true }
+crossbeam-channel = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+# T6 suites are integration tests in tests/ (the lmc-sim dev-dependency cycle, SPEC §2.3 rule 10).
+[dev-dependencies]
+openlaser-arm = { workspace = true, features = ["test-witness"] }
+openlaser-lmc-sim = { workspace = true }
+openlaser-safety = { workspace = true, features = ["unchecked-for-tests"] }
+openlaser-testkit = { workspace = true }
+proptest = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,26 @@
+[package]
+name = "openlaser-lmc-sim"
+description = "FakeLmc (board model, virtual clock, faults, emission recorder), offline simulate_job, SimProvider, FakeGrbl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+openlaser-types = { workspace = true }
+openlaser-machine = { workspace = true }
+openlaser-lmc = { workspace = true }
+openlaser-driver = { workspace = true }
+crossbeam-channel = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+openlaser-plan = { workspace = true }
+openlaser-safety = { workspace = true, features = ["unchecked-for-tests"] }
+openlaser-testkit = { workspace = true }
+proptest = { workspace = true }
+serde_json = { workspace = true }

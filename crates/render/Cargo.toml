@@ -1,0 +1,27 @@
+[package]
+name = "openlaser-render"
+description = "UI-free display lists (document, plan, emission) and deterministic tiny-skia PNG rendering"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+openlaser-types = { workspace = true }
+openlaser-geom = { workspace = true }
+openlaser-doc = { workspace = true }
+openlaser-machine = { workspace = true }
+openlaser-plan = { workspace = true }
+tiny-skia = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+openlaser-testkit = { workspace = true }
+openlaser-import = { workspace = true }
+insta = { workspace = true }
+proptest = { workspace = true }
+serde_json = { workspace = true }
