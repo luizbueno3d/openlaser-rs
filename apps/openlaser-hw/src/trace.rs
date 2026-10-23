@@ -7,7 +7,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, ErrorKind, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use openlaser_lmc_sim::SimWire;
 use openlaser_types::MonoTime;
@@ -133,8 +133,19 @@ pub fn from_sim(w: &SimWire) -> (MonoTime, WireEvent) {
 /// Writes trace lines as they come; every line is flushed so a crash or a signal loses nothing already seen.
 pub struct TraceWriter {
     out: BufWriter<File>,
+    path: PathBuf,
     origin: Option<MonoTime>,
     written: u64,
+}
+
+/// A trace that recorded nothing (the command failed before anything reached the wire) is removed, so the same name
+/// can be used again; this writer created the file itself (`create_new`), so it never removes anyone else's.
+impl Drop for TraceWriter {
+    fn drop(&mut self) {
+        if self.written == 0 {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 impl TraceWriter {
@@ -147,7 +158,7 @@ impl TraceWriter {
                 format!("cannot create the trace file {}: {e}", path.display())
             }
         })?;
-        Ok(TraceWriter { out: BufWriter::new(f), origin: None, written: 0 })
+        Ok(TraceWriter { out: BufWriter::new(f), path: path.to_path_buf(), origin: None, written: 0 })
     }
 
     pub fn write(&mut self, ev: &WireEvent, at: MonoTime) -> Result<(), String> {
@@ -206,8 +217,14 @@ mod tests {
         assert_eq!(w.written(), 2);
         // A second trace with the same name is refused and the first is kept.
         drop(w);
+        assert!(path.exists(), "a trace with events is kept");
         let err = TraceWriter::create(&path).err().unwrap();
         assert!(err.contains("already exists"), "{err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        // One that recorded nothing is removed, so the name can be used again.
+        let empty = dir.path().join("empty.jsonl");
+        drop(TraceWriter::create(&empty).unwrap());
+        assert!(!empty.exists());
+        assert!(TraceWriter::create(&empty).is_ok());
     }
 }
