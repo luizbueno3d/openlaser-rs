@@ -805,6 +805,25 @@ mod tests {
         assert!(matches!(parse_dxf_om(&dxf(&lines, "\n")), Err(Error::TooLarge(_))), "total cap stops CIRCLE amplification");
     }
 
+    /// Review item 6: a few hundred bytes of high-degree Bezier splines cost O(samples × n²); the work budget refuses
+    /// them before the CPU time is spent.
+    #[test]
+    fn spline_work_budget_refuses() {
+        let spline = |offset: usize| {
+            let mut lines = vec!["0".to_owned(), "SPLINE".to_owned(), "71".to_owned(), "127".to_owned()];
+            for i in 0..128 {
+                lines.extend(["10".to_owned(), format!("{}", (i * 8 + offset) as f64), "20".to_owned(), format!("{}", ((i * 37) % 101) as f64)]);
+            }
+            lines
+        };
+        let one: Vec<String> = spline(0).into_iter().chain(["0".to_owned(), "EOF".to_owned()]).collect();
+        let one = one.join("\n").into_bytes();
+        assert!(crate::import("one.dxf", &one, &crate::ImportOptions::default()).is_ok(), "one 128-point Bezier fits the budget");
+        let two: Vec<String> = spline(0).into_iter().chain(spline(1)).chain(["0".to_owned(), "EOF".to_owned()]).collect();
+        let two = two.join("\n").into_bytes();
+        assert!(matches!(crate::import("two.dxf", &two, &crate::ImportOptions::default()), Err(Error::TooLarge(_))));
+    }
+
     #[test]
     fn unsupported_entities_are_counted_in_the_entities_section_only() {
         let lines = [
