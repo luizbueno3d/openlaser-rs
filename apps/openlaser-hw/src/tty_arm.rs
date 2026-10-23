@@ -54,6 +54,13 @@ pub fn classify(k: &KeyEvent) -> Option<KeyAction> {
     }
 }
 
+/// What reaches the real terminal for `text`: plain text only (no control or invisible character but the CLI's own
+/// `\n`, see `plain`), with `\r\n` line ends while raw mode is on.
+pub fn for_terminal(text: &str, raw: bool) -> String {
+    let plain = crate::plain::block(text);
+    if raw { plain.replace('\n', "\r\n") } else { plain }
+}
+
 /// stdin/stdout of a real terminal.
 #[derive(Debug, Default)]
 pub struct TtyTerminal {
@@ -79,12 +86,12 @@ impl Terminal for TtyTerminal {
 
     fn write(&mut self, text: &str) {
         let mut out = std::io::stdout().lock();
-        let text = if self.raw.load(Ordering::SeqCst) { text.replace('\n', "\r\n") } else { text.to_owned() };
+        let text = for_terminal(text, self.raw.load(Ordering::SeqCst));
         let _ = out.write_all(text.as_bytes());
         let _ = out.flush();
     }
 
-    fn confirm_arm(&mut self, challenge: u64, at: MonoTime) -> Option<HumanConfirm> {
+    fn confirm_arm(&mut self, challenge: u64, now: &dyn Fn() -> MonoTime) -> Option<HumanConfirm> {
         // A line can only come from a person at this terminal: both ends are TTYs and no key session is reading.
         if !self.is_tty() || self.raw.load(Ordering::SeqCst) {
             return None;
@@ -94,7 +101,8 @@ impl Terminal for TtyTerminal {
         if !self.is_tty() || !arm_line_matches(&line, challenge) {
             return None;
         }
-        Some(HumanConfirm::from_tty(TtyWitness::new(), line.trim(), challenge, at))
+        // Stamped once the line is in: the confirmation is as young as the typing.
+        Some(HumanConfirm::from_tty(TtyWitness::new(), line.trim(), challenge, now()))
     }
 
     fn keys(&mut self, stop: StopFn) -> Result<Box<dyn KeySession>, String> {
@@ -212,11 +220,21 @@ mod tests {
     }
 
     #[test]
+    fn the_terminal_gets_plain_text_only() {
+        // A layer name that would conceal what follows it (ESC[8m) and clear the screen (C1 CSI), a carriage return
+        // that would overwrite the line, a right-to-left override.
+        let forged = "C00 fake 5.00 %\u{1b}[8m\u{9b}2J\rx\u{202E}y\n";
+        assert_eq!(for_terminal(forged, false), "C00 fake 5.00 %[8m2Jxy\n");
+        assert_eq!(for_terminal(forged, true), "C00 fake 5.00 %[8m2Jxy\r\n");
+        assert_eq!(for_terminal("a\nb\n", true), "a\r\nb\r\n");
+    }
+
+    #[test]
     fn a_pipe_is_not_a_terminal() {
         // Under `cargo test` stdout is captured, so this terminal is never a TTY: no witness can be built here.
         let mut t = TtyTerminal::default();
         if !t.is_tty() {
-            assert!(t.confirm_arm(123_456, MonoTime::default()).is_none());
+            assert!(t.confirm_arm(123_456, &MonoTime::default).is_none());
             assert!(t.keys(Arc::new(|_| {})).is_err());
         }
     }

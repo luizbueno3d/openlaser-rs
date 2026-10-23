@@ -20,6 +20,7 @@ pub mod args;
 pub mod bench;
 pub mod builtin;
 pub mod flow;
+pub mod plain;
 pub mod profile;
 pub mod rig;
 pub mod stop;
@@ -91,8 +92,10 @@ pub trait Terminal {
     fn read_line(&mut self) -> Option<String>;
     fn write(&mut self, text: &str);
     /// Prints the 6-digit `challenge`, reads `ARM <challenge>` and returns the confirmation, or None (wrong text,
-    /// end of input, not a TTY). The real implementation is in `src/tty_arm.rs`.
-    fn confirm_arm(&mut self, challenge: u64, at: MonoTime) -> Option<HumanConfirm>;
+    /// end of input, not a TTY). The confirmation is stamped with `now()` read after the line was read, so it is as
+    /// young as the typing (`mint` refuses one older than 10 s however long the operator took to read the summary).
+    /// The real implementation is in `src/tty_arm.rs`.
+    fn confirm_arm(&mut self, challenge: u64, now: &dyn Fn() -> MonoTime) -> Option<HumanConfirm>;
     /// Starts reading single keys while a machine frames or marks: Esc, Space and Ctrl-C call `stop` at once (on
     /// the key thread, never waiting for the main loop); Enter is reported by [`KeySession::poll`].
     fn keys(&mut self, stop: StopFn) -> Result<Box<dyn KeySession>, String>;
@@ -207,6 +210,8 @@ pub fn run(args: &[String], term: &mut dyn Terminal) -> u8 {
 
 /// [`run`] with an explicit environment (tests).
 pub fn run_with(args: &[String], term: &mut dyn Terminal, env: &mut Env) -> u8 {
+    // Everything written from here on reaches the terminal as plain text (see `plain`).
+    let mut term = PlainTerminal(term);
     let cmd = match args::parse(args) {
         Ok(c) => c,
         Err(e) => {
@@ -214,7 +219,7 @@ pub fn run_with(args: &[String], term: &mut dyn Terminal, env: &mut Env) -> u8 {
             return e.exit_code();
         }
     };
-    match execute(cmd, term, env) {
+    match execute(cmd, &mut term, env) {
         Ok(()) => EXIT_OK,
         Err(e) => {
             term.write(&format!("openlaser-hw: {e}\n"));
@@ -238,6 +243,33 @@ fn execute(cmd: Cmd, term: &mut dyn Terminal, env: &mut Env) -> Result<(), HwErr
     }
 }
 
+/// The terminal every command writes to: [`plain::block`] drops control and invisible characters from all of it
+/// (the CLI's own `\n` stays), so no string that came from a document, the engine or a file can move the cursor,
+/// conceal text or reorder a line on the operator's terminal.
+struct PlainTerminal<'a>(&'a mut dyn Terminal);
+
+impl Terminal for PlainTerminal<'_> {
+    fn is_tty(&self) -> bool {
+        self.0.is_tty()
+    }
+
+    fn read_line(&mut self) -> Option<String> {
+        self.0.read_line()
+    }
+
+    fn write(&mut self, text: &str) {
+        self.0.write(&plain::block(text));
+    }
+
+    fn confirm_arm(&mut self, challenge: u64, now: &dyn Fn() -> MonoTime) -> Option<HumanConfirm> {
+        self.0.confirm_arm(challenge, now)
+    }
+
+    fn keys(&mut self, stop: StopFn) -> Result<Box<dyn KeySession>, String> {
+        self.0.keys(stop)
+    }
+}
+
 /// Refuses unless stdin and stdout are TTYs (SPEC §3.21; checked before anything else the command does).
 pub fn require_tty(term: &dyn Terminal, what: &str) -> Result<(), HwError> {
     if term.is_tty() {
@@ -247,5 +279,42 @@ pub fn require_tty(term: &dyn Terminal, what: &str) -> Result<(), HwError> {
             RefusalCode::NotATty,
             format!("`openlaser-hw {what}` runs only with stdin and stdout on a terminal, operated by a person at the machine"),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Recorder(String);
+
+    impl Terminal for Recorder {
+        fn is_tty(&self) -> bool {
+            false
+        }
+
+        fn read_line(&mut self) -> Option<String> {
+            None
+        }
+
+        fn write(&mut self, text: &str) {
+            self.0.push_str(text);
+        }
+
+        fn confirm_arm(&mut self, _challenge: u64, _now: &dyn Fn() -> MonoTime) -> Option<HumanConfirm> {
+            None
+        }
+
+        fn keys(&mut self, _stop: StopFn) -> Result<Box<dyn KeySession>, String> {
+            Err("no keys".to_owned())
+        }
+    }
+
+    #[test]
+    fn everything_a_command_writes_is_plain() {
+        let mut rec = Recorder::default();
+        PlainTerminal(&mut rec).write("layer \u{1b}[8m\u{9b}2Jx\r\u{202E}y\n");
+        assert_eq!(rec.0, "layer [8m2Jxy\n");
     }
 }

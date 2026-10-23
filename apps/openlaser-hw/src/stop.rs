@@ -13,6 +13,8 @@ use std::time::Duration;
 
 use openlaser_engine::{MachineId, StopAck, StopRegistry};
 
+use crate::plain;
+
 /// How long a signal or a panic waits for the StopReports before the process goes.
 pub const STOP_WAIT: Duration = Duration::from_millis(500);
 /// How often the watcher looks at the signal flags.
@@ -69,27 +71,28 @@ impl StopTarget for CountingStop {
     }
 }
 
-/// The lines printed for a set of StopAcks.
+/// The lines printed for a set of StopAcks (machine ids and driver notes as plain, bounded text).
 pub fn report_lines(acks: &[(MachineId, StopAck)]) -> Vec<String> {
     if acks.is_empty() {
         return vec!["stop: no machine was connected".to_owned()];
     }
     acks.iter()
+        .map(|(m, a)| (plain::field(&m.0, plain::NAME_MAX_CHARS), a))
         .map(|(m, a)| match &a.report {
             Some(r) => format!(
                 "stop {}: {} in {} ms (MO closed: {}, ports at 0: {}{}){}",
-                m.0,
+                m,
                 if r.confirmed { "confirmed" } else { "NOT CONFIRMED: use the key switch / E-stop" },
                 r.elapsed.as_millis(),
                 r.mo_closed,
                 r.ports_zero,
                 if r.possible_desync { ", possible desync" } else { "" },
-                if r.notes.is_empty() { String::new() } else { format!(" — {}", r.notes.join("; ")) },
+                if r.notes.is_empty() { String::new() } else { format!(" — {}", plain::field(&r.notes.join("; "), plain::MESSAGE_MAX_CHARS)) },
             ),
             None if a.latched => {
-                format!("stop {}: latched; no StopReport within {} ms: use the key switch / E-stop if the laser is still active", m.0, a.elapsed_ms)
+                format!("stop {m}: latched; no StopReport within {} ms: use the key switch / E-stop if the laser is still active", a.elapsed_ms)
             }
-            None => format!("stop {}: NOT latched: use the key switch / E-stop", m.0),
+            None => format!("stop {m}: NOT latched: use the key switch / E-stop"),
         })
         .collect()
 }
@@ -281,6 +284,23 @@ mod tests {
         let none = vec![(MachineId("m".into()), StopAck { latched: true, report: None, elapsed_ms: 500 })];
         assert!(report_lines(&none)[0].contains("E-stop"));
         assert_eq!(report_lines(&[]), vec!["stop: no machine was connected".to_owned()]);
+    }
+
+    #[test]
+    fn report_lines_are_plain_text() {
+        let report = StopReport {
+            confirmed: false,
+            elapsed: Duration::from_millis(500),
+            possible_desync: false,
+            mo_closed: false,
+            ports_zero: false,
+            notes: vec!["abort\u{1b}[8m".into(), "\u{9b}2Jok\r".into()],
+        };
+        let acks = vec![(MachineId("m\u{1b}[2J".into()), StopAck { latched: true, report: Some(report), elapsed_ms: 500 })];
+        let line = &report_lines(&acks)[0];
+        assert!(!line.chars().any(plain::hidden), "{line:?}");
+        assert!(line.starts_with("stop m[2J: NOT CONFIRMED: use the key switch / E-stop"), "{line}");
+        assert!(line.ends_with(" — abort[8m; 2Jok"), "{line}");
     }
 
     /// A real SIGINT to this process sets the flag, and the watcher trips the latch of a real driver stopper

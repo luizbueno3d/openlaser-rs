@@ -137,10 +137,10 @@ pub fn detect(term: &mut dyn Terminal) -> Result<(), HwError> {
             "{:04x}:{:04x} {} at {}{}: {}\n",
             d.vid,
             d.pid,
-            d.serial.as_deref().unwrap_or("(no serial)"),
-            d.location,
+            d.serial.as_deref().map_or_else(|| "(no serial)".to_owned(), |s| crate::plain::field(s, crate::plain::NAME_MAX_CHARS)),
+            crate::plain::field(&d.location, crate::plain::MESSAGE_MAX_CHARS),
             if d.supported { "" } else { " (not supported)" },
-            d.note
+            crate::plain::field(&d.note, crate::plain::MESSAGE_MAX_CHARS)
         ));
     }
     Ok(())
@@ -219,7 +219,7 @@ pub fn refuse_skipped_profiles(skipped: &[String]) -> Result<(), HwError> {
     Err(HwError::Failed(format!(
         "machine profile files were skipped, so their machines would run on the built-in settings: {}. Fix or remove them \
          (`openlaser-hw profile show` lists them) and run again; nothing was opened",
-        skipped.join("; ")
+        crate::plain::field(&skipped.join("; "), crate::plain::MESSAGE_MAX_CHARS)
     )))
 }
 

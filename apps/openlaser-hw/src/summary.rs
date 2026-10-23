@@ -1,10 +1,14 @@
 //! What the operator reads before framing and before arming: the `EmissionSummary` decoded from the bytes that will
-//! be sent (SPEC §1.3 rule 3), never the document. Also the S23 first-emission cap check.
+//! be sent (SPEC §1.3 rule 3), never the document. Also the S23 first-emission cap check. Names and messages in it
+//! (layer names, notices, the machine id) are printed as plain, bounded text (`plain::field`): no escape sequence in
+//! an agent-named layer can conceal or forge the numbers beside it.
 
 use std::fmt::Write as _;
 use std::time::Duration;
 
 use openlaser_types::{Bounds, EmissionSummary, FrameReceipt, PassRow, Refusal, RefusalCode, SectionMode};
+
+use crate::plain;
 
 fn mode(m: SectionMode) -> &'static str {
     match m {
@@ -14,9 +18,12 @@ fn mode(m: SectionMode) -> &'static str {
     }
 }
 
+/// The layer key, then its name in quotes when it has one of its own (plain, at most `NAME_MAX_CHARS`, `"` shown as
+/// `'`), so a name that reads like numbers stays visibly a name.
 fn layer(r: &PassRow) -> String {
     let key = r.layer.to_string();
-    if r.layer_name.is_empty() || r.layer_name == key { key } else { format!("{key} {}", r.layer_name) }
+    let name = plain::field(&r.layer_name, plain::NAME_MAX_CHARS).replace('"', "'");
+    if name.is_empty() || name == key { key } else { format!("{key} \"{name}\"") }
 }
 
 fn bounds(b: &Bounds) -> String {
@@ -34,7 +41,12 @@ fn yes_no(b: bool) -> &'static str {
 /// The decoded summary as a table, plus repeats, notices, totals, the post-crash bound, machine and fingerprint.
 pub fn text(s: &EmissionSummary) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "Job {} on {} — every number below is decoded from the bytes that will be sent", s.fingerprint.short(), s.machine.0);
+    let _ = writeln!(
+        out,
+        "Job {} on {} — every number below is decoded from the bytes that will be sent",
+        s.fingerprint.short(),
+        plain::field(&s.machine.0, plain::NAME_MAX_CHARS)
+    );
     let _ = writeln!(
         out,
         "  {:<14} {:<5} {:>7} {:>9} {:>11} {:>7} {:>15} {:>6}  {:<38} {:>9}",
@@ -69,7 +81,7 @@ pub fn text(s: &EmissionSummary) -> String {
         yes_no(s.swap_xy)
     );
     for n in &s.notices {
-        let _ = writeln!(out, "Notice {}: {}", n.n, n.message);
+        let _ = writeln!(out, "Notice {}: {}", n.n, plain::field(&n.message, plain::MESSAGE_MAX_CHARS));
     }
     out
 }
@@ -166,6 +178,33 @@ pub(crate) mod tests {
         for want in ["50.01 %", "29.99 kHz", "200 ns", "996.8 mm/s", "1/1", "(-5.00, -5.00) to (5.00, 5.00) mm", "jpt-m7-200-sim", "Repeats: 1"] {
             assert!(t.contains(want), "summary shows {want}:\n{t}");
         }
+    }
+
+    #[test]
+    fn names_and_notices_are_plain_bounded_text() {
+        // An agent-named layer that prints fake numbers, then conceals (ESC[8m) the real ones and everything after.
+        let mut s = summary(80.0);
+        if let Some(r) = s.rows.first_mut() {
+            r.layer_name = "C00   Line  1/1  5.00 % (fake)\u{1b}[8m".into();
+        }
+        s.machine = MachineId("jpt\u{1b}[2J-m7".into());
+        s.notices.push(openlaser_types::Notice {
+            n: 1,
+            code: openlaser_types::NoticeCode::OpenShapeUnhatched,
+            message: format!("open shape\u{9b}8m\r\u{202E}{}", "x".repeat(400)),
+            object: None,
+            layer: None,
+        });
+        let t = text(&s);
+        assert!(t.chars().all(|c| c == '\n' || !plain::hidden(c)), "{t:?}");
+        assert!(t.contains("80.00 %"), "the real power is shown:\n{t}");
+        assert!(t.contains("C00 \"C00   Line  1/1  5.00 % (fake)[…\""), "the name is quoted and bounded:\n{t}");
+        assert!(t.contains("on jpt[2J-m7"), "{t}");
+        let notice = t.lines().find(|l| l.starts_with("Notice 1: open shape8m")).unwrap_or_default();
+        assert_eq!(notice.chars().count(), "Notice 1: ".len() + plain::MESSAGE_MAX_CHARS, "{notice}");
+        // The refusal for a capped row names the layer the same way.
+        let r = check_cap(&s, Some(10.0)).unwrap_err();
+        assert!(!r.message.chars().any(plain::hidden), "{:?}", r.message);
     }
 
     #[test]
