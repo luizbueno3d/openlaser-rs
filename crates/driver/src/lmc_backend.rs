@@ -171,7 +171,8 @@ impl<T: LmcTransport + 'static> Backend for LmcBackend<T> {
         let mut one_repeat = Duration::ZERO;
         for (i, l) in job.lists.iter().enumerate() {
             if l.packets.is_empty() || l.packet_est.len() != l.packets.len() {
-                return Err(DriverError::Protocol(format!("list {} has {} packets and {} estimates", i + 1, l.packets.len(), l.packet_est.len())));
+                let msg = format!("the encoded job is malformed: list {} has {} packets and {} estimates", i + 1, l.packets.len(), l.packet_est.len());
+                return Err(DriverError::refused(RefusalCode::NotEncodable, msg));
             }
             packets = packets.saturating_add(u32::try_from(l.packets.len()).unwrap_or(u32::MAX));
             one_repeat = one_repeat.saturating_add(l.packet_est.iter().sum());

@@ -33,6 +33,9 @@ pub(crate) const CONFIRM_WAIT: Duration = Duration::from_millis(50);
 /// The whole emergency sequence stays inside the 500 ms stop watchdog: once this is spent, every remaining transfer
 /// (MO close and ports zero are always attempted) gets one slice.
 pub(crate) const EMERGENCY_BUDGET: Duration = Duration::from_millis(400);
+/// One abort transfer waits at most this for its reply: a responsive board answers in a few ms, and a wedged one
+/// must not hold MO(0) and WritePort(0) back (their OUT transfers go out whatever happens to the replies).
+pub(crate) const ABORT_TRANSFER_CAP: Duration = Duration::from_millis(50);
 /// The watchdog budget never exceeds this, whatever the estimates say.
 const WATCHDOG_CAP: Duration = Duration::from_secs(24 * 3600);
 
@@ -328,7 +331,7 @@ impl<W: Wire> Session<W> {
     fn budget(&self, mode: Mode, now: MonoTime) -> Duration {
         match mode {
             Mode::Live | Mode::Plain => self.cfg.transfer_timeout,
-            Mode::Abort { deadline } => self.cfg.transfer_timeout.min(deadline.saturating_since(now).max(MAX_SLICE)),
+            Mode::Abort { deadline } => self.cfg.transfer_timeout.min(ABORT_TRANSFER_CAP).min(deadline.saturating_since(now).max(MAX_SLICE)),
         }
     }
 
@@ -785,6 +788,8 @@ pub(crate) mod board {
         pub(crate) buffer_depth: usize,
         /// How long a packet transfer takes to complete.
         pub(crate) packet_latency: Duration,
+        /// No single command is answered any more (a wedged board).
+        pub(crate) mute: bool,
     }
 
     #[derive(Default)]
@@ -922,7 +927,7 @@ pub(crate) mod board {
                 WRITE_PORT => s.port = p1,
                 _ => {}
             }
-            let answer = op != GET_VERSION || s.faults.replies_stop_after.is_none_or(|n| s.replies < n);
+            let answer = !s.faults.mute && (op != GET_VERSION || s.faults.replies_stop_after.is_none_or(|n| s.replies < n));
             if op == GET_VERSION {
                 s.replies += 1;
             }
@@ -1340,6 +1345,22 @@ mod tests {
         assert_eq!(log, expect);
         assert!(report.confirmed && report.mo_closed && report.ports_zero && !report.possible_desync, "{report:?}");
         assert!(report.elapsed <= Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_wedged_board_still_gets_mo_close_and_ports_zero_within_the_watchdog() {
+        let rig = Rig::new();
+        let mut s = rig.session(Faults { buffer_depth: 8, ..Faults::default() });
+        s.wire.state.lock().unwrap().faults.mute = true;
+        let t0 = rig.clock.now();
+        let report = s.emergency(&rig.cx());
+        let took = rig.clock.now().saturating_since(t0);
+        assert!(took <= Duration::from_millis(450), "{took:?}");
+        assert!(!report.confirmed && !report.mo_closed, "{report:?}");
+        let st = s.wire.state.lock().unwrap();
+        let log = ops(&st.log);
+        assert!(log.iter().filter(|o| *o == "Fiber_SetMo").count() == 2 && log.iter().any(|o| o == "WritePort"), "{log:?}");
+        assert_eq!((st.mo, st.port), (false, 0), "the board took MO(0) and WritePort(0) even without replying");
     }
 
     #[test]

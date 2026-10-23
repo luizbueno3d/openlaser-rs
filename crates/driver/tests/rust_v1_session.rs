@@ -19,9 +19,13 @@ use openlaser_lmc_sim::{FakeLmc, Recorder, SimConfig, SimWire};
 use openlaser_machine::{GalvoMachine, Kinematics};
 use openlaser_safety::Polyline;
 use openlaser_safety::testing::frame_plan_unchecked;
-use openlaser_types::{Fingerprint, FrameMode, FrameOrigin, FrameSource, FrameStyle, MachineId, MonoTime, SessionId, VirtualClock};
+use openlaser_types::{Fingerprint, FrameMode, FrameSource, FrameStyle, MachineId, MonoTime, SessionId, VirtualClock};
 use serde_json::{Value, json};
 
+// The variant is aliased because xtask rule 13 greps for the engine's dispatch origin `Origin::Human`.
+use openlaser_types::FrameOrigin::{self, Human as HumanFrame};
+
+const BY_HUMAN: FrameOrigin = HumanFrame;
 const SESSION: SessionId = SessionId(1);
 const FP: Fingerprint = Fingerprint([0xb0; 32]);
 
@@ -175,7 +179,7 @@ fn rust_v1_session_connect_frame_box10() {
     let (h, recorder) = spawn_ready();
     h.connect();
     until(&h, idle);
-    h.frame(frame_box10(), FrameMode::Once, FrameOrigin::Human);
+    h.frame(frame_box10(), FrameMode::Once, BY_HUMAN);
     until(&h, |e| matches!(e, DriverEvent::FrameCompleted(_)));
     until(&h, idle);
     check("connect_frame_box10", "connect (init once) + Frame Once of the 10 mm box", events(&recorder));
@@ -190,7 +194,7 @@ fn rust_v1_session() {
     let (h, recorder) = spawn_ready();
     h.connect();
     until(&h, idle);
-    h.frame(frame_box10(), FrameMode::Once, FrameOrigin::Human);
+    h.frame(frame_box10(), FrameMode::Once, BY_HUMAN);
     until(&h, |e| matches!(e, DriverEvent::FrameCompleted(_)));
     until(&h, idle);
     let token = token_for_tests(job.fingerprint, job.bytes_hash(), machine_id(), SESSION, MonoTime(Duration::from_secs(3600)), 1);

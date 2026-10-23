@@ -88,6 +88,11 @@ impl StopLatch {
         }
     }
 
+    /// After the driver answered the pending trips: the next trip stamps its own time (the flag stays as it is).
+    pub(crate) fn reset_stamp(&self) {
+        self.tripped_at_ns.store(0, Ordering::SeqCst);
+    }
+
     /// The driver thread clears the latch for a command queued at generation `g`, and only if no trip happened
     /// since (§5.3). Returns false, leaving the latch tripped, when a trip raced in.
     ///

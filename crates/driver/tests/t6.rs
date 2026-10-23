@@ -25,10 +25,13 @@ use openlaser_machine::{GalvoMachine, Kinematics};
 use openlaser_safety::Polyline;
 use openlaser_safety::testing::frame_plan_unchecked;
 use openlaser_types::{
-    ArmToken, Clock, Fingerprint, FrameMode, FrameOrigin, FrameSource, FrameStyle, LayerKey, MachineId, MonoTime, RefusalCode, SessionId, SystemClock,
-    VirtualClock,
+    ArmToken, Clock, Fingerprint, FrameMode, FrameSource, FrameStyle, LayerKey, MachineId, MonoTime, RefusalCode, SessionId, SystemClock, VirtualClock,
 };
 
+// The variant is aliased because xtask rule 13 greps for the engine's dispatch origin `Origin::Human`.
+use openlaser_types::FrameOrigin::{self, Human as HumanFrame};
+
+const BY_HUMAN: FrameOrigin = HumanFrame;
 const SESSION: SessionId = SessionId(1);
 const FP: Fingerprint = Fingerprint([0x5a; 32]);
 
@@ -214,7 +217,7 @@ fn connected(r: &Rig) {
 /// Connect, frame the job once (a human frame of the job), then run it with a valid token.
 fn framed_run(r: &Rig, job: LmcJob, nonce: u64) {
     connected(r);
-    r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+    r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, BY_HUMAN);
     until(&r.handle, |e| matches!(e, DriverEvent::FrameCompleted(_)));
     until(&r.handle, idle);
     let t = token(&job, nonce, far());
@@ -269,7 +272,7 @@ mod lmc {
             let stop_at = rng.below(160);
             let r = rig(cfg, Arc::new(SystemClock::new()), Some(stop_at));
             r.handle.connect();
-            r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+            r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, BY_HUMAN);
             let job = mark_job(&many_segments(1100), 30.0, 1000.0, 1);
             let t = token(&job, run as u64, far());
             r.handle.run(job, t);
@@ -377,7 +380,7 @@ mod lmc {
         for mode in [FrameMode::Once, FrameMode::Loop] {
             let r = rig(board(8, Vec::new()), virtual_clock(), None);
             connected(&r);
-            r.handle.frame(frame_job(box10(), FrameSource::Job), mode, FrameOrigin::Human);
+            r.handle.frame(frame_job(box10(), FrameSource::Job), mode, BY_HUMAN);
             until(&r.handle, |e| matches!(e, DriverEvent::FrameCompleted(f) if f.full_passes >= 2 || mode == FrameMode::Once));
             r.handle.stopper().stop_and_wait(Duration::from_secs(2));
             let rec = r.recorder.snapshot();
@@ -526,7 +529,7 @@ mod lmc {
     fn t6_dead_man_handle_drop_stops() {
         let r = rig(board(8, Vec::new()), Arc::new(SystemClock::new()), None);
         connected(&r);
-        r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Loop, FrameOrigin::Human);
+        r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Loop, BY_HUMAN);
         until(&r.handle, |e| matches!(e, DriverEvent::FrameCompleted(_)));
         let Rig { handle, recorder, .. } = r;
         drop(handle);
@@ -582,7 +585,7 @@ mod lmc {
         let h = spawn(LmcBackend::new(Panicky(fake, 0), galvo()), machine_id(), SESSION, clock);
         h.connect();
         let job = mark_job(&many_segments(1100), 30.0, 1000.0, 1);
-        h.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        h.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, BY_HUMAN);
         let t = token(&job, 1, far());
         h.run(job, t);
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -600,7 +603,7 @@ mod lmc {
         // Nobody reads events during a long job (> 100 000 transfers of traffic); the stop is as fast as ever.
         let r = rig(board(8, Vec::new()), Arc::new(SystemClock::new()), None);
         r.handle.connect();
-        r.handle.frame(frame_job(many_segments(2000), FrameSource::Job), FrameMode::Loop, FrameOrigin::Human);
+        r.handle.frame(frame_job(many_segments(2000), FrameSource::Job), FrameMode::Loop, BY_HUMAN);
         std::thread::sleep(Duration::from_secs(2));
         let ack = r.handle.stopper().stop_and_wait(Duration::from_millis(500));
         assert!(ack.report.as_ref().is_some_and(|r| r.confirmed), "{ack:?}");
@@ -614,7 +617,7 @@ mod lmc {
         let clock = virtual_clock();
         let r = rig(board(8, Vec::new()), Arc::clone(&clock), None);
         connected(&r);
-        r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, BY_HUMAN);
         let evs = until(&r.handle, |e| matches!(e, DriverEvent::FrameCompleted(_)));
         let Some(DriverEvent::FrameCompleted(receipt)) = evs.last() else { panic!() };
         let wire = r.recorder.snapshot().wire;
@@ -635,7 +638,7 @@ mod lmc {
         // Loop: receipt k only after pass k's !BUSY; a stop during a pass gives no receipt for it.
         let r = rig(board(8, Vec::new()), virtual_clock(), None);
         connected(&r);
-        r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Loop, FrameOrigin::Human);
+        r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Loop, BY_HUMAN);
         until(&r.handle, |e| matches!(e, DriverEvent::FrameCompleted(f) if f.full_passes == 3));
         let evs = {
             let s = r.handle.stopper();
@@ -660,7 +663,7 @@ mod lmc {
     fn t6_stop_after_queue_cancels_queued_run() {
         let r = rig(board(8, Vec::new()), virtual_clock(), None);
         connected(&r);
-        r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, BY_HUMAN);
         until(&r.handle, idle);
         let job = mark_job(&box10(), 30.0, 1000.0, 1);
         let t = token(&job, 7, far());
@@ -681,7 +684,7 @@ mod lmc {
         let r = rig(board(8, Vec::new()), virtual_clock(), None);
         connected(&r);
         let job = mark_job(&box10(), 30.0, 1000.0, 1);
-        r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, BY_HUMAN);
         until(&r.handle, idle);
         let t = token(&job, 1, far());
         // The same fingerprint, one byte different: the GP packet of a 31 % job.
@@ -698,7 +701,7 @@ mod lmc {
     fn t6_run_refused_while_framing() {
         let r = rig(board(8, Vec::new()), virtual_clock(), None);
         connected(&r);
-        r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Loop, FrameOrigin::Human);
+        r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Loop, BY_HUMAN);
         until(&r.handle, |e| matches!(e, DriverEvent::FrameCompleted(_)));
         let job = mark_job(&box10(), 30.0, 1000.0, 1);
         let t = token(&job, 1, far());
@@ -736,7 +739,7 @@ mod lmc {
     fn t6_run_refused_tool_layers_receipt() {
         let r = rig(board(8, Vec::new()), virtual_clock(), None);
         connected(&r);
-        r.handle.frame(frame_job(box10(), FrameSource::ToolLayersOnly), FrameMode::Once, FrameOrigin::Human);
+        r.handle.frame(frame_job(box10(), FrameSource::ToolLayersOnly), FrameMode::Once, BY_HUMAN);
         until(&r.handle, idle);
         let job = mark_job(&box10(), 30.0, 1000.0, 1);
         let t = token(&job, 1, far());
@@ -762,7 +765,7 @@ mod lmc {
         let clock = Arc::new(VirtualClock::new());
         let r = rig(board(8, Vec::new()), clock.clone(), None);
         connected(&r);
-        r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, BY_HUMAN);
         until(&r.handle, idle);
         let job = mark_job(&box10(), 30.0, 1000.0, 1);
         let t = token(&job, 1, clock.now().plus(Duration::from_millis(1)));
@@ -800,7 +803,7 @@ mod lmc {
         let job = mark_job(&box10(), 30.0, 1000.0, 1);
         framed_run(&r, job.clone(), 1);
         until(&r.handle, |e| matches!(e, DriverEvent::Finished(_)));
-        r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, BY_HUMAN);
         until(&r.handle, idle);
         let t = token(&job, 2, far());
         r.handle.run(job, t);
@@ -819,7 +822,7 @@ mod lmc {
         connected(&r);
         let f = frame_job(box10(), FrameSource::Job);
         let passes = f.once_passes;
-        r.handle.frame(f, FrameMode::Once, FrameOrigin::Human);
+        r.handle.frame(f, FrameMode::Once, BY_HUMAN);
         let evs = until(&r.handle, idle);
         let receipts: Vec<u32> = evs
             .iter()

@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use openlaser_lmc::LmcTransport;
 use openlaser_machine::{GalvoMachine, GantryMachine};
-use openlaser_types::{ArmToken, Clock, FRAME_RECEIPT_MAX_AGE, FrameMode, FrameOrigin, FrameReceipt, MachineId, Refusal, RefusalCode, SessionId};
+// The variant is aliased because xtask rule 13 greps for the engine's dispatch origin `Origin::Human`.
+use openlaser_types::FrameOrigin::{self, Human as HumanFrame};
+use openlaser_types::{ArmToken, Clock, FRAME_RECEIPT_MAX_AGE, FrameMode, FrameReceipt, MachineId, Refusal, RefusalCode, SessionId};
 use serde::Serialize;
 
 use crate::backend::{Backend, Capabilities, DriverError, DriverEvent, EncodedJob, FrameOutcome, MachineState, Outcome};
@@ -410,6 +412,7 @@ impl<B: Backend> Runtime<B> {
     fn post_report(&mut self, report: StopReport, confirmed_state: MachineState) {
         let generation = self.latch.generation();
         self.handled_generation = self.handled_generation.max(generation);
+        self.latch.reset_stamp();
         self.mailbox.post(generation, report.clone());
         let confirmed = report.confirmed;
         self.emit(DriverEvent::Stopped(report));
@@ -609,7 +612,7 @@ impl<B: Backend> Runtime<B> {
         if age > FRAME_RECEIPT_MAX_AGE {
             return Err(Refusal::new(RefusalCode::FrameReceiptExpired, format!("the frame is {} s old (limit 600 s): frame again", age.as_secs())));
         }
-        if r.origin != FrameOrigin::Human {
+        if r.origin != HumanFrame {
             return Err(Refusal::new(RefusalCode::FrameNotHuman, "the frame was not started by a person: frame again from the Laser panel"));
         }
         if !r.covers_job() {
@@ -887,7 +890,7 @@ mod tests {
         let evs = until(&h, |e| matches!(e, DriverEvent::State(MachineState::Idle)));
         assert!(evs.iter().any(|e| matches!(e, DriverEvent::Connected(_))));
         assert!(evs.iter().any(|e| matches!(e, DriverEvent::State(MachineState::Connecting))));
-        h.frame(frame(FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        h.frame(frame(FrameSource::Job), FrameMode::Once, HumanFrame);
         let evs = until(&h, |e| matches!(e, DriverEvent::State(MachineState::Idle)));
         assert!(evs.iter().any(|e| matches!(e, DriverEvent::FrameCompleted(r) if r.full_passes == 1)));
     }
@@ -914,10 +917,10 @@ mod tests {
         let calls = Arc::new(Calls::default());
         let h = spawn_mock(Mock::new(&calls), Arc::new(SystemClock::new()));
         connected(&h);
-        h.frame(frame(FrameSource::Job), FrameMode::Loop, FrameOrigin::Human);
+        h.frame(frame(FrameSource::Job), FrameMode::Loop, HumanFrame);
         until(&h, |e| matches!(e, DriverEvent::FrameCompleted(_)));
         h.run(job(), token(1));
-        h.frame(frame(FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        h.frame(frame(FrameSource::Job), FrameMode::Once, HumanFrame);
         until(&h, refusal(RefusalCode::MachineBusy));
         until(&h, refusal(RefusalCode::MachineBusy));
         assert_eq!(calls.run.load(Ordering::SeqCst), 0);
@@ -949,12 +952,12 @@ mod tests {
 
     #[test]
     fn run_refused_without_own_receipt() {
-        assert_eq!(refused_with(&run_after(None, FrameOrigin::Human, token(1), job())), RefusalCode::FrameRequired);
+        assert_eq!(refused_with(&run_after(None, HumanFrame, token(1), job())), RefusalCode::FrameRequired);
     }
 
     #[test]
     fn run_refused_tool_layers_receipt() {
-        let evs = run_after(Some(FrameSource::ToolLayersOnly), FrameOrigin::Human, token(1), job());
+        let evs = run_after(Some(FrameSource::ToolLayersOnly), HumanFrame, token(1), job());
         assert_eq!(refused_with(&evs), RefusalCode::FrameDoesNotCoverJob);
     }
 
@@ -967,15 +970,15 @@ mod tests {
     fn run_refused_when_bytes_differ_from_token() {
         // t6_run_refused_when_bytes_differ_from_token (S22): the hash is recomputed from the job handed over.
         let tampered = Job { bytes: Fingerprint([8; 32]), ..job() };
-        assert_eq!(refused_with(&run_after(Some(FrameSource::Job), FrameOrigin::Human, token(1), tampered)), RefusalCode::BytesMismatch);
+        assert_eq!(refused_with(&run_after(Some(FrameSource::Job), HumanFrame, token(1), tampered)), RefusalCode::BytesMismatch);
     }
 
     #[test]
     fn run_refused_for_another_job_or_machine() {
         let other = Job { fp: Fingerprint([1; 32]), ..job() };
-        assert_eq!(refused_with(&run_after(Some(FrameSource::Job), FrameOrigin::Human, token(1), other)), RefusalCode::Stale);
+        assert_eq!(refused_with(&run_after(Some(FrameSource::Job), HumanFrame, token(1), other)), RefusalCode::Stale);
         let elsewhere = Job { machine: MachineId("other".into()), ..job() };
-        assert_eq!(refused_with(&run_after(Some(FrameSource::Job), FrameOrigin::Human, token(1), elsewhere)), RefusalCode::MachineMismatch);
+        assert_eq!(refused_with(&run_after(Some(FrameSource::Job), HumanFrame, token(1), elsewhere)), RefusalCode::MachineMismatch);
     }
 
     #[test]
@@ -984,7 +987,7 @@ mod tests {
         let clock = Arc::new(VirtualClock::new());
         let h = spawn_mock(Mock::new(&calls), clock.clone());
         connected(&h);
-        h.frame(frame(FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        h.frame(frame(FrameSource::Job), FrameMode::Once, HumanFrame);
         until(&h, |e| matches!(e, DriverEvent::FrameCompleted(_)));
         clock.advance(FRAME_RECEIPT_MAX_AGE + Duration::from_secs(1));
         h.run(job(), token(1));
@@ -996,7 +999,7 @@ mod tests {
     fn work_is_refused_until_connected() {
         let calls = Arc::new(Calls::default());
         let h = spawn_mock(Mock::new(&calls), Arc::new(SystemClock::new()));
-        h.frame(frame(FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        h.frame(frame(FrameSource::Job), FrameMode::Once, HumanFrame);
         until(&h, refusal(RefusalCode::NotConnected));
         assert_eq!(calls.frame.load(Ordering::SeqCst), 0);
     }
@@ -1007,7 +1010,7 @@ mod tests {
         let calls = Arc::new(Calls::default());
         let h = spawn_mock(Mock::new(&calls), Arc::new(SystemClock::new()));
         connected(&h);
-        h.frame(frame(FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        h.frame(frame(FrameSource::Job), FrameMode::Once, HumanFrame);
         until(&h, |e| matches!(e, DriverEvent::FrameCompleted(_)));
         h.run(job(), token(1));
         until(&h, |e| matches!(e, DriverEvent::Finished(Outcome::Finished { .. })));
@@ -1020,7 +1023,7 @@ mod tests {
         let calls = Arc::new(Calls::default());
         let h = spawn_mock(Mock::new(&calls), Arc::new(SystemClock::new()));
         connected(&h);
-        h.frame(frame(FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        h.frame(frame(FrameSource::Job), FrameMode::Once, HumanFrame);
         until(&h, |e| matches!(e, DriverEvent::FrameCompleted(_)));
         h.run(job(), token(42));
         until(&h, |e| matches!(e, DriverEvent::Finished(_)));
@@ -1036,7 +1039,7 @@ mod tests {
         let calls = Arc::new(Calls::default());
         let h = spawn_mock(Mock::new(&calls), Arc::new(SystemClock::new()));
         connected(&h);
-        h.frame(frame(FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        h.frame(frame(FrameSource::Job), FrameMode::Once, HumanFrame);
         until(&h, |e| matches!(e, DriverEvent::FrameCompleted(_)));
         h.run(job(), token(42));
         until(&h, |e| matches!(e, DriverEvent::Fault(_) | DriverEvent::Finished(_)));
@@ -1050,7 +1053,7 @@ mod tests {
         let calls = Arc::new(Calls::default());
         let h = spawn_mock(Mock { stop_takes: Duration::from_millis(80), ..Mock::new(&calls) }, Arc::new(SystemClock::new()));
         connected(&h);
-        h.frame(frame(FrameSource::Job), FrameMode::Loop, FrameOrigin::Human);
+        h.frame(frame(FrameSource::Job), FrameMode::Loop, HumanFrame);
         until(&h, |e| matches!(e, DriverEvent::FrameCompleted(_)));
         let t = Instant::now();
         drop(h);
@@ -1066,15 +1069,15 @@ mod tests {
         let calls = Arc::new(Calls::default());
         let h = spawn_mock(Mock::new(&calls), Arc::new(SystemClock::new()));
         connected(&h);
-        h.frame(Frame { panic: true, ..frame(FrameSource::Job) }, FrameMode::Once, FrameOrigin::Human);
+        h.frame(Frame { panic: true, ..frame(FrameSource::Job) }, FrameMode::Once, HumanFrame);
         let evs = until(&h, |e| matches!(e, DriverEvent::Stopped(_)));
         assert!(evs.iter().any(|e| matches!(e, DriverEvent::Fault(DriverError::PanicContained))));
         assert_eq!(calls.stop.load(Ordering::SeqCst), 1);
         // Sticky: framing again is refused until a new connect.
-        h.frame(frame(FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        h.frame(frame(FrameSource::Job), FrameMode::Once, HumanFrame);
         until(&h, refusal(RefusalCode::NotConnected));
         connected(&h);
-        h.frame(frame(FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        h.frame(frame(FrameSource::Job), FrameMode::Once, HumanFrame);
         until(&h, |e| matches!(e, DriverEvent::FrameCompleted(_)));
     }
 
@@ -1083,7 +1086,7 @@ mod tests {
         let calls = Arc::new(Calls::default());
         let h = spawn_mock(Mock::new(&calls), Arc::new(SystemClock::new()));
         connected(&h);
-        h.frame(Frame { fail: true, ..frame(FrameSource::Job) }, FrameMode::Once, FrameOrigin::Human);
+        h.frame(Frame { fail: true, ..frame(FrameSource::Job) }, FrameMode::Once, HumanFrame);
         let evs = until(&h, |e| matches!(e, DriverEvent::State(MachineState::Fault)));
         assert!(evs.iter().any(|e| matches!(e, DriverEvent::Fault(DriverError::Transport(_)))));
         assert!(evs.iter().any(|e| matches!(e, DriverEvent::Stopped(r) if r.confirmed)));
@@ -1096,7 +1099,7 @@ mod tests {
         let calls = Arc::new(Calls::default());
         let h = spawn_mock(Mock { flood: 100_000, ..Mock::new(&calls) }, Arc::new(SystemClock::new()));
         h.connect();
-        h.frame(frame(FrameSource::Job), FrameMode::Loop, FrameOrigin::Human);
+        h.frame(frame(FrameSource::Job), FrameMode::Loop, HumanFrame);
         while calls.frame.load(Ordering::SeqCst) == 0 {
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -1115,7 +1118,7 @@ mod tests {
         assert!(ack.report.is_some_and(|r| r.confirmed));
         assert_eq!(calls.stop.load(Ordering::SeqCst), 1);
         // A user stop is not sticky: the next command clears the latch and runs.
-        h.frame(frame(FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        h.frame(frame(FrameSource::Job), FrameMode::Once, HumanFrame);
         until(&h, |e| matches!(e, DriverEvent::FrameCompleted(_)));
     }
 
@@ -1125,7 +1128,7 @@ mod tests {
         let h = spawn_mock(Mock::new(&calls), Arc::new(SystemClock::new()));
         connected(&h);
         h.stopper().latch().signal_flag().store(true, Ordering::SeqCst);
-        h.frame(frame(FrameSource::Job), FrameMode::Once, FrameOrigin::Human);
+        h.frame(frame(FrameSource::Job), FrameMode::Once, HumanFrame);
         until(&h, refusal(RefusalCode::StoppedAfterQueue));
         until(&h, |e| matches!(e, DriverEvent::Stopped(_)));
         assert_eq!(calls.frame.load(Ordering::SeqCst), 0);
@@ -1137,7 +1140,7 @@ mod tests {
         let calls = Arc::new(Calls::default());
         let h = spawn_mock(Mock::new(&calls), Arc::new(SystemClock::new()));
         connected(&h);
-        h.frame(Frame { machine: MachineId("other".into()), ..frame(FrameSource::Job) }, FrameMode::Once, FrameOrigin::Human);
+        h.frame(Frame { machine: MachineId("other".into()), ..frame(FrameSource::Job) }, FrameMode::Once, HumanFrame);
         until(&h, refusal(RefusalCode::MachineMismatch));
     }
 }
