@@ -13,6 +13,12 @@ use crate::time::MonoTime;
 
 pub const ARM_TOKEN_TTL: Duration = Duration::from_secs(60);
 
+/// An all-zero hash is what an unfinished or broken hasher returns, never a real fingerprint or `bytes_hash`
+/// (BLAKE3 output). Binding to it would bind to nothing, so it is refused on either side: fail closed (S22).
+fn unset(f: &Fingerprint) -> bool {
+    f.0 == [0u8; 32]
+}
+
 /// The only key to emission. (no Clone) Private fields. Consumed by value by `DriverHandle::run`.
 /// `bytes` = `EmissionSummary.bytes_hash` of the summary the human confirmed (S22). `nonce` is a fresh 64-bit
 /// getrandom value for single use, independent of the 6-digit TTY challenge.
@@ -34,7 +40,21 @@ impl ArmToken {
 
     /// Refusals, checked in this order: Stale (fingerprint), BytesMismatch, MachineMismatch, ArmSessionMismatch,
     /// ArmExpired (valid while `now < expires`: a token minted at t is good until just before t + 60 s).
+    /// An all-zero fingerprint (Stale) or bytes hash (BytesMismatch), on the token or on the job, is refused even
+    /// when both sides agree: a zero hash comes from a stub or a broken hasher and would match any job.
     pub fn check(&self, fp: &Fingerprint, bytes: &Fingerprint, machine: &MachineId, session: SessionId, now: MonoTime) -> Result<(), Refusal> {
+        if unset(&self.fingerprint) || unset(fp) {
+            return Err(Refusal::new(
+                RefusalCode::Stale,
+                "the job's fingerprint is unset (all zero), so this ARM cannot be matched to a job; nothing was sent, plan and arm again",
+            ));
+        }
+        if unset(&self.bytes) || unset(bytes) {
+            return Err(Refusal::new(
+                RefusalCode::BytesMismatch,
+                "the job's bytes hash is unset (all zero), so the bytes cannot be matched to what the operator confirmed; nothing was sent",
+            ));
+        }
         if self.fingerprint != *fp {
             return Err(Refusal::new(
                 RefusalCode::Stale,

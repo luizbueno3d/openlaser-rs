@@ -12,7 +12,7 @@ use openlaser_types::{
 use openlaser_types::FrameOrigin::{Agent as AgentFrame, Human as PersonFrame};
 
 use crate::testing::confirm_for_tests;
-use crate::{ConfirmKind, HumanConfirm, mint};
+use crate::{CONFIRM_MAX_AGE, ConfirmKind, HumanConfirm, mint};
 
 const FP: Fingerprint = Fingerprint([0x11; 32]);
 const BYTES: Fingerprint = Fingerprint([0x22; 32]);
@@ -212,6 +212,49 @@ fn mint_tty_needs_arm_and_the_challenge() {
 fn mint_refuses_confirmation_from_the_future() {
     let c = confirm_for_tests("ARM", vec![true; CHECKLIST], now().plus(Duration::from_secs(1)));
     assert_eq!(refused(receipt(), c, CHECKLIST, now()), Some(RefusalCode::ArmExpired));
+}
+
+/// Fail closed (S22): a zero `bytes_hash` (an unfinished or broken hasher) would bind the token to any job.
+#[test]
+fn mint_refuses_zero_bytes_hash() {
+    let mut s = summary();
+    s.bytes_hash = Fingerprint([0; 32]);
+    let e = mint(&s, &receipt(), gui("ARM"), CHECKLIST, SESSION, now()).unwrap_err();
+    assert_eq!(e.code, RefusalCode::BytesMismatch);
+    assert!(!e.message.is_empty());
+    // One non-zero bit is a real hash.
+    let mut one = [0u8; 32];
+    one[0] = 1;
+    s.bytes_hash = Fingerprint(one);
+    assert!(mint(&s, &receipt(), gui("ARM"), CHECKLIST, SESSION, now()).is_ok());
+}
+
+#[test]
+fn mint_refuses_zero_fingerprint() {
+    // Even when the receipt agrees: zero on both sides binds nothing.
+    let mut s = summary();
+    s.fingerprint = Fingerprint([0; 32]);
+    let mut r = receipt();
+    r.fingerprint = Fingerprint([0; 32]);
+    assert_eq!(mint(&s, &r, gui("ARM"), CHECKLIST, SESSION, now()).unwrap_err().code, RefusalCode::Stale);
+}
+
+#[test]
+fn mint_refuses_confirmation_before_the_frame() {
+    // Framed at t = 100 s; a confirmation stamped at 99 s was not given after seeing the frame.
+    let c = confirm_for_tests("ARM", vec![true; CHECKLIST], t(99.0));
+    assert_eq!(refused(receipt(), c, CHECKLIST, t(105.0)), Some(RefusalCode::ArmExpired));
+    let c = confirm_for_tests("ARM", vec![true; CHECKLIST], t(100.0));
+    assert!(mint(&summary(), &receipt(), c, CHECKLIST, SESSION, t(105.0)).is_ok());
+}
+
+#[test]
+fn mint_refuses_an_old_confirmation() {
+    let edge = now().plus(CONFIRM_MAX_AGE);
+    let c = confirm_for_tests("ARM", vec![true; CHECKLIST], now());
+    assert!(mint(&summary(), &receipt(), c, CHECKLIST, SESSION, edge).is_ok(), "exactly CONFIRM_MAX_AGE old is still good");
+    let c = confirm_for_tests("ARM", vec![true; CHECKLIST], now());
+    assert_eq!(refused(receipt(), c, CHECKLIST, edge.plus(Duration::from_nanos(1))), Some(RefusalCode::ArmExpired));
 }
 
 #[test]

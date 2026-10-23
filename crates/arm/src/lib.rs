@@ -13,7 +13,7 @@ compile_error!("openlaser-arm: the `test-witness` feature is test-only (dev-depe
 
 mod mint;
 
-pub use mint::{ARM_TEXT, TTY_NONCE_RANGE, mint, tty_nonce};
+pub use mint::{ARM_TEXT, CONFIRM_MAX_AGE, TTY_NONCE_RANGE, mint, tty_nonce};
 pub use openlaser_types::{ArmToken, EmissionSummary, FrameReceipt, MonoTime, Refusal, SessionId};
 
 /// Proof that a human confirmed. (no Clone) Constructors are clippy disallowed-methods outside one file each.

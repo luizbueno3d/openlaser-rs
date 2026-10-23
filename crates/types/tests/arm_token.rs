@@ -82,6 +82,25 @@ fn arm_token_check_order() {
     assert_eq!(code(t.check(&FP, &BYTES, &machine(), SessionId(9), late)), Some(RefusalCode::ArmSessionMismatch));
 }
 
+/// Fail closed (S22): an all-zero bytes hash, on the token or recomputed by the driver, matches nothing, even
+/// when both sides are zero (a stubbed or broken hasher).
+#[test]
+fn arm_token_check_zero_bytes() {
+    let zero = Fingerprint([0; 32]);
+    assert_eq!(code(token().check(&FP, &zero, &machine(), SESSION, minted_at())), Some(RefusalCode::BytesMismatch));
+    let zero_token = token_for_tests(FP, zero, machine(), SESSION, minted_at().plus(ARM_TOKEN_TTL), 1);
+    assert_eq!(code(zero_token.check(&FP, &zero, &machine(), SESSION, minted_at())), Some(RefusalCode::BytesMismatch));
+    assert_eq!(code(zero_token.check(&FP, &BYTES, &machine(), SESSION, minted_at())), Some(RefusalCode::BytesMismatch));
+}
+
+#[test]
+fn arm_token_check_zero_fingerprint() {
+    let zero = Fingerprint([0; 32]);
+    let zero_token = token_for_tests(zero, BYTES, machine(), SESSION, minted_at().plus(ARM_TOKEN_TTL), 1);
+    assert_eq!(code(zero_token.check(&zero, &BYTES, &machine(), SESSION, minted_at())), Some(RefusalCode::Stale));
+    assert_eq!(code(token().check(&zero, &BYTES, &machine(), SESSION, minted_at())), Some(RefusalCode::Stale));
+}
+
 #[test]
 fn arm_token_debug_never_shows_the_nonce() {
     let s = format!("{:?}", token());

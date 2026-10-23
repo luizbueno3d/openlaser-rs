@@ -7,6 +7,8 @@
 // The frame-origin variants are imported by name: xtask's rule-13 grep looks for the text `Origin::` + `Human`
 // (the engine's command origin) and would also match the frame receipt's enum path.
 use openlaser_types::FrameOrigin::{Agent as AgentFrame, Human as PersonFrame};
+use std::time::Duration;
+
 use openlaser_types::{ARM_TOKEN_TTL, ArmToken, EmissionSummary, FRAME_RECEIPT_MAX_AGE, FrameReceipt, MonoTime, Refusal, RefusalCode, SessionId};
 
 use crate::{ConfirmKind, HumanConfirm};
@@ -15,18 +17,20 @@ use crate::{ConfirmKind, HumanConfirm};
 pub const ARM_TEXT: &str = "ARM";
 /// The TTY challenge is a 6-digit decimal number in this range (no leading zero, so it reads unambiguously).
 pub const TTY_NONCE_RANGE: std::ops::RangeInclusive<u64> = 100_000..=999_999;
+/// A confirmation is minted at once (the click or the typed line calls `mint`); one older than this is refused
+/// (ArmExpired) so a stored confirmation can never arm later.
+pub const CONFIRM_MAX_AGE: Duration = Duration::from_secs(10);
 
 fn refuse(code: RefusalCode, message: impl Into<String>) -> Result<ArmToken, Refusal> {
     Err(Refusal::new(code, message))
 }
 
-/// `ARM <nonce>` at a TTY: exactly two words, `ARM` (any case) and the challenge's decimal digits.
+/// `ARM <nonce>` at a TTY: exactly two words separated by ASCII whitespace, `ARM` (any case) and the challenge's
+/// decimal digits exactly as printed (no sign, no leading zero, no other separator).
 fn tty_text_ok(typed: &str, nonce: u64) -> bool {
-    let mut words = typed.split_whitespace();
+    let mut words = typed.split(|c: char| c.is_ascii_whitespace()).filter(|w| !w.is_empty());
     match (words.next(), words.next(), words.next()) {
-        (Some(arm), Some(digits), None) => {
-            arm.eq_ignore_ascii_case(ARM_TEXT) && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) && digits.parse::<u64>().ok() == Some(nonce)
-        }
+        (Some(arm), Some(digits), None) => arm.eq_ignore_ascii_case(ARM_TEXT) && digits == nonce.to_string(),
         _ => false,
     }
 }
@@ -39,8 +43,11 @@ fn tty_text_ok(typed: &str, nonce: u64) -> bool {
 /// "ARM <nonce>" (TTY) (ArmTextMismatch); checklist_len >= 1 (ChecklistIncomplete; an empty checklist is refused,
 /// never vacuously true, at a TTY too) and, for GuiGesture, ticked.len() == checklist_len with every box ticked
 /// (ChecklistIncomplete). Tty: the caller printed the checklist before the challenge, and the typed `ARM <nonce>`
-/// line is the acknowledgement; `ticked` is ignored. A confirmation stamped later than `now` is refused
-/// (ArmExpired). The token's nonce is a fresh getrandom u64, not the TTY challenge.
+/// line is the acknowledgement; `ticked` is ignored. A confirmation stamped later than `now`, earlier than the
+/// frame receipt, or more than [`CONFIRM_MAX_AGE`] before `now` is refused (ArmExpired). Before all of these, an
+/// all-zero `summary.fingerprint` (Stale) or `summary.bytes_hash` (BytesMismatch) is refused: fail closed, a zero
+/// hash is a stub's and would bind the token to any job (S22). The token's nonce is a fresh getrandom u64, not the
+/// TTY challenge.
 pub fn mint(
     summary: &EmissionSummary,
     receipt: &FrameReceipt,
@@ -50,6 +57,16 @@ pub fn mint(
     now: MonoTime,
 ) -> Result<ArmToken, Refusal> {
     let HumanConfirm { kind, typed, ticked, at } = confirm;
+    // Fail closed (S22): an all-zero hash is a stub's or a broken hasher's, and a token bound to it binds nothing.
+    if summary.fingerprint.0 == [0u8; 32] {
+        return refuse(RefusalCode::Stale, "the job's fingerprint is unset (all zero), so it cannot be armed; plan the job again");
+    }
+    if summary.bytes_hash.0 == [0u8; 32] {
+        return refuse(
+            RefusalCode::BytesMismatch,
+            "the confirmation's bytes hash is unset (all zero), so the bytes the operator saw cannot be bound to the ARM; nothing was armed",
+        );
+    }
     if summary.fingerprint != receipt.fingerprint {
         return refuse(
             RefusalCode::Stale,
@@ -121,6 +138,16 @@ pub fn mint(
     }
     if at > now {
         return refuse(RefusalCode::ArmExpired, "the confirmation is stamped later than now; arm again");
+    }
+    if at < receipt.at {
+        return refuse(RefusalCode::ArmExpired, "the confirmation is stamped before the frame was traced; confirm after framing and arm again");
+    }
+    let confirm_age = now.saturating_since(at);
+    if confirm_age > CONFIRM_MAX_AGE {
+        return refuse(
+            RefusalCode::ArmExpired,
+            format!("the confirmation is {:.1} s old; it is good for {} s, so confirm and arm again", confirm_age.as_secs_f64(), CONFIRM_MAX_AGE.as_secs()),
+        );
     }
     let nonce = getrandom::u64().map_err(|e| {
         Refusal::new(
@@ -195,5 +222,10 @@ mod tests {
         assert!(!tty_text_ok("ARM +482913", 482_913));
         assert!(!tty_text_ok("ARMED 482913", 482_913));
         assert!(!tty_text_ok("ARM 99999999999999999999999", 482_913));
+        // Exactly the digits printed: no leading zero, no Unicode separator.
+        assert!(!tty_text_ok("ARM 0482913", 482_913));
+        assert!(!tty_text_ok("ARM\u{a0}482913", 482_913));
+        assert!(!tty_text_ok("ARM\u{2003}482913", 482_913));
+        assert!(tty_text_ok("ARM\t482913", 482_913));
     }
 }
