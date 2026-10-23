@@ -26,7 +26,7 @@ impl Token {
             return Err(Error::BadToken("control token must contain exactly 64 lowercase hexadecimal characters".to_owned()));
         }
         let mut bytes = [0_u8; 32];
-        for (index, pair) in s.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in s.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let Some(high) = pair.first().and_then(|byte| hex_nibble(*byte)) else {
                 return Err(Error::BadToken("control token contains a non-hexadecimal character".to_owned()));
             };

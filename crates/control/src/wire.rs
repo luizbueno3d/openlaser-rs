@@ -88,4 +88,12 @@ mod tests {
         assert_eq!(read_line_bounded(&mut input, 4).unwrap(), Some(b"ok".to_vec()));
         assert_eq!(read_line_bounded(&mut input, 4).unwrap(), None);
     }
+
+    proptest::proptest! {
+        #[test]
+        fn prop_control_reader_never_panics(data in proptest::collection::vec(proptest::num::u8::ANY, 0..4096), max in 0usize..1024) {
+            let mut input = Cursor::new(data);
+            let _ = read_line_bounded(&mut input, max);
+        }
+    }
 }
