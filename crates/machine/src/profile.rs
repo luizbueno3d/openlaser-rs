@@ -290,10 +290,7 @@ fn validate_galvo(g: &GalvoMachine, problems: &mut Vec<String>) {
     if !finite([lo, hi]) || !(1.0..=4000.0).contains(&lo) || !(1.0..=4000.0).contains(&hi) || lo >= hi {
         problems.push("laser frequency range must be ordered within 1..=4000 kHz".to_owned());
     }
-    if g.source.pulse_table_ns.is_empty()
-        || g.source.pulse_table_ns.iter().any(|v| *v == 0)
-        || g.source.pulse_table_ns.windows(2).any(|w| w.first() >= w.get(1))
-    {
+    if g.source.pulse_table_ns.is_empty() || g.source.pulse_table_ns.contains(&0) || g.source.pulse_table_ns.windows(2).any(|w| w.first() >= w.get(1)) {
         problems.push("pulse-width table must be non-empty, positive and strictly ascending".to_owned());
     }
     if !g.source.max_power_pct.is_finite() || !(0.0 < g.source.max_power_pct && g.source.max_power_pct <= 100.0) {

@@ -34,41 +34,23 @@ pub fn jpt_m7_200_sim() -> MachineProfile {
 /// co2-grbl-600x400, diode-grbl-400x400, plotter-grbl-a4 (OM machines.py, T2).
 pub fn om_gantries() -> Vec<MachineProfile> {
     vec![
-        gantry(
-            "co2-grbl-600x400",
-            "CO₂ cutter · GRBL 600 × 400 mm",
-            [600.0, 400.0],
-            500.0,
-            GantryTool::Laser { dynamic: false },
-            true,
-            100.0,
-            20.0,
-        ),
-        gantry(
-            "diode-grbl-400x400",
-            "Diode laser · GRBL 400 × 400 mm",
-            [400.0, 400.0],
-            250.0,
-            GantryTool::Laser { dynamic: true },
-            true,
-            50.0,
-            20.0,
-        ),
-        gantry(
-            "plotter-grbl-a4",
-            "Pen plotter · GRBL A4",
-            [210.0, 297.0],
-            150.0,
-            GantryTool::Pen,
-            false,
-            50.0,
-            100.0,
-        ),
+        gantry("co2-grbl-600x400", "CO₂ cutter · GRBL 600 × 400 mm", [600.0, 400.0], 500.0, GantryTool::Laser { dynamic: false }, true, 100.0, 20.0),
+        gantry("diode-grbl-400x400", "Diode laser · GRBL 400 × 400 mm", [400.0, 400.0], 250.0, GantryTool::Laser { dynamic: true }, true, 50.0, 20.0),
+        gantry("plotter-grbl-a4", "Pen plotter · GRBL A4", [210.0, 297.0], 150.0, GantryTool::Pen, false, 50.0, 100.0),
     ]
 }
 
 #[allow(clippy::too_many_arguments)]
-fn gantry(id: &str, name: &str, bed_mm: [f64; 2], max_speed: f64, tool: GantryTool, air_assist: bool, default_speed: f64, default_power: f64) -> MachineProfile {
+fn gantry(
+    id: &str,
+    name: &str,
+    bed_mm: [f64; 2],
+    max_speed: f64,
+    tool: GantryTool,
+    air_assist: bool,
+    default_speed: f64,
+    default_power: f64,
+) -> MachineProfile {
     let dynamic = matches!(tool, GantryTool::Laser { dynamic: true });
     MachineProfile {
         id: MachineId(id.to_owned()),
@@ -96,12 +78,7 @@ fn gantry(id: &str, name: &str, bed_mm: [f64; 2], max_speed: f64, tool: GantryTo
                 timings: None,
                 wobble: None,
             },
-            gantry: GantryParams {
-                speed: mm_per_s(default_speed),
-                power_max: percent(default_power),
-                power_min: lit!(Percent, 0.0),
-                constant_power: !dynamic,
-            },
+            gantry: GantryParams { speed: mm_per_s(default_speed), power_max: percent(default_power), power_min: lit!(Percent, 0.0), constant_power: !dynamic },
             fill: FillParams { interval: lit!(Mm, 0.1), angle: lit!(Deg, 0.0), angle_increment: lit!(Deg, 90.0), bidirectional: true, cross_hatch: false },
         },
         checklist: vec!["Machine area clear and material secured".to_owned()],
