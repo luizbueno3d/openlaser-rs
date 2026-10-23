@@ -1,7 +1,6 @@
 //! The LMC protocol, pure (SPEC §3.12, §5.2; owned by WP4). No I/O: [`LmcTransport`] is the only USB-shaped seam.
 //!
-//! WP0 stubs: the data types and the transport trait are complete; encoders return `Error::NotImplemented`,
-//! decoders return empty results.
+//! Protocol values and pure encoders; hardware I/O is isolated behind [`LmcTransport`].
 #![forbid(unsafe_code)]
 #![deny(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap)]
 
@@ -18,7 +17,7 @@ mod transport;
 pub mod py_compat;
 
 pub use decode::{Decoded, Listing, ListingLine, decode_packet, disassemble, disassemble_frame, emission_summary, emitted_segments};
-pub use encode::{LmcFrameJob, LmcJob, LmcList, encode_frame, encode_job};
+pub use encode::{LightingList, LmcFrameJob, LmcJob, LmcList, MarkingList, encode_frame, encode_job};
 pub use packet::{PACKET_LEN, Packet, SLOTS, Single, StatusWord, init_sequence, status_from_reply};
 pub use transport::{LmcTransport, XferError};
 
@@ -38,8 +37,24 @@ pub enum Error {
     Encode(#[from] openlaser_types::galvo::EncodeError),
     #[error("section has no galvo parameters")]
     NotGalvo,
+    #[error("motion speed encodes to zero units")]
+    ZeroSpeed,
+    #[error("a path must contain at least two points")]
+    ShortPath,
+    #[error("unsafe lighting port configuration or command")]
+    UnsafeLighting,
     #[error("empty job")]
     Empty,
+    #[error("pulse width was not validated")]
+    InvalidPulse,
+    #[error("port bit {0} does not fit the 16-bit LMC port word")]
+    InvalidPort(u8),
+    #[error("too many list commands")]
+    TooManyCommands,
+    #[error("encoded job does not match the supplied plan")]
+    SummaryMismatch,
+    #[error("packet: {0}")]
+    Packet(&'static str),
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
 }

@@ -1,6 +1,6 @@
 //! The simulator (SPEC §3.14; owned by WP4). Every device test runs here (SPEC §1.3 rule 1).
 //!
-//! WP0 stubs: the types are complete; the fake board refuses every transfer with `NotImplemented`.
+//! Fake-only device models for offline simulation and driver tests.
 #![forbid(unsafe_code)]
 
 mod fake;
