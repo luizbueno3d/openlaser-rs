@@ -250,6 +250,48 @@ fn safety_malformed_point_unrepresentable() {
 }
 
 #[test]
+fn safety_short_path_refused() {
+    // A forged plan: a lone point and an empty path. No planner makes them; no encoder has to cope with them.
+    let (m, p) = galvo_job(vec![square(0.0, 0.0, 5.0), Polyline(vec![[1.0, 1.0]]), Polyline(Vec::new())]);
+    let r = validate(&p, &m).unwrap_err();
+    assert!(r.refusals.iter().any(|x| x.code == RefusalCode::MalformedPoint && x.message.contains("2 path(s)")), "{:?}", r.refusals);
+    let (m, mut p) = galvo_job(vec![square(0.0, 0.0, 5.0)]);
+    p.frame.push(Polyline(vec![[0.0, 0.0]]));
+    assert!(frame_codes(&validate_frame(&p, &m, FrameSource::Job)).contains(&RefusalCode::MalformedPoint));
+}
+
+#[test]
+fn safety_zero_first_jump_timings_refused() {
+    // B3 defence in depth: a profile whose first-jump delay, settle or MO settle is 0 never reaches the galvo.
+    let m = jpt();
+    let mut q = default_words(&m);
+    q.timings.first_jump_settle_10us = 0;
+    q.timings.mo_settle_10us = 0;
+    let p = job(&m, vec![section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(q))]);
+    let r = validate(&p, &m).unwrap_err();
+    assert!(
+        r.refusals.iter().any(|x| x.code == RefusalCode::NotEncodable && x.message.contains("first-jump settle") && x.message.contains("MO settle")),
+        "{:?}",
+        r.refusals
+    );
+    let zeros: [fn(&mut GalvoCutQ); 2] = [|q| q.timings.jump_delay_long = (0, 0x8000), |q| q.timings.jump_speed_units = 0];
+    for zero in zeros {
+        let mut q = default_words(&m);
+        zero(&mut q);
+        let p = job(&m, vec![section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(q))]);
+        let r = validate(&p, &m).unwrap_err();
+        assert!(r.refusals.iter().any(|x| x.code == RefusalCode::NotEncodable && x.message.contains("encode(s) to 0")), "{:?}", r.refusals);
+    }
+    // The profile's own timings are not zero.
+    let p = job(&m, vec![section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(default_words(&m)))]);
+    let ok = match validate(&p, &m) {
+        Ok(_) => Vec::new(),
+        Err(e) => e.refusals,
+    };
+    assert!(!ok.iter().any(|x| x.message.contains("encode(s) to 0")), "{ok:?}");
+}
+
+#[test]
 fn safety_too_many_paths_refused() {
     let paths: Vec<Polyline> = (0..3001).map(|i| line(&[[0.0, f64::from(i) * 0.01 - 15.0], [1.0, f64::from(i) * 0.01 - 15.0]])).collect();
     let (m, p) = galvo_job(paths);

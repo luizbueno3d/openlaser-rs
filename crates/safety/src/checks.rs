@@ -18,20 +18,25 @@ pub const MAX_REPEATS: u16 = 999;
 pub const SPEED_NOTICE_REL: f64 = 0.01;
 
 type NoticeKey = (NoticeCode, String, Option<ObjectId>, Option<LayerKey>);
+/// A refusal's identity for de-duplication (`at` by bit pattern: `Refusal` holds f64, so it is not `Hash`).
+type RefusalKey = (RefusalCode, String, Option<ObjectId>, Option<LayerKey>, Option<[u64; 2]>);
 
 pub(crate) struct Out {
     pub refusals: Vec<Refusal>,
+    refused: HashSet<RefusalKey>,
     notices: Vec<NoticeKey>,
     seen: HashSet<NoticeKey>,
 }
 
 impl Out {
     pub fn new() -> Self {
-        Out { refusals: Vec::new(), notices: Vec::new(), seen: HashSet::new() }
+        Out { refusals: Vec::new(), refused: HashSet::new(), notices: Vec::new(), seen: HashSet::new() }
     }
 
+    /// Records a refusal once (a set, not a scan: a forged plan with many orphans must not stall the UI thread).
     pub fn refuse(&mut self, r: Refusal) {
-        if !self.refusals.contains(&r) {
+        let key = (r.code, r.message.clone(), r.object, r.layer, r.at.map(|[x, y]| [x.to_bits(), y.to_bits()]));
+        if self.refused.insert(key) {
             self.refusals.push(r);
         }
     }
@@ -143,6 +148,13 @@ pub(crate) fn check_paths(out: &mut Out, area: &Area, limits: &JobLimits, what: 
                 "{what} has a path of {longest} points; the limit is {} per path. Simplify the shape or raise the curve tolerance",
                 limits.max_points_per_path
             ),
+        )));
+    }
+    let short = paths.iter().filter(|p| p.len() < 2).count();
+    if short > 0 {
+        out.refuse(with_layer(Refusal::new(
+            RefusalCode::MalformedPoint,
+            format!("{what} has {short} path(s) with fewer than 2 points, which the planner never makes; plan again"),
         )));
     }
     let total: usize = paths.iter().map(Polyline::len).sum();
@@ -403,6 +415,27 @@ pub(crate) fn check_galvo_cut(out: &mut Out, s: &Section, q: &GalvoCutQ, g: &Gal
         );
     }
     check_pulse(out, s, q, src);
+    // Defence in depth (B3): the first jump of every list waits the long delay and the settle, and the MO settles
+    // before the first mark. A zero there (a bad profile) would slam the mirrors or fire before the MO is ready.
+    let t = &q.timings;
+    let zero: Vec<&str> = [
+        (t.jump_delay_long.0 == 0, "first-jump long delay"),
+        (t.first_jump_settle_10us == 0, "first-jump settle"),
+        (t.mo_settle_10us == 0, "MO settle"),
+        (t.jump_speed_units == 0, "jump speed"),
+    ]
+    .into_iter()
+    .filter_map(|(z, name)| z.then_some(name))
+    .collect();
+    if !zero.is_empty() {
+        out.refuse(
+            Refusal::new(
+                RefusalCode::NotEncodable,
+                format!("{what}: the machine's {} encode(s) to 0, which the galvo must never be sent; fix the machine profile", zero.join(", ")),
+            )
+            .layer(k),
+        );
+    }
     let f = speed_field_mm(g);
     if q.speed_units == 0 {
         let min = (100_000.0 * f / 65535.0).ceil() / 100.0;
@@ -493,5 +526,26 @@ pub(crate) fn check_repeats(out: &mut Out, plan: &JobPlan) {
         out.refuse(Refusal::new(RefusalCode::NothingToMark, "the repeat count is 0, so nothing would burn; set 1 to 999"));
     } else if plan.repeats > MAX_REPEATS {
         out.refuse(Refusal::new(RefusalCode::UnsupportedMode, format!("the repeat count {} is above {MAX_REPEATS}; lower it", plan.repeats)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refusals_are_deduplicated_by_value() {
+        let mut out = Out::new();
+        for _ in 0..3 {
+            out.refuse(Refusal::new(RefusalCode::OrphanObject, "x").object(ObjectId(1)));
+        }
+        out.refuse(Refusal::new(RefusalCode::OrphanObject, "x").object(ObjectId(2)));
+        out.refuse(Refusal::new(RefusalCode::OutsideWorkArea, "y").at([1.0, 2.0]));
+        out.refuse(Refusal::new(RefusalCode::OutsideWorkArea, "y").at([1.0, 2.0]));
+        out.refuse(Refusal::new(RefusalCode::OutsideWorkArea, "y").at([1.0, 3.0]));
+        out.refuse(Refusal::new(RefusalCode::OutsideWorkArea, "y").layer(LayerKey::Color(1)).at([1.0, 3.0]));
+        let got: Vec<(RefusalCode, Option<ObjectId>, Option<[f64; 2]>)> = out.refusals.iter().map(|r| (r.code, r.object, r.at)).collect();
+        assert_eq!(got.len(), 5, "{got:?}");
+        assert_eq!(got[0], (RefusalCode::OrphanObject, Some(ObjectId(1)), None), "first-seen order is kept");
     }
 }

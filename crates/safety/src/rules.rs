@@ -11,10 +11,13 @@ pub(crate) static RULES: &[(RefusalCode, &str)] = &[
     ),
     (
         RefusalCode::NotEncodable,
-        "Galvo: every point converts with mm_to_galvo on its axis (+F/2 exactly is refused, never clamped); every quantised word re-derives from its setting",
+        "Galvo: every point converts with mm_to_galvo on its axis (+F/2 exactly is refused, never clamped); every quantised word re-derives from its setting; the first-jump long delay, first-jump settle, MO settle and jump speed are never 0 (B3)",
     ),
     (RefusalCode::NonFinite, "No NaN or infinite coordinate anywhere, and no object whose geometry or transform is not finite"),
-    (RefusalCode::MalformedPoint, "Points have exactly two coordinates: refused at import (B9); a plan's Polyline cannot hold any other shape"),
+    (
+        RefusalCode::MalformedPoint,
+        "Points have exactly two coordinates: refused at import (B9); a plan's Polyline cannot hold any other shape. Every path of a section and of a frame has at least 2 points",
+    ),
     (RefusalCode::TooManyPaths, "At most JobLimits.max_paths (3000) paths in one layer-pass and in the frame"),
     (RefusalCode::TooManyPointsPerPath, "At most JobLimits.max_points_per_path (2000) points in one path"),
     (RefusalCode::TooManyPointsPerPass, "At most JobLimits.max_points_per_pass (20000) points in one layer-pass and in the frame"),
