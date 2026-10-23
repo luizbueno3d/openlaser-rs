@@ -22,7 +22,8 @@ use crate::quantise::{galvo_unencodable, gantry_unencodable, quantise_galvo, qua
 use crate::transform::{gantry_transform, machine_transform};
 use crate::{CutQ, Error, JobPlan, PlanFacts, PlanOptions, Section};
 
-/// Curve tolerances below this are raised to it: 1 µm is far below a fiber spot, and it bounds the point count.
+/// Curve tolerances below this (1 µm, far below a fiber spot; it bounds the point count), and tolerances that are
+/// not a number, are refused (an `unsupported` fact), never replaced or raised.
 pub const MIN_FLATTEN_TOL_MM: f64 = 1e-3;
 /// Curve tolerances above this (0.1 mm) are refused (an `unsupported` fact), never used: a coarse tolerance turns
 /// curves into chords that burn visibly off the design.
@@ -539,7 +540,10 @@ fn kind_name(k: DeviceKind) -> &'static str {
 }
 
 pub(crate) fn plan(project: &Project, machine: &MachineProfile, opts: &PlanOptions) -> Result<JobPlan, Error> {
-    let tol = if opts.flatten_tol_mm.is_finite() && opts.flatten_tol_mm > 0.0 { opts.flatten_tol_mm.max(MIN_FLATTEN_TOL_MM) } else { DEFAULT_FLATTEN_TOL_MM };
+    // A tolerance this build cannot use is refused by `finish` (an `unsupported` fact); the plan is still made, at
+    // the default, so every other fact is reported with it. It is never silently replaced or raised.
+    let requested = opts.flatten_tol_mm;
+    let tol = if requested.is_finite() && requested >= MIN_FLATTEN_TOL_MM { requested } else { DEFAULT_FLATTEN_TOL_MM };
     let mut cx = Ctx::new(project, machine, opts);
     let leaves = cx.leaves(tol);
     cx.finish(&leaves, tol)
@@ -563,6 +567,14 @@ impl Ctx<'_> {
             }
         }
 
+        let requested = self.opts.flatten_tol_mm;
+        if !(requested.is_finite() && requested >= MIN_FLATTEN_TOL_MM) {
+            let key = self.job_key();
+            self.unsupported(
+                key,
+                format!("the curve tolerance {requested} mm is not a number from {MIN_FLATTEN_TOL_MM} to {MAX_FLATTEN_TOL_MM} mm; set it in that range"),
+            );
+        }
         if tol > MAX_FLATTEN_TOL_MM {
             let key = self.job_key();
             self.unsupported(key, format!("the curve tolerance {tol} mm is above the {MAX_FLATTEN_TOL_MM} mm this build plans; lower it"));

@@ -8,7 +8,7 @@ Rust crate dependencies are not listed here: `Cargo.lock` pins them and `deny.to
 
 | Source | Licence | What | Where | Status |
 |---|---|---|---|---|
-| [meerk40t/galvoplotter](https://github.com/meerk40t/galvoplotter) 0.2.0 @ `fc35136` | MIT © 2023 MeerK40t | LMC protocol (opcodes, list commands, controller sequencing for `py-compat`) | `crates/lmc` (header `// Ported from meerk40t/galvoplotter@fc35136 <file>, MIT`) | WP4 |
+| [meerk40t/galvoplotter](https://github.com/meerk40t/galvoplotter) 0.2.0 @ `fc35136` | MIT © 2023 MeerK40t | LMC protocol (opcodes, list commands, controller sequencing for `py-compat`; the abort's dummy end-of-list packet); the unit-conversion formulas; the marking-session order and opcode values the driver sends | `crates/lmc` (header `// Ported from meerk40t/galvoplotter@fc35136 <file>, MIT`), `crates/types/src/galvo.rs` (formulas), `crates/driver/src/lmc_session.rs` and `lmc_ops.rs` (sequencing and opcode facts; no USB code) | WP4, WP5 |
 | MeerK40t `balormk/`, `extra/ezd.py` | MIT © 2021 meerk40t | cross-check only | — | reference |
 | OpenMopa prototype (`~/AI/OpenLaser/OpenMopa`, oracle v0 `6aed8ff`, v1 `5f7aa63`) | MIT © 2026 Luiz Bueno | geometry, hatch, DXF parser, safety rules, G-code, machine profiles, fake GRBL | `crates/geom`, `crates/import`, `crates/gcode`, `crates/plan`, `crates/safety`, `crates/machine`, `crates/lmc-sim` (MIT notice kept per file) | WP1–WP4 |
 | Python-oracle golden fixtures | MIT © 2026 Luiz Bueno (generated from the two sources above) | `tests/golden/` | `tests/golden/README.md`, `manifest.json` | in repo |

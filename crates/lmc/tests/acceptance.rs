@@ -83,6 +83,54 @@ fn points_outside_the_rated_work_area_are_refused() {
     }
 }
 
+/// WP4 N-b: an asymmetric work area. The encoder judges x against the x bounds and y against the y bounds, and so
+/// does the summary's decode (a job encoded for a wider area is refused against this one exactly where it leaves it).
+#[test]
+fn an_asymmetric_work_area_is_judged_per_axis_by_encoder_and_summary() {
+    let mut m = machine();
+    m.work_area = FieldRect { min: [-50.0, -20.0], max: [80.0, 30.0] };
+    let mut wide = machine();
+    wide.work_area = FieldRect { min: [-110.0, -110.0], max: [110.0, 110.0] };
+    let inside = [[70.0, 0.0], [-40.0, 0.0], [0.0, 25.0], [0.0, -15.0], [80.0, 30.0], [-50.0, -20.0]];
+    let outside = [[0.0, 70.0], [0.0, -40.0], [85.0, 0.0], [-55.0, 0.0], [0.0, 31.0], [0.0, -21.0]];
+    for (p, ok) in inside.iter().map(|p| (*p, true)).chain(outside.iter().map(|p| (*p, false))) {
+        let path = Polyline(vec![[0.0, 0.0], p]);
+        let job = encode(vec![path.clone()], &m);
+        assert_eq!(job.is_ok(), ok, "encode {p:?}");
+        if !ok {
+            assert!(matches!(job, Err(Error::NotEncodable { x, y }) if [x, y] == p), "the refusal names {p:?}");
+        }
+        let (emit, plan) = plans(vec![section(vec![path])], 1);
+        let job = encode_job(&emit, &wide).unwrap();
+        assert_eq!(emission_summary(&job, &m, &plan, &[]).is_ok(), ok, "summary {p:?}");
+    }
+}
+
+/// WP4 N-c: a list spliced in from another job with the same fingerprint, layer, pass and words (other geometry) is
+/// refused: the summary compares each list's bytes with what its section encodes to.
+#[test]
+fn summary_refuses_a_list_spliced_from_another_job() {
+    let (m, emit, plan) = setup();
+    let job = encode_job(&emit, &m).unwrap();
+    assert!(emission_summary(&job, &m, &plan, &[]).is_ok());
+    let moved = Polyline(box10().0.iter().map(|p| [p[0] + 20.0, p[1]]).collect());
+    let (other_emit, other_plan) = plans(vec![section(vec![moved])], 1);
+    let other = encode_job(&other_emit, &m).unwrap();
+    assert_eq!((other.fingerprint, other_plan.sections[0].cut.clone()), (job.fingerprint, plan.sections[0].cut.clone()), "same fingerprint and words");
+    assert_ne!(other.lists[0].packets, job.lists[0].packets);
+    let mut spliced = job.clone();
+    spliced.lists[0] = other.lists[0].clone();
+    assert!(mismatch(emission_summary(&spliced, &m, &plan, &[])));
+    // The other way round as well, and a list with one coordinate word changed.
+    assert!(mismatch(emission_summary(&job, &m, &other_plan, &[])));
+    let nudged = edit_list(&job, |c| {
+        let i = c.iter().rposition(|w| w[0] == op::LIST_MARK_TO).unwrap();
+        c[i][1] += 1;
+        c[i][4] = distance_word((c[i - 1][1], c[i - 1][2]), (c[i][1], c[i][2]));
+    });
+    assert!(mismatch(emission_summary(&nudged, &m, &plan, &[])));
+}
+
 /// The encodable square |v| < F/2 holds even where a (malformed) work area is wider: -F/2 has a word (0) but is
 /// refused, and so is everything outside the square.
 #[test]
@@ -186,8 +234,11 @@ fn duplicate_points_are_elided_and_dist_follows_the_last_sent_point() {
     assert_eq!(marks(&job), [(34152, 31384, 2768), (34152, 34152, 2768), (31384, 34152, 2768)]);
     // The second path starts where the first ended: GP sends no jump between them.
     assert_eq!(decoded(&job).iter().filter(|d| matches!(d, Decoded::JumpTo { .. })).count(), 1);
-    // A section whose every mark is below one galvo unit is refused, never sent with MO open and nothing to mark.
-    assert!(matches!(encode(vec![Polyline(vec![[0.0, 0.0], [0.001, 0.0]])], &machine()), Err(Error::Empty)));
+    // A section whose every mark is below one galvo unit is refused, never sent with MO open and nothing to mark, and
+    // the error says why and where (WP4 N-f: it was the bare "empty job").
+    let e = encode(vec![Polyline(vec![[0.0, 0.0], [0.001, 0.0]])], &machine()).unwrap_err();
+    assert!(matches!(e, Error::SubUnitSection { layer: LayerKey::Color(0), pass: 1 }), "{e:?}");
+    assert!(e.to_string().contains("shorter than one galvo unit"), "{e}");
 }
 
 #[test]

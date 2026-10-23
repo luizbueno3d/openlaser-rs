@@ -36,7 +36,7 @@ use openlaser_types::galvo::{CENTER, distance_word, units_to_speed};
 use openlaser_types::{Bounds, DeviceKind, EmissionSummary, EmittedSegment, GalvoWords, Notice, PassRow};
 
 use crate::Error;
-use crate::encode::{LmcFrameJob, LmcJob, MARK_CURRENT_MAX, job_postlude, job_prelude};
+use crate::encode::{LmcFrameJob, LmcJob, MARK_CURRENT_MAX, encode_section, job_postlude, job_prelude};
 use crate::op;
 use crate::packet::{Packet, Single};
 
@@ -368,13 +368,16 @@ fn unused_zero(w: &[u16; 6], first_unused: usize) -> Result<(), Error> {
     if w.iter().skip(first_unused).all(|v| *v == 0) { Ok(()) } else { Err(Error::SummaryMismatch) }
 }
 
-/// A decoded galvo position lies in the rated work area, within one galvo unit of quantisation.
+/// A decoded galvo position is a word the encoder can produce for a point of the rated work area (x against the x
+/// bounds, y against the y bounds). The encoder accepts min ≤ v ≤ max and rounds `32768 + v × 65535 / F`, which is
+/// monotone in v, so its words lie exactly between the words of the two edges: no slack (WP4 N-e; it allowed a
+/// whole galvo unit beyond each edge). NaN bounds or field admit nothing.
 fn in_work_area(to: (u16, u16), m: &GalvoMachine) -> bool {
     let [fx, fy] = m.field_f();
+    let edge = |v: f64, f: f64| (32768.0 + v * (65535.0 / f)).round_ties_even();
     let inside = |w: u16, f: f64, lo: f64, hi: f64| {
-        let v = point_mm(w, f);
-        let unit = f / 65535.0;
-        v >= lo - unit && v <= hi + unit
+        let w = f64::from(w);
+        w >= edge(lo, f) && w <= edge(hi, f)
     };
     let [x_min, y_min] = m.work_area.min;
     let [x_max, y_max] = m.work_area.max;
@@ -502,8 +505,9 @@ pub fn emitted_segments(job: &LmcJob, m: &GalvoMachine) -> Vec<EmittedSegment> {
 
 /// The ARM confirmation (S22). Every number is decoded from `job`'s bytes with the strict list grammar; `plan`
 /// supplies only names and notices, and must be the plan this job was encoded from: same fingerprint, machine,
-/// device, repeats, one list per section with the section's layer and pass, and the section's quantised words equal
-/// to the decoded ones. The prelude and postlude must be the standard ones. Anything else is `SummaryMismatch`.
+/// device, repeats, one list per section with the section's layer and pass, the section's quantised words equal
+/// to the decoded ones, and each list's packets byte for byte what its section encodes to. The prelude and
+/// postlude must be the standard ones. Anything else is `SummaryMismatch`.
 ///
 /// `crash_bound` (PLAN §3.5): the emission the board can still run after a host crash is what the run-ahead window
 /// lets it hold: at most `run_ahead.max_packets` (never < 1) consecutive packets of one list. Each packet counts at
@@ -542,6 +546,11 @@ pub fn emission_summary(job: &LmcJob, m: &GalvoMachine, plan: &JobPlan, notices:
             jump_speed_units: q.timings.jump_speed_units,
         };
         if d.words != planned {
+            return Err(Error::SummaryMismatch);
+        }
+        // WP4 N-c: the list's bytes are exactly what its section encodes to. Same fingerprint, layer, pass and words
+        // are not enough: a list spliced in from another job (other geometry, same settings) is refused here.
+        if encode_section(section, m, laser).ok().as_deref() != Some(list.packets.as_slice()) {
             return Err(Error::SummaryMismatch);
         }
         let est: Vec<Duration> = packet_times(&list.packets).into_iter().zip(&list.packet_est).map(|(t, e)| t.max(*e)).collect();
@@ -585,4 +594,89 @@ pub fn emission_summary(job: &LmcJob, m: &GalvoMachine, plan: &JobPlan, notices:
         negate: m.cal.negate,
         swap_xy: m.cal.swap_xy,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use super::*;
+    use openlaser_machine::{FieldRect, Kinematics, jpt_m7_200_sim};
+
+    fn machine() -> GalvoMachine {
+        let Kinematics::Galvo(m) = jpt_m7_200_sim().kind else { panic!("the sim profile is a galvo") };
+        m
+    }
+
+    /// The encoder's word for `v` mm on a field of `f` mm.
+    fn word(v: f64, f: f64) -> u16 {
+        openlaser_types::galvo::mm_to_galvo(v, f).unwrap()
+    }
+
+    #[test]
+    fn in_work_area_admits_exactly_the_encoder_words_of_each_axis() {
+        // WP4 N-e (no galvo unit of slack past an edge) and N-b (x is judged against the x bounds, y against the y
+        // bounds) on an asymmetric work area.
+        let mut m = machine();
+        m.work_area = FieldRect { min: [-50.0, -20.0], max: [80.0, 30.0] };
+        let [fx, fy] = m.field_f();
+        let c = CENTER;
+        for (x, y) in [(-50.0, 0.0), (80.0, 0.0), (0.0, -20.0), (0.0, 30.0), (79.999, 29.999)] {
+            assert!(in_work_area((word(x, fx), word(y, fy)), &m), "({x}, {y}) is inside");
+        }
+        // One word past each edge is refused (it decodes to within a galvo unit of the edge).
+        assert!(!in_work_area((word(80.0, fx) + 1, c), &m));
+        assert!(!in_work_area((word(-50.0, fx) - 1, c), &m));
+        assert!(!in_work_area((c, word(30.0, fy) + 1), &m));
+        assert!(!in_work_area((c, word(-20.0, fy) - 1), &m));
+        // The axes are not swapped: 70 mm is inside on x, outside on y; -40 mm likewise.
+        assert!(in_work_area((word(70.0, fx), c), &m));
+        assert!(!in_work_area((c, word(70.0, fy)), &m));
+        assert!(in_work_area((word(-40.0, fx), c), &m));
+        assert!(!in_work_area((c, word(-40.0, fy)), &m));
+        // A NaN bound admits nothing.
+        m.work_area.max[0] = f64::NAN;
+        assert!(!in_work_area((c, c), &m));
+    }
+
+    /// A marking list in the encoder's grammar with the given words, marking a 10 mm line.
+    fn list(jump_speed: u16, mark_current: u16, q_period: u16, mark_speed: u16) -> Vec<Packet> {
+        let f = machine().field_f()[0];
+        let (a, b) = ((word(-5.0, f), word(0.0, f)), (word(5.0, f), word(0.0, f)));
+        let words = [
+            [op::LIST_READY_MARK, 0, 0, 0, 0, 0],
+            [op::LIST_DELAY_TIME, 800, 0, 0, 0, 0],
+            [op::LIST_WRITE_PORT, 1, 0, 0, 0, 0],
+            [op::LIST_JUMP_SPEED, jump_speed, 0, 0, 0, 0],
+            [op::LIST_FIBER_YLPM_PULSE_WIDTH, 200, 0, 0, 0, 0],
+            [op::LIST_MARK_CURRENT, mark_current, 0, 0, 0, 0],
+            [op::LIST_Q_SWITCH_PERIOD, q_period, 0, 0, 0, 0],
+            [op::LIST_MARK_SPEED, mark_speed, 0, 0, 0, 0],
+            [op::LIST_LASER_ON_DELAY, 100, 0, 0, 0, 0],
+            [op::LIST_LASER_OFF_DELAY, 100, 0, 0, 0, 0],
+            [op::LIST_POLYGON_DELAY, 100, 0, 0, 0, 0],
+            [op::LIST_JUMP_DELAY, 200, 0, 0, 0, 0],
+            [op::LIST_JUMP_TO, a.0, a.1, 0, distance_word((CENTER, CENTER), a), 0],
+            [op::LIST_DELAY_TIME, 100, 0, 0, 0, 0],
+            [op::LIST_MARK_TO, b.0, b.1, 0, distance_word(a, b), 0],
+            [op::LIST_END_OF_LIST, 0, 0, 0, 0, 0],
+        ];
+        vec![Packet::from_words(&words).unwrap()]
+    }
+
+    #[test]
+    fn decode_refuses_words_the_board_must_never_get() {
+        // WP4 N-a: even when the plan carries the same words (so the word comparison passes), a list with a 0 mark
+        // speed, 0 jump speed, 0 Q-switch period or a mark current above 4095 is no summary.
+        let m = machine();
+        assert!(decode_marking_list(&list(830, 2048, 667, 276), &m).is_ok(), "the reference list decodes");
+        for (what, l) in [
+            ("mark speed 0", list(830, 2048, 667, 0)),
+            ("jump speed 0", list(0, 2048, 667, 276)),
+            ("Q-switch period 0", list(830, 2048, 0, 276)),
+            ("mark current 4096", list(830, 4096, 667, 276)),
+        ] {
+            assert!(matches!(decode_marking_list(&l, &m), Err(Error::SummaryMismatch)), "{what}");
+        }
+    }
 }

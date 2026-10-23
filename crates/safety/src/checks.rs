@@ -480,6 +480,22 @@ pub(crate) fn check_galvo_cut(out: &mut Out, s: &Section, q: &GalvoCutQ, g: &Gal
             .layer(k),
         );
     }
+    // A jump or polygon delay is a wait at a jump's end or a corner: a negative one (sign word 0x8000 with a
+    // magnitude) means nothing to the galvo. Zero keeps GP's 0x8000 sign word (D10) and is sent as it is; any other
+    // sign word is malformed.
+    for (name, (magnitude, sign)) in [("jump delay", t.jump_delay_short), ("polygon delay", t.polygon)] {
+        if (sign == 0x8000 && magnitude != 0) || (sign != 0 && sign != 0x8000) {
+            out.refuse(
+                Refusal::new(
+                    RefusalCode::NotEncodable,
+                    format!(
+                        "{what}: the machine's {name} is sent with sign word {sign:#06x} and magnitude {magnitude} (negative); a jump or polygon delay must be zero or positive, fix the machine profile"
+                    ),
+                )
+                .layer(k),
+            );
+        }
+    }
     let f = speed_field_mm(g);
     if q.speed_units == 0 {
         let min = (100_000.0 * f / 65535.0).ceil() / 100.0;
@@ -501,6 +517,35 @@ pub(crate) fn check_galvo_cut(out: &mut Out, s: &Section, q: &GalvoCutQ, g: &Gal
             Refusal::new(
                 RefusalCode::SpeedAboveMax,
                 format!("{what}: speed {} mm/s is above the machine maximum {max} mm/s; lower the speed", q.requested_speed.get()),
+            )
+            .layer(k),
+        );
+    }
+    // `speed_to_units` caps the word at 65535 units (F × 1000 mm/s): a speed above that would run capped, so it is
+    // refused, never sent as the cap (the jump speed likewise, from the profile).
+    let top = galvo::units_to_speed(u16::MAX, f);
+    if q.speed_units == u16::MAX && q.requested_speed.get() > top {
+        out.refuse(
+            Refusal::new(
+                RefusalCode::SpeedAboveMax,
+                format!(
+                    "{what}: speed {} mm/s is above the fastest the galvo speed word can carry at the {} mm field ({top:.2} mm/s); lower the speed",
+                    q.requested_speed.get(),
+                    mm(f)
+                ),
+            )
+            .layer(k),
+        );
+    }
+    if t.jump_speed_units == u16::MAX && g.jump_speed.get() > top {
+        out.refuse(
+            Refusal::new(
+                RefusalCode::NotEncodable,
+                format!(
+                    "{what}: the machine's jump speed {} mm/s is above the fastest the galvo speed word can carry at the {} mm field ({top:.2} mm/s); fix the machine profile",
+                    g.jump_speed.get(),
+                    mm(f)
+                ),
             )
             .layer(k),
         );

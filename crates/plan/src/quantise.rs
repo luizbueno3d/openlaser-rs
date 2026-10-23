@@ -63,9 +63,7 @@ pub fn resolve_timings(m: &GalvoMachine) -> Result<ResolvedTimings, QuantiseErro
     let jump_delay_long = galvo::delay_word(m.first_jump.delay_us).map_err(|e| qerr("first-jump delay", e))?;
     let jump_speed_units = galvo::speed_to_units(m.jump_speed.get(), speed_field_mm(m)).map_err(|e| qerr("jump speed", e))?;
     let mo_settle_10us = ten_us_word(m.mo_settle.get())
-        .ok_or_else(|| QuantiseError {
-            what: "MO settle", message: format!("{} µs is not a whole, non-negative 16-bit count of 10 µs", m.mo_settle.get())
-        })?;
+        .ok_or_else(|| QuantiseError { what: "MO settle", message: format!("{} µs is not a non-negative 16-bit count of 10 µs", m.mo_settle.get()) })?;
     Ok(ResolvedTimings {
         laser_on,
         laser_off,
@@ -78,9 +76,10 @@ pub fn resolve_timings(m: &GalvoMachine) -> Result<ResolvedTimings, QuantiseErro
     })
 }
 
-/// `trunc(us / 10)` as a 16-bit `DelayTime` count; `None` if negative, non-finite or too large.
+/// `ceil(us / 10)` as a 16-bit `DelayTime` count; `None` if negative, non-finite or too large. Rounded up, so the MO
+/// settle the board waits is never shorter than the profile's (truncating sent up to 10 µs less).
 fn ten_us_word(us: f64) -> Option<u16> {
-    let v = (us / 10.0).trunc();
+    let v = (us / 10.0).ceil();
     // Checked whole and in 0..=65535 just above, so the conversion is exact (never a saturating cast).
     (v.is_finite() && (0.0..=f64::from(u16::MAX)).contains(&v)).then_some(v as u16)
 }
@@ -166,9 +165,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ten_us_word_truncates_and_refuses() {
+    fn ten_us_word_rounds_up_and_refuses() {
+        // Never shorter than the profile's settle: 8001 µs waits 8010 µs, not 8000.
         assert_eq!(ten_us_word(8000.0), Some(800));
-        assert_eq!(ten_us_word(8009.9), Some(800));
+        assert_eq!(ten_us_word(8001.0), Some(801));
+        assert_eq!(ten_us_word(8009.9), Some(801));
+        assert_eq!(ten_us_word(0.5), Some(1));
         assert_eq!(ten_us_word(0.0), Some(0));
         assert_eq!(ten_us_word(655_350.0), Some(65535));
         assert_eq!(ten_us_word(655_360.0), None);

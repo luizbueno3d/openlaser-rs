@@ -11,7 +11,7 @@ pub(crate) static RULES: &[(RefusalCode, &str)] = &[
     ),
     (
         RefusalCode::NotEncodable,
-        "Galvo: every point converts with mm_to_galvo on its axis (+F/2 exactly is refused, never clamped); every quantised word re-derives from its setting; the first-jump long delay, first-jump settle, MO settle and jump speed are never 0, and the first-jump long delay is never sent with a negative (0x8000) sign (B3)",
+        "Galvo: every point converts with mm_to_galvo on its axis (+F/2 exactly is refused, never clamped); every quantised word re-derives from its setting; the first-jump long delay, first-jump settle, MO settle and jump speed are never 0, the first-jump long delay is never sent with a negative (0x8000) sign (B3), the jump and polygon delays are never negative, and the jump speed never exceeds the 65535-unit word",
     ),
     (RefusalCode::NonFinite, "No NaN or infinite coordinate anywhere, and no object whose geometry or transform is not finite"),
     (
@@ -34,14 +34,17 @@ pub(crate) static RULES: &[(RefusalCode, &str)] = &[
     ),
     (RefusalCode::QPulseUnsupported, "A galvo layer on a source whose Q-pulse control is off (this build drives MOPA sources only)"),
     (RefusalCode::SpeedZeroUnits, "Galvo mark speed encodes to at least 1 speed unit (B7: below 3.6115 mm/s at F = 236.68 it would be 0)"),
-    (RefusalCode::SpeedAboveMax, "Speed is at most the machine's max_speed, galvo and gantry alike (never capped)"),
+    (
+        RefusalCode::SpeedAboveMax,
+        "Speed is at most the machine's max_speed, galvo and gantry alike, and a galvo speed is at most what the 65535-unit speed word carries (F × 1000 mm/s); never capped",
+    ),
     // Objects and layers (from the plan's facts: nothing is dropped silently).
     (RefusalCode::OrphanObject, "Every object is on a layer that exists (B8)"),
     (RefusalCode::HiddenLayerWithOutput, "No layer is hidden while its Output is on (B6: it would burn without being seen)"),
     (RefusalCode::FillWithoutHatch, "A Fill layer with shapes yields at least one hatch segment; open shapes on it become numbered notices"),
     (
         RefusalCode::UnsupportedMode,
-        "Nothing the build cannot do: Offset Fill, image burning, per-layer timings, wobble, Hull frames, out-of-range passes or repeats; no section on a tool layer",
+        "Nothing the build cannot do: Offset Fill, image burning, per-layer timings, wobble, Hull frames, out-of-range passes or repeats, a curve tolerance outside 0.001..=0.1 mm; no section on a tool layer",
     ),
     (RefusalCode::NothingToMark, "At least one section burns something, the repeat count is at least 1, and a frame has something to trace"),
     (RefusalCode::WrongDeviceKind, "The plan, every section's cut settings and the project's device hint match the machine's kind"),

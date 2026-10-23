@@ -45,6 +45,11 @@ pub enum Error {
     UnsafeLighting,
     #[error("empty job")]
     Empty,
+    /// WP4 N-f: every path of the layer-pass is shorter than one galvo unit, so its list would open MO and mark nothing.
+    #[error(
+        "{layer} pass {pass}: every path is shorter than one galvo unit (the galvo cannot move that little), so nothing would be marked; enlarge the artwork or delete it"
+    )]
+    SubUnitSection { layer: LayerKey, pass: u16 },
     #[error("pulse width was not validated")]
     InvalidPulse,
     #[error("port bit {0} does not fit the 16-bit LMC port word")]

@@ -239,6 +239,7 @@ fn lmc_refusal(e: &openlaser_lmc::Error) -> Refusal {
         openlaser_lmc::Error::NotEncodable { x, y } => Refusal::new(RefusalCode::NotEncodable, format!("point ({x}, {y}) mm is not encodable")).at([*x, *y]),
         openlaser_lmc::Error::NotGalvo => Refusal::new(RefusalCode::WrongDeviceKind, "a section has no galvo parameters"),
         openlaser_lmc::Error::Empty => Refusal::new(RefusalCode::NothingToMark, "the job is empty"),
+        openlaser_lmc::Error::SubUnitSection { layer, .. } => Refusal::new(RefusalCode::NothingToMark, e.to_string()).layer(*layer),
         other => Refusal::new(RefusalCode::NotEncodable, format!("LMC encoder: {other}")),
     }
 }

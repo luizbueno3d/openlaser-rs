@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use blake3::Hasher;
 use openlaser_machine::GalvoMachine;
-use openlaser_plan::CutQ;
+use openlaser_plan::{CutQ, Section};
 use openlaser_safety::{EmitPlan, FramePlan};
 use openlaser_types::galvo::{CENTER, EncodeError, delay_word, distance_word, mm_to_galvo, speed_to_units};
 use openlaser_types::{DeviceKind, Fingerprint, FrameSource, FrameStyle, LayerKey, MachineId};
@@ -207,71 +207,7 @@ pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
     let laser = bit(m.ports.laser_bit)?;
     let mut lists = Vec::with_capacity(emit.sections().len());
     for section in emit.sections() {
-        let CutQ::Galvo(q) = &section.cut else { return Err(Error::NotGalvo) };
-        // The encoder reads only the planner's words (SPEC §5.2 rule 4) and refuses any it cannot send as-is.
-        let pulse = q.pulse.word().ok_or(Error::InvalidPulse)?;
-        if !m.source.pulse_table_ns.contains(&pulse) {
-            return Err(Error::InvalidPulse);
-        }
-        if q.mark_current > MARK_CURRENT_MAX {
-            return Err(EncodeError::OutOfRange { what: "mark current", value: f64::from(q.mark_current) }.into());
-        }
-        if q.q_period == 0 {
-            return Err(EncodeError::OutOfRange { what: "q-switch period", value: 0.0 }.into());
-        }
-        let mut list = MarkingList::default();
-        list.push(op::LIST_READY_MARK, [0; 5]);
-        list.push(op::LIST_DELAY_TIME, [q.timings.mo_settle_10us, 0, 0, 0, 0]);
-        list.push(op::LIST_WRITE_PORT, [laser, 0, 0, 0, 0]);
-        list.push(op::LIST_JUMP_SPEED, [nonzero_speed(q.timings.jump_speed_units)?, 0, 0, 0, 0]);
-        list.push(op::LIST_FIBER_YLPM_PULSE_WIDTH, [pulse, 0, 0, 0, 0]);
-        list.push(op::LIST_MARK_CURRENT, [q.mark_current, 0, 0, 0, 0]);
-        list.push(op::LIST_Q_SWITCH_PERIOD, [q.q_period, 0, 0, 0, 0]);
-        list.push(op::LIST_MARK_SPEED, [nonzero_speed(q.speed_units)?, 0, 0, 0, 0]);
-        list.push(op::LIST_LASER_ON_DELAY, delay_params(q.timings.laser_on));
-        list.push(op::LIST_LASER_OFF_DELAY, delay_params(q.timings.laser_off));
-        list.push(op::LIST_POLYGON_DELAY, delay_params(q.timings.polygon));
-
-        let mut last = (CENTER, CENTER);
-        let mut wrote_path = false;
-        let mut marks = 0usize;
-        let mut jump_delay = None;
-        for path in &section.paths {
-            // A path needs a start and at least one more point; a shorter one is refused, never skipped (N5).
-            let [first, rest @ ..] = path.0.as_slice() else { return Err(Error::ShortPath) };
-            if rest.is_empty() {
-                return Err(Error::ShortPath);
-            }
-            let start = encode_point(*first, m)?;
-            let delay = if wrote_path { q.timings.jump_delay_short } else { q.timings.jump_delay_long };
-            if !wrote_path || start != last {
-                if jump_delay != Some(delay) {
-                    list.push(op::LIST_JUMP_DELAY, delay_params(delay));
-                    jump_delay = Some(delay);
-                }
-                list.push(op::LIST_JUMP_TO, motion(start, last));
-                last = start;
-            }
-            if !wrote_path {
-                list.push(op::LIST_DELAY_TIME, [q.timings.first_jump_settle_10us, 0, 0, 0, 0]);
-            }
-            for p in rest {
-                let to = encode_point(*p, m)?;
-                // GP elides a motion to the point the galvo is already at (it would mark nothing).
-                if to == last {
-                    continue;
-                }
-                list.push(op::LIST_MARK_TO, motion(to, last));
-                marks += 1;
-                last = to;
-            }
-            wrote_path = true;
-        }
-        // A section whose every path is below one galvo unit would send MO open with nothing to mark.
-        if !wrote_path || marks == 0 {
-            return Err(Error::Empty);
-        }
-        let packets = list.finish()?;
+        let packets = encode_section(section, m, laser)?;
         let packet_est = packet_estimates(section.estimate, &packets);
         lists.push(LmcList { layer: section.layer, pass: section.pass, packets, packet_est });
     }
@@ -284,6 +220,80 @@ pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
         fingerprint: *emit.fingerprint(),
         machine: emit.machine().clone(),
     })
+}
+
+/// One layer-pass as its marking list's packets (SPEC §5.2): the parameter block, the explicit first jump with the
+/// long delay and the settle, then the section's paths. `emission_summary` re-encodes each section with it and
+/// refuses a list whose bytes differ (a list spliced in from another job with the same words is not this plan's).
+pub(crate) fn encode_section(section: &Section, m: &GalvoMachine, laser: u16) -> Result<Vec<Packet>, Error> {
+    let CutQ::Galvo(q) = &section.cut else { return Err(Error::NotGalvo) };
+    // The encoder reads only the planner's words (SPEC §5.2 rule 4) and refuses any it cannot send as-is.
+    let pulse = q.pulse.word().ok_or(Error::InvalidPulse)?;
+    if !m.source.pulse_table_ns.contains(&pulse) {
+        return Err(Error::InvalidPulse);
+    }
+    if q.mark_current > MARK_CURRENT_MAX {
+        return Err(EncodeError::OutOfRange { what: "mark current", value: f64::from(q.mark_current) }.into());
+    }
+    if q.q_period == 0 {
+        return Err(EncodeError::OutOfRange { what: "q-switch period", value: 0.0 }.into());
+    }
+    let mut list = MarkingList::default();
+    list.push(op::LIST_READY_MARK, [0; 5]);
+    list.push(op::LIST_DELAY_TIME, [q.timings.mo_settle_10us, 0, 0, 0, 0]);
+    list.push(op::LIST_WRITE_PORT, [laser, 0, 0, 0, 0]);
+    list.push(op::LIST_JUMP_SPEED, [nonzero_speed(q.timings.jump_speed_units)?, 0, 0, 0, 0]);
+    list.push(op::LIST_FIBER_YLPM_PULSE_WIDTH, [pulse, 0, 0, 0, 0]);
+    list.push(op::LIST_MARK_CURRENT, [q.mark_current, 0, 0, 0, 0]);
+    list.push(op::LIST_Q_SWITCH_PERIOD, [q.q_period, 0, 0, 0, 0]);
+    list.push(op::LIST_MARK_SPEED, [nonzero_speed(q.speed_units)?, 0, 0, 0, 0]);
+    list.push(op::LIST_LASER_ON_DELAY, delay_params(q.timings.laser_on));
+    list.push(op::LIST_LASER_OFF_DELAY, delay_params(q.timings.laser_off));
+    list.push(op::LIST_POLYGON_DELAY, delay_params(q.timings.polygon));
+
+    let mut last = (CENTER, CENTER);
+    let mut wrote_path = false;
+    let mut marks = 0usize;
+    let mut jump_delay = None;
+    for path in &section.paths {
+        // A path needs a start and at least one more point; a shorter one is refused, never skipped (N5).
+        let [first, rest @ ..] = path.0.as_slice() else { return Err(Error::ShortPath) };
+        if rest.is_empty() {
+            return Err(Error::ShortPath);
+        }
+        let start = encode_point(*first, m)?;
+        let delay = if wrote_path { q.timings.jump_delay_short } else { q.timings.jump_delay_long };
+        if !wrote_path || start != last {
+            if jump_delay != Some(delay) {
+                list.push(op::LIST_JUMP_DELAY, delay_params(delay));
+                jump_delay = Some(delay);
+            }
+            list.push(op::LIST_JUMP_TO, motion(start, last));
+            last = start;
+        }
+        if !wrote_path {
+            list.push(op::LIST_DELAY_TIME, [q.timings.first_jump_settle_10us, 0, 0, 0, 0]);
+        }
+        for p in rest {
+            let to = encode_point(*p, m)?;
+            // GP elides a motion to the point the galvo is already at (it would mark nothing).
+            if to == last {
+                continue;
+            }
+            list.push(op::LIST_MARK_TO, motion(to, last));
+            marks += 1;
+            last = to;
+        }
+        wrote_path = true;
+    }
+    if !wrote_path {
+        return Err(Error::Empty);
+    }
+    // A section whose every path is below one galvo unit would send MO open with nothing to mark (WP4 N-f).
+    if marks == 0 {
+        return Err(Error::SubUnitSection { layer: section.layer, pass: section.pass });
+    }
+    list.finish()
 }
 
 pub fn encode_frame(frame: &FramePlan, m: &GalvoMachine) -> Result<LmcFrameJob, Error> {

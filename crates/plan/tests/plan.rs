@@ -335,6 +335,25 @@ fn plan_frames_hidden_output_layers() {
     }
 }
 
+/// A curve tolerance this build cannot use (not a number, zero, negative or below 1 µm) is refused, never replaced by
+/// the default or raised to the minimum: the plan records an `unsupported` fact, which `safety` refuses.
+#[test]
+fn plan_refuses_an_unusable_curve_tolerance() {
+    let m = machine();
+    let p = project(&m, vec![rect(1, C0, 0.0, 0.0, 10.0, 10.0)]);
+    let tolerance_facts = |tol: f64| {
+        let plan = make_plan(&p, &m, &PlanOptions { flatten_tol_mm: tol, ..opts(FrameStyle::Contour) }).unwrap();
+        plan.facts.unsupported.iter().filter(|(_, why)| why.contains("curve tolerance")).count()
+    };
+    for tol in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.01, 1e-6, 0.000_999] {
+        assert_eq!(tolerance_facts(tol), 1, "tolerance {tol} mm");
+    }
+    for tol in [0.001, 0.01, 0.1] {
+        assert_eq!(tolerance_facts(tol), 0, "tolerance {tol} mm is usable");
+    }
+    assert_eq!(tolerance_facts(0.2), 1, "above the 0.1 mm this build plans");
+}
+
 #[test]
 fn plan_selected_only_and_tool_frame() {
     let m = machine();

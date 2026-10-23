@@ -66,7 +66,7 @@ fn words(m: &MachineProfile, speed: f64, power: f64, khz: u32, pulse: PulseDecis
             jump_delay_short: delay(t.jump_delay_short_us),
             jump_delay_long: delay(g.first_jump.delay_us),
             jump_speed_units: units(g.jump_speed.get(), f),
-            mo_settle_10us: (g.mo_settle.get() / 10.0).trunc() as u16,
+            mo_settle_10us: (g.mo_settle.get() / 10.0).ceil() as u16,
             first_jump_settle_10us: g.first_jump.settle_10us,
         },
     }
@@ -386,6 +386,68 @@ fn safety_negative_first_jump_delay_refused() {
         Err(e) => e.refusals,
     };
     assert!(!ok.iter().any(|x| x.message.contains("sign word")), "{ok:?}");
+}
+
+#[test]
+fn safety_negative_jump_and_polygon_delays_refused() {
+    // A negative jump delay or polygon delay encodes as (magnitude, 0x8000); the words match the profile, so only the
+    // sign rule refuses them. Zero keeps the 0x8000 sign word (D10) and is accepted.
+    for (jump, polygon, refused) in [(-8.0, 100.0, "jump delay"), (8.0, -100.0, "polygon delay")] {
+        let mut m = jpt();
+        if let Kinematics::Galvo(g) = &mut m.kind {
+            g.timings.jump_delay_short_us = jump;
+            g.timings.polygon_us = polygon;
+        }
+        let p = job(&m, vec![section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(default_words(&m)))]);
+        let r = validate(&p, &m).unwrap_err();
+        assert!(
+            r.refusals.iter().any(|x| x.code == RefusalCode::NotEncodable && x.message.contains(refused) && x.message.contains("negative")),
+            "{:?}",
+            r.refusals
+        );
+    }
+    let mut m = jpt();
+    if let Kinematics::Galvo(g) = &mut m.kind {
+        g.timings.jump_delay_short_us = 0.0;
+        g.timings.polygon_us = 0.0;
+    }
+    let q = default_words(&m);
+    assert_eq!((q.timings.jump_delay_short, q.timings.polygon), ((0, 0x8000), (0, 0x8000)));
+    let p = job(&m, vec![section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(q))]);
+    assert_eq!(codes(&validate(&p, &m)), Vec::<RefusalCode>::new(), "zero delays keep GP's sign word");
+}
+
+#[test]
+fn safety_speed_above_the_word_cap_refused() {
+    // `speed_to_units` caps at 65535 units (F × 1000 mm/s). On a 50 mm field that is 50 000 mm/s: a 60 000 mm/s request
+    // (under the machine's maximum) would run capped with only a `speed_quantized` notice; it is refused instead, and
+    // so is a jump speed above the cap.
+    let mut m = jpt();
+    if let Kinematics::Galvo(g) = &mut m.kind {
+        g.encoding_field = openlaser_types::Mm::new(50.0).unwrap();
+        g.cal.scale = [1.0, 1.0];
+        g.max_speed = MmPerS::new(100_000.0).unwrap();
+    }
+    let q = words(&m, 60_000.0, 30.0, 30, PulseDecision::Exact(200));
+    assert_eq!(q.speed_units, u16::MAX);
+    let p = job(&m, vec![section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(q))]);
+    let r = validate(&p, &m).unwrap_err();
+    assert!(r.refusals.iter().any(|x| x.code == RefusalCode::SpeedAboveMax && x.message.contains("speed word")), "{:?}", r.refusals);
+    // The cap's own speed (65535 units × 50 mm × 1000 / 65535 = 50 000 mm/s) is not above it.
+    let q = words(&m, 50_000.0, 30.0, 30, PulseDecision::Exact(200));
+    let p = job(&m, vec![section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(q))]);
+    let ok = match validate(&p, &m) {
+        Ok(_) => Vec::new(),
+        Err(e) => e.refusals,
+    };
+    assert!(!ok.iter().any(|x| x.message.contains("speed word")), "{ok:?}");
+    // The jump speed: 60 000 mm/s on the same field.
+    if let Kinematics::Galvo(g) = &mut m.kind {
+        g.jump_speed = MmPerS::new(60_000.0).unwrap();
+    }
+    let p = job(&m, vec![section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(default_words(&m)))]);
+    let r = validate(&p, &m).unwrap_err();
+    assert!(r.refusals.iter().any(|x| x.code == RefusalCode::NotEncodable && x.message.contains("jump speed")), "{:?}", r.refusals);
 }
 
 #[test]
