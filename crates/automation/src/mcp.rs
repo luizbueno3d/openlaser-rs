@@ -5,8 +5,9 @@
 //! Stop is never queued (§1.3 rule 5, §3.18). The reader thread never takes the backend mutex: the mode and the
 //! stop handle are taken once before the loop, `initialize`, `tools/list` and the catalogues are answered from the
 //! table, and every call that needs the backend runs on a worker thread behind the mutex. A `stop` (also through
-//! `tool_call` or `control_call machine.stop`) is handled on the reader thread itself, through the dedicated stop
-//! connection, before its arguments are even checked: it trips first and reports bad arguments afterwards.
+//! `tool_call` or `control_call machine.stop`, however nested) is handled on the reader thread itself, through the
+//! dedicated stop connection, before its arguments are even checked: it trips first and reports bad arguments
+//! afterwards. A stop sent as a notification (no `id`) trips too; it just gets no answer.
 //!
 //! Panics are contained: a worker's panic is a tool error, the poisoned mutex is recovered for the next call, and a
 //! panic while handling a line on the reader thread is a `-32603` reply; the session goes on.
@@ -111,14 +112,34 @@ fn tool_error_result(message: &str) -> Value {
     json!({"content":[{"type":"text","text":message}],"isError":true})
 }
 
-/// `stop` reached any way: the stop tool, `tool_call {name:"stop"}`, or `control_call {method:"machine.stop"}`.
+/// How deep `tool_call` wrappers are followed looking for a stop (JSON nesting is bounded anyway; this bounds the
+/// recursion on the reader thread).
+const STOP_NESTING_MAX: usize = 8;
+
+/// `stop` reached any way: the stop tool, `control_call {method:"machine.stop"}`, or either of them wrapped in
+/// `tool_call` (also `tool_call` → `control_call` → `machine.stop`, and `tool_call` inside `tool_call`, which would
+/// otherwise be refused: a stop is never refused for its wrapping).
 fn stop_arguments(name: &str, args: &Value) -> Option<Value> {
+    stop_arguments_within(name, args, STOP_NESTING_MAX)
+}
+
+fn stop_arguments_within(name: &str, args: &Value, depth: usize) -> Option<Value> {
     match name {
         "stop" => Some(args.clone()),
-        "tool_call" if args.get("name").and_then(Value::as_str) == Some("stop") => Some(args.get("arguments").cloned().unwrap_or_else(|| json!({}))),
         "control_call" if args.get("method").and_then(Value::as_str) == Some("machine.stop") => Some(args.get("params").cloned().unwrap_or_else(|| json!({}))),
+        "tool_call" if depth > 0 => {
+            let inner = args.get("name").and_then(Value::as_str)?;
+            let inner_args = args.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            stop_arguments_within(inner, &inner_args, depth.saturating_sub(1))
+        }
         _ => None,
     }
+}
+
+/// The stop arguments of a `tools/call` that is a stop, however it is wrapped.
+fn stop_call_arguments(params: &Value) -> Option<Value> {
+    let name = params.get("name").and_then(Value::as_str)?;
+    stop_arguments(name, &params.get("arguments").cloned().unwrap_or_else(|| json!({})))
 }
 
 impl Server {
@@ -171,18 +192,25 @@ impl Server {
         if let Some(info) = meta.and_then(|m| m.get(META_CLIENT)) {
             self.set_client(info);
         }
-        // Notifications (initialized, cancelled, …) need no answer.
-        let Some(id) = id else { return };
+        // Notifications (initialized, cancelled, …) need no answer; a stop sent as one still trips.
+        let Some(id) = id else {
+            if method == "tools/call"
+                && let Some(stop_args) = stop_call_arguments(&params)
+            {
+                let _unanswered = self.stop_call(&Value::Null, &stop_args, modern);
+            }
+            return;
+        };
         let response = match method {
             "initialize" => self.initialize(&id, &params),
             "ping" => self.result(&id, json!({}), modern),
             "tools/list" => self.tools_list(&id, modern),
             "tools/call" => {
-                let name = params.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
-                let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-                if let Some(stop_args) = stop_arguments(&name, &args) {
+                if let Some(stop_args) = stop_call_arguments(&params) {
                     self.stop_call(&id, &stop_args, modern)
                 } else {
+                    let name = params.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
+                    let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
                     return self.spawn(calls, id, move |server, id| server.tool_call(id, &name, args, modern));
                 }
             }
@@ -679,7 +707,153 @@ mod tests {
         gui.server.shutdown();
     }
 
-    /// B4: the GUI's report reaches the agent unchanged; a reply without `latched` is an error, never `latched:true`.
+    /// Keeps `n` silent sockets open on `port`, reopening each as soon as the server closes it (X1's flood).
+    struct Flood {
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        reopened: Arc<std::sync::atomic::AtomicUsize>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Flood {
+        fn start(port: u16, n: usize) -> Self {
+            use std::io::Read;
+            use std::sync::atomic::Ordering;
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let reopened = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (flag, count) = (Arc::clone(&stop), Arc::clone(&reopened));
+            let thread = std::thread::spawn(move || {
+                let open = || {
+                    let stream = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).ok()?;
+                    stream.set_nonblocking(true).ok()?;
+                    Some(stream)
+                };
+                let mut sockets: Vec<Option<std::net::TcpStream>> = (0..n).map(|_| open()).collect();
+                let mut byte = [0_u8; 1];
+                while !flag.load(Ordering::Acquire) {
+                    for socket in &mut sockets {
+                        let closed = match socket {
+                            Some(stream) => match stream.read(&mut byte) {
+                                Ok(_) => true,
+                                Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+                            },
+                            None => true,
+                        };
+                        if closed {
+                            *socket = open();
+                            count.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    std::thread::yield_now();
+                }
+            });
+            Flood { stop, reopened, thread: Some(thread) }
+        }
+
+        fn finish(mut self) -> usize {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
+            self.reopened.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    /// An authenticated raw client of the GUI (another agent holding one of its 16 slots).
+    fn agent(gui: &Gui, name: &str) -> std::net::TcpStream {
+        use std::io::BufRead;
+        let BridgeTarget::Addr { addr, token: TokenSource::Inline(token) } = &gui.target else { panic!("addr target") };
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        writeln!(stream, "{}", json!({"id": 0, "method": "auth", "params": {"token": token, "client": {"name": name, "version": "1"}}})).unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
+        let reply: Reply = serde_json::from_str(&line).unwrap();
+        assert!(reply.ok, "{reply:?}");
+        stream
+    }
+
+    /// X1 regression: 16 authenticated agents fill every agent slot and ≥ 40 silent sockets (reopened as they close)
+    /// flood the GUI; a stop through the real MCP read loop and bridge still reaches FastStop within the delivery
+    /// budget, round after round, and again once the agents leave (then on a full, kept-warm connection).
+    #[test]
+    fn stop_reaches_fast_stop_through_a_silent_socket_flood() {
+        let gui = gui();
+        let agents: Vec<std::net::TcpStream> = (0..budgets::MAX_CONNECTIONS).map(|index| agent(&gui, &format!("agent-{index}"))).collect();
+        assert_eq!(gui.server.clients().len(), budgets::MAX_CONNECTIONS);
+        let flood = Flood::start(gui.server.port(), 48);
+        // Whatever the server's design, the flood now holds every socket it is allowed (with 16 agents, that is at
+        // least the stop reserve): wait for that, then let it churn a little.
+        let until = Instant::now() + Duration::from_secs(5);
+        while gui.server.live_connections() < budgets::MAX_CONNECTIONS + budgets::STOP_ONLY_RESERVE && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(gui.server.live_connections() >= budgets::MAX_CONNECTIONS + budgets::STOP_ONLY_RESERVE, "the flood did not start");
+        std::thread::sleep(Duration::from_millis(200));
+        let mut mcp = Harness::start(bridge(&gui.target), false);
+        let budget = crate::bridge::STOP_DELIVERY_BUDGET;
+        let mut id = 0_u64;
+        let mut round = |mcp: &mut Harness, expected: usize| {
+            id += 1;
+            let started = Instant::now();
+            mcp.call(id, "stop", json!({}));
+            let response = mcp.response(json!(id), budget + Duration::from_millis(500)).expect("no answer to the stop");
+            assert!(!is_error(&response), "round {id}: {response}");
+            assert!(started.elapsed() < budget, "round {id}: {:?}", started.elapsed());
+            assert_eq!(stops(&gui).len(), expected, "round {id}");
+        };
+        for expected in 1..=3 {
+            round(&mut mcp, expected);
+        }
+        drop(agents);
+        for expected in 4..=6 {
+            round(&mut mcp, expected);
+        }
+        assert!(flood.finish() > 0, "the flood never churned");
+        mcp.finish().unwrap();
+        gui.server.shutdown();
+    }
+
+    /// `tool_call` → `control_call` → `machine.stop` (and `tool_call` → `tool_call` → `stop`) take the stop fast path
+    /// on the reader thread: they trip while a parked call holds the backend.
+    #[test]
+    fn nested_stop_takes_the_fast_path() {
+        let gui = gui();
+        let mut mcp = Harness::start(bridge(&gui.target), false);
+        mcp.call(1, "doc_inspect", json!({}));
+        let parked = gui.requests.recv_timeout(Duration::from_secs(5)).expect("the call reached the GUI");
+        assert!(parked.dispatch.try_dispatch());
+        mcp.call(2, "tool_call", json!({"name":"control_call","arguments":{"method":"machine.stop","params":{"machine":"m3"}}}));
+        let nested = mcp.response(json!(2), STOP_WITHIN).expect("the nested stop waited behind the in-flight call");
+        assert!(!is_error(&nested), "{nested}");
+        mcp.call(3, "tool_call", json!({"name":"tool_call","arguments":{"name":"stop","arguments":{"machine":"m4"}}}));
+        let twice = mcp.response(json!(3), STOP_WITHIN).expect("the doubly wrapped stop waited behind the in-flight call");
+        assert!(!is_error(&twice), "{twice}");
+        assert_eq!(stops(&gui), [Some("m3".to_owned()), Some("m4".to_owned())]);
+        parked.reply.send(Reply { id: parked.request.id, ok: true, result: Some(json!({"name":"card"})), error: None }).unwrap();
+        assert!(mcp.response(json!(1), Duration::from_secs(5)).is_some());
+        // Not a stop, however wrapped: still the usual refusal.
+        mcp.call(4, "tool_call", json!({"name":"tool_call","arguments":{"name":"session_list"}}));
+        assert_eq!(mcp.response(json!(4), Duration::from_secs(5)).unwrap().pointer("/error/code"), Some(&json!(-32602)));
+        mcp.finish().unwrap();
+        gui.server.shutdown();
+    }
+
+    /// A stop sent as a notification (no `id`) trips, and gets no answer; the session goes on.
+    #[test]
+    fn stop_notification_still_trips() {
+        let gui = gui();
+        let mut mcp = Harness::start(bridge(&gui.target), false);
+        mcp.send(json!({"jsonrpc":"2.0","method":"tools/call","params":{"name":"stop","arguments":{}}}));
+        mcp.send(json!({"jsonrpc":"2.0","method":"tools/call","params":{"name":"tool_call","arguments":{"name":"control_call","arguments":{"method":"machine.stop","params":{"machine":"m5"}}}}}));
+        mcp.send(json!({"jsonrpc":"2.0","id":1,"method":"ping"}));
+        assert!(mcp.response(json!(1), STOP_WITHIN).is_some());
+        assert_eq!(stops(&gui), [None, Some("m5".to_owned())]);
+        assert!(mcp.response(Value::Null, Duration::from_millis(200)).is_none(), "a notification was answered");
+        mcp.finish().unwrap();
+        gui.server.shutdown();
+    }
+
+    /// B4: the GUI's report reaches the agent unchanged; a reply without `latched`, or with `latched:false`, is an
+    /// error, never a success.
     #[test]
     fn stop_report_is_never_fabricated() {
         let gui = gui_on(0, |_| json!({"confirmed": false, "elapsedMs": 7}));
@@ -688,6 +862,13 @@ mod tests {
         let response = mcp.response(json!(1), STOP_WITHIN).unwrap();
         assert!(is_error(&response), "{response}");
         assert!(!text(&response).contains("\"latched\":true"), "{response}");
+        mcp.finish().unwrap();
+        gui.server.shutdown();
+        let gui = gui_on(0, |_| json!({"latched": false, "confirmed": false, "elapsedMs": 0, "stopped": [], "note": "no machine is connected"}));
+        let mut mcp = Harness::start(bridge(&gui.target), false);
+        mcp.call(1, "stop", json!({}));
+        let response = mcp.response(json!(1), STOP_WITHIN).unwrap();
+        assert!(is_error(&response) && text(&response).starts_with("not_connected:"), "latched:false was a success: {response}");
         mcp.finish().unwrap();
         gui.server.shutdown();
         let gui = gui_on(0, |m| json!({"latched": true, "confirmed": true, "elapsedMs": 9, "machine": m}));

@@ -7,20 +7,27 @@
 //!   `RECONNECT_IDLE` is replaced before the next call (the GUI drops idle sockets at 30 s), writes are never resent,
 //!   vouched reads are retried once on a fresh connection.
 //! - `StopHandle`: a connection of its own, used only for `machine.stop`, created on first use (so a GUI that starts
-//!   after the MCP server is still reachable). A stop is idempotent, so on a dead or dropped connection it reconnects
-//!   and resends, with short timeouts, until a reply arrives or `STOP_DELIVERY_BUDGET` runs out; the GUI's report is
-//!   passed through unchanged, never fabricated.
+//!   after the MCP server is still reachable) and then kept warm with a transport-level `ping` every
+//!   `STOP_KEEPALIVE`, so a stop rarely needs a new slot. A stop is idempotent, so on a dead, dropped or refused
+//!   connection it reconnects and resends, with short timeouts and a short backoff, until a reply arrives or
+//!   `STOP_DELIVERY_BUDGET` runs out; the GUI's report is passed through unchanged, never fabricated, and a report
+//!   that latched nothing is an error.
+//!
+//! The server answers a connection it will not serve (no slot left, a thread it cannot start) with an id-null error
+//! and closes it; that reply is surfaced as such ("connection limit reached"), never as a lost auth.
 //!
 //! Before any token is sent to a GUI found through the discovery file, the connection's `hello` must report the pid
 //! the file names.
 
 use std::io::{BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use openlaser_control::{
     budgets, discovery,
+    server::PING_METHOD,
     wire::{self, Reply, Request},
 };
 use serde_json::{Value, json};
@@ -37,6 +44,13 @@ pub(crate) const STOP_DELIVERY_BUDGET: Duration = Duration::from_secs(2);
 const STOP_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 /// The GUI waits ≤ STOP_WAIT for the driver's StopReport before it answers.
 const STOP_REPLY_WAIT: Duration = Duration::from_millis(1000);
+/// The pause after a failed stop attempt, doubled each time up to `STOP_RETRY_MAX_PAUSE`; attempts go on until
+/// `STOP_DELIVERY_BUDGET` runs out, however many that takes.
+const STOP_RETRY_FIRST_PAUSE: Duration = Duration::from_millis(5);
+const STOP_RETRY_MAX_PAUSE: Duration = Duration::from_millis(50);
+/// How often the keep-alive looks at the stop connection; it pings one idle for half of this, so the GUI never sees
+/// it idle for more than 1.5× this (well under `RECONNECT_IDLE` and the GUI's 30 s idle timeout).
+const STOP_KEEPALIVE: Duration = Duration::from_secs(10);
 
 /// The message for `--bridge auto` / `--bridge-file` without a usable GUI (AUT B10.2).
 pub(crate) const NOT_RUNNING: &str = "OpenLaser is not running with Automation › Allow Agent Connections on";
@@ -102,12 +116,20 @@ impl Link {
             discovery::check_hello(&mut stream, &mut reader, pid).map_err(|e| Failure::NotSent(format!("{NOT_RUNNING} ({e})")))?;
         }
         let info = self.info();
-        let mut conn = Conn { stream, reader, last_used: Instant::now(), next_id: 1 };
+        let mut conn = Conn { stream, reader, last_used: Instant::now(), next_id: 1, stop_only: false };
         let auth = json!({"token": endpoint.token, "client": {"name": info.name, "version": info.version}});
         match conn.exchange("auth", auth, Instant::now() + setup_timeout) {
-            Ok(_) => Ok(conn),
+            Ok(result) => {
+                // Every agent slot taken: the GUI serves this connection for one `machine.stop` and then closes it.
+                conn.stop_only = result.get("stopOnly").and_then(Value::as_bool).unwrap_or(false);
+                Ok(conn)
+            }
             // Nothing but the auth frame went out.
-            Err(Failure::Transport(e) | Failure::TimedOut(e)) => Err(Failure::NotSent(format!("authentication did not complete ({e})"))),
+            Err(Failure::Transport(e) | Failure::TimedOut(e) | Failure::Oversized(e)) => {
+                Err(Failure::NotSent(format!("authentication did not complete ({e})")))
+            }
+            // `Refused` (the server's id-null "connection limit reached") and `Definite` ("authentication failed")
+            // keep the server's own words.
             Err(other) => Err(other),
         }
     }
@@ -125,10 +147,16 @@ fn sanitized(info: &ClientInfo) -> ClientInfo {
 enum Failure {
     /// Nothing was sent (could not connect or authenticate).
     NotSent(String),
+    /// The server refused the connection itself with an id-null error ("connection limit reached", "server busy")
+    /// and closed it: nothing was run.
+    Refused(String),
     /// Sent, reply lost: the outcome is uncertain.
     Transport(String),
     /// Sent, no reply in time.
     TimedOut(String),
+    /// The reply was over the budget: the operation may have completed, and the connection, left inside that
+    /// line, is dropped.
+    Oversized(String),
     /// The app answered with an error, or the request was refused before it was sent.
     Definite(String),
 }
@@ -137,15 +165,16 @@ impl Failure {
     fn into_error(self, read: bool) -> BridgeError {
         match self {
             Failure::NotSent(e) => BridgeError::NotSent(e),
+            Failure::Refused(e) => BridgeError::NotSent(format!("OpenLaser refused the connection: {e}")),
             Failure::Transport(e) => BridgeError::Transport(e),
             Failure::TimedOut(_) => BridgeError::TimedOut { read },
-            Failure::Definite(e) => BridgeError::Definite(e),
+            Failure::Oversized(e) | Failure::Definite(e) => BridgeError::Definite(e),
         }
     }
 
     fn describe(&self) -> &str {
         match self {
-            Failure::NotSent(e) | Failure::Transport(e) | Failure::TimedOut(e) | Failure::Definite(e) => e,
+            Failure::NotSent(e) | Failure::Refused(e) | Failure::Transport(e) | Failure::TimedOut(e) | Failure::Oversized(e) | Failure::Definite(e) => e,
         }
     }
 }
@@ -156,6 +185,8 @@ struct Conn {
     reader: BufReader<TcpStream>,
     last_used: Instant,
     next_id: u64,
+    /// The GUI gave it a stop-only slot: one `machine.stop`, then it closes it.
+    stop_only: bool,
 }
 
 impl Conn {
@@ -182,7 +213,9 @@ impl Conn {
                 Ok(Some(bytes)) => bytes,
                 Ok(None) => return Err(Failure::Transport("connection closed by the app".to_owned())),
                 Err(openlaser_control::Error::LineTooLong { max }) => {
-                    return Err(Failure::Definite(format!("bridge response exceeds {max} bytes; operation may have completed; inspect state before retrying")));
+                    return Err(Failure::Oversized(format!(
+                        "bridge response exceeds {max} bytes; operation may have completed; inspect state before retrying"
+                    )));
                 }
                 Err(openlaser_control::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) => {
                     return Err(Failure::TimedOut(format!("no reply to `{method}`")));
@@ -190,6 +223,11 @@ impl Conn {
                 Err(e) => return Err(Failure::Transport(e.to_string())),
             };
             let Ok(reply) = serde_json::from_slice::<Reply>(&bytes) else { continue };
+            if reply.id.is_null() && !reply.ok {
+                // We never send id null, so this is no stale reply: the server is refusing this connection
+                // ("connection limit reached", …) and closing it.
+                return Err(Failure::Refused(reply.error.unwrap_or_else(|| "the connection was refused".to_owned())));
+            }
             if reply.id != json!(id) {
                 continue; // a stale reply from an earlier request
             }
@@ -239,7 +277,7 @@ impl BridgeClient {
     /// Read-only calls are retried once, on a fresh connection, after a failure that applied nothing.
     pub fn call_read(&mut self, method: &str, params: Value) -> Result<Value, BridgeError> {
         match self.attempt(method, params.clone()) {
-            Err(Failure::NotSent(_) | Failure::Transport(_)) => self.attempt(method, params).map_err(|f| f.into_error(true)),
+            Err(Failure::NotSent(_) | Failure::Refused(_) | Failure::Transport(_)) => self.attempt(method, params).map_err(|f| f.into_error(true)),
             other => other.map_err(|f| f.into_error(true)),
         }
     }
@@ -265,8 +303,21 @@ impl BridgeClient {
 
     fn attempt(&mut self, method: &str, params: Value) -> Result<Value, Failure> {
         let deadline = Instant::now() + self.timeout;
-        let outcome = self.ensure()?.exchange(method, params, deadline);
+        let conn = self.ensure()?;
+        let stop_only = conn.stop_only;
+        if stop_only && method != "machine.stop" {
+            // Every agent slot is taken: this connection would serve one stop and refuse anything else. Close it and
+            // say so; the call is not sent (the next call tries for a slot again).
+            self.conn = None;
+            return Err(Failure::Refused(format!(
+                "connection limit reached (all {} agent connections are in use; only a stop is accepted)",
+                budgets::MAX_CONNECTIONS
+            )));
+        }
+        let outcome = conn.exchange(method, params, deadline);
         match &outcome {
+            // The GUI closes a stop-only connection after its one exchange.
+            _ if stop_only => self.conn = None,
             Ok(_) | Err(Failure::Definite(_)) => {
                 if let Some(conn) = self.conn.as_mut() {
                     conn.last_used = Instant::now();
@@ -278,7 +329,8 @@ impl BridgeClient {
     }
 }
 
-/// The dedicated stop connection: never shared with tool calls, opened on first use, reconnected on failure.
+/// The dedicated stop connection: never shared with tool calls, opened on first use, kept warm, reconnected on
+/// failure.
 #[derive(Clone)]
 pub struct StopHandle {
     inner: Arc<StopInner>,
@@ -287,11 +339,20 @@ pub struct StopHandle {
 struct StopInner {
     link: Arc<Link>,
     conn: Mutex<Option<Conn>>,
+    /// The keep-alive's period; it pings a connection idle for half of it.
+    keepalive: Duration,
+    /// A connection idle this long may already be closed by the GUI: a stop opens a fresh one instead.
+    reconnect_idle: Duration,
+    keeper_started: AtomicBool,
 }
 
 impl StopHandle {
     pub(crate) fn lazy(link: Arc<Link>) -> Self {
-        StopHandle { inner: Arc::new(StopInner { link, conn: Mutex::new(None) }) }
+        Self::tuned(link, STOP_KEEPALIVE, budgets::RECONNECT_IDLE)
+    }
+
+    fn tuned(link: Arc<Link>, keepalive: Duration, reconnect_idle: Duration) -> Self {
+        StopHandle { inner: Arc::new(StopInner { link, conn: Mutex::new(None), keepalive, reconnect_idle, keeper_started: AtomicBool::new(false) }) }
     }
 
     /// The agent's identity (from MCP `initialize`) for the stop connection's auth frame.
@@ -302,56 +363,97 @@ impl StopHandle {
     fn connect_now(&self) -> Result<(), BridgeError> {
         let endpoint = self.inner.link.endpoint()?;
         let conn = self.inner.link.open(&endpoint, STOP_CONNECT_TIMEOUT, STOP_CONNECT_TIMEOUT).map_err(|f| f.into_error(false))?;
-        *self.inner.conn.lock().unwrap_or_else(PoisonError::into_inner) = Some(conn);
+        // A stop-only connection is good for one stop only: the GUI is reachable, but do not keep it.
+        if !conn.stop_only {
+            *self.inner.conn.lock().unwrap_or_else(PoisonError::into_inner) = Some(conn);
+            self.keep_warm();
+        }
         Ok(())
     }
 
+    /// Starts the keep-alive once a connection worth keeping exists. It holds only a weak reference, so it ends
+    /// within one period of the last handle being dropped.
+    fn keep_warm(&self) {
+        if self.inner.keeper_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let inner = Arc::downgrade(&self.inner);
+        let every = self.inner.keepalive;
+        let spawned = std::thread::Builder::new().name("openlaser-stop-keepalive".to_owned()).spawn(move || keepalive(&inner, every));
+        if spawned.is_err() {
+            // Try again with the next connection; until then a stop reconnects when it has to.
+            self.inner.keeper_started.store(false, Ordering::Release);
+        }
+    }
+
     /// Sends `machine.stop` (every machine when `machine` is None) and returns the GUI's report unchanged. A dead,
-    /// idle-dropped or never-opened connection is replaced and the stop resent (it is idempotent) within
-    /// `STOP_DELIVERY_BUDGET`; the GUI itself waits ≤ STOP_WAIT for the StopReport before it answers.
+    /// idle-dropped, refused or never-opened connection is replaced and the stop resent (it is idempotent), with a
+    /// short backoff between failed attempts, until `STOP_DELIVERY_BUDGET` runs out; the GUI itself waits
+    /// ≤ STOP_WAIT for the StopReport before it answers.
     pub fn stop(&self, machine: Option<&str>) -> ToolOutput {
         let deadline = Instant::now() + STOP_DELIVERY_BUDGET;
         let params = machine.map_or_else(|| json!({}), |m| json!({"machine": m}));
         let mut guard = self.inner.conn.lock().unwrap_or_else(PoisonError::into_inner);
         let mut last: Option<Failure> = None;
-        let mut attempt = 0_u32;
-        while Instant::now() < deadline && attempt < 4 {
-            attempt += 1;
-            if guard.as_ref().is_some_and(|conn| conn.last_used.elapsed() >= budgets::RECONNECT_IDLE) {
+        let mut first_open = true;
+        let mut pause = STOP_RETRY_FIRST_PAUSE;
+        let back_off = |pause: &mut Duration| {
+            std::thread::sleep((*pause).min(deadline.saturating_duration_since(Instant::now())));
+            *pause = pause.saturating_mul(2).min(STOP_RETRY_MAX_PAUSE);
+        };
+        while Instant::now() < deadline {
+            if guard.as_ref().is_some_and(|conn| conn.last_used.elapsed() >= self.inner.reconnect_idle) {
                 *guard = None;
             }
-            if guard.is_none() {
-                let endpoint = if attempt == 1 { self.inner.link.endpoint() } else { self.inner.link.endpoint_for_retry() };
+            // A connection kept from before may have been dropped by the GUI: if it fails, reconnect at once.
+            let fresh = guard.is_none();
+            if fresh {
+                let endpoint = if first_open { self.inner.link.endpoint() } else { self.inner.link.endpoint_for_retry() };
+                first_open = false;
                 let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
                 let opened = endpoint
                     .map_err(|e| Failure::NotSent(bridge_text(&e)))
                     .and_then(|endpoint| self.inner.link.open(&endpoint, STOP_CONNECT_TIMEOUT.min(remaining), STOP_CONNECT_TIMEOUT.min(remaining)));
                 match opened {
                     Ok(conn) => *guard = Some(conn),
+                    // "authentication failed": the token is wrong, and resending will not change that.
                     Err(Failure::Definite(e)) => return stop_error(&Failure::Definite(e)),
                     Err(failure) => {
+                        // Nothing listening, the slots full, or this socket closed before it authenticated.
                         last = Some(failure);
-                        // Nothing listening: a short pause before trying the discovery file again.
-                        std::thread::sleep(Duration::from_millis(20).min(deadline.saturating_duration_since(Instant::now())));
+                        back_off(&mut pause);
                         continue;
                     }
                 }
             }
             let Some(conn) = guard.as_mut() else { continue };
             let reply_by = deadline.min(Instant::now() + STOP_REPLY_WAIT);
-            match conn.exchange("machine.stop", params.clone(), reply_by) {
+            let outcome = conn.exchange("machine.stop", params.clone(), reply_by);
+            conn.last_used = Instant::now();
+            let keep = !conn.stop_only;
+            match outcome {
                 Ok(report) => {
-                    conn.last_used = Instant::now();
+                    if keep {
+                        drop(guard);
+                        self.keep_warm();
+                    } else {
+                        *guard = None;
+                    }
                     return stop_report(report);
                 }
                 Err(Failure::Definite(e)) => {
-                    conn.last_used = Instant::now();
+                    if !keep {
+                        *guard = None;
+                    }
                     return stop_error(&Failure::Definite(e));
                 }
                 Err(failure) => {
-                    // Dropped (idle), reset or silent: a fresh connection and the same idempotent stop.
+                    // Dropped (idle), reset, refused or silent: a fresh connection and the same idempotent stop.
                     *guard = None;
                     last = Some(failure);
+                    if fresh {
+                        back_off(&mut pause);
+                    }
                 }
             }
         }
@@ -359,23 +461,66 @@ impl StopHandle {
     }
 }
 
-/// The GUI's report, unchanged, when it reports a latch; anything else is an error that says so.
+/// The keep-alive thread: every `every`, ping the stop connection if it has been idle for half of that.
+fn keepalive(inner: &Weak<StopInner>, every: Duration) {
+    loop {
+        std::thread::sleep(every);
+        let Some(inner) = inner.upgrade() else { return };
+        inner.ping_if_idle();
+    }
+}
+
+impl StopInner {
+    /// Takes the connection out while it is pinged, so a stop never waits behind a ping (it would open a fresh
+    /// connection instead), and puts it back unless a stop has meanwhile opened another.
+    fn ping_if_idle(&self) {
+        let taken = {
+            let mut guard = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+            if guard.as_ref().is_some_and(|conn| !conn.stop_only && conn.last_used.elapsed() >= self.keepalive / 2) { guard.take() } else { None }
+        };
+        let Some(mut conn) = taken else { return };
+        if conn.last_used.elapsed() >= self.reconnect_idle {
+            return; // the GUI may already have closed it; the next stop opens a fresh one
+        }
+        if conn.exchange(PING_METHOD, json!({}), Instant::now() + STOP_REPLY_WAIT).is_ok() {
+            conn.last_used = Instant::now();
+            let mut guard = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+            if guard.is_none() {
+                *guard = Some(conn);
+            }
+        }
+    }
+}
+
+/// The GUI's report, unchanged, when it reports a latch. A report that latched nothing, or none at all, is an error
+/// that says so (with the report as data): nothing confirms that the machine stopped.
 fn stop_report(report: Value) -> ToolOutput {
-    if report.get("latched").and_then(Value::as_bool).is_some() {
-        ToolOutput::Json(report)
-    } else {
-        ToolOutput::Error {
+    match report.get("latched").and_then(Value::as_bool) {
+        Some(true) => ToolOutput::Json(report),
+        Some(false) => {
+            let note = report.get("note").and_then(Value::as_str).unwrap_or("it reported latched:false");
+            let stopped_nothing = report.get("stopped").and_then(Value::as_array).is_none_or(Vec::is_empty);
+            let message = if stopped_nothing {
+                format!(
+                    "not_connected: OpenLaser latched no stop ({note}), so nothing confirms a machine stopped; if anything is running, press STOP in the OpenLaser window or the E-stop"
+                )
+            } else {
+                format!("not_latched: OpenLaser did not latch the stop on every machine ({note}); press STOP in the OpenLaser window or the E-stop")
+            };
+            ToolOutput::Error { message, data: Some(json!({"reply": report})) }
+        }
+        None => ToolOutput::Error {
             message: "transport: OpenLaser answered the stop without a latch report, so nothing confirms the machine stopped; press STOP in the OpenLaser window or the E-stop".to_owned(),
             data: Some(json!({"reply": report})),
-        }
+        },
     }
 }
 
 fn stop_error(failure: &Failure) -> ToolOutput {
     let prefix = match failure {
-        Failure::NotSent(_) => "not_connected",
+        Failure::NotSent(_) | Failure::Refused(_) => "not_connected",
         Failure::Definite(_) => "refused",
-        Failure::Transport(_) | Failure::TimedOut(_) => "transport",
+        Failure::Transport(_) | Failure::TimedOut(_) | Failure::Oversized(_) => "transport",
     };
     ToolOutput::Error {
         message: format!("{prefix}: the stop was not confirmed by OpenLaser ({}); press STOP in the OpenLaser window or the E-stop", failure.describe()),
@@ -559,6 +704,210 @@ mod tests {
         assert!(matches!(handle.stop(None), ToolOutput::Json(_)));
         assert_eq!(stops.load(Ordering::SeqCst), 1);
         server.shutdown();
+    }
+
+    /// How the scripted GUI treats one connection.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Treat {
+        /// What the control server says when no slot is left: an id-null "connection limit reached", then close.
+        Refuse,
+        /// Auth, then ping / machine.stop answered for as long as the client stays.
+        Serve,
+        /// Auth with `stopOnly: true`, one machine.stop, then close.
+        StopOnly,
+        /// Auth, then an over-budget reply to the first request, then silence.
+        Oversized,
+    }
+
+    /// A scripted GUI on a real socket: `treat(n)` decides connection n (0-based); it counts what it saw.
+    struct FakeGui {
+        addr: SocketAddr,
+        connections: Arc<AtomicUsize>,
+        pings: Arc<AtomicUsize>,
+        stops: Arc<AtomicUsize>,
+    }
+
+    impl FakeGui {
+        fn start(treat: impl Fn(usize) -> Treat + Send + 'static) -> Self {
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (connections, pings, stops) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+            let (seen, pinged, stopped) = (Arc::clone(&connections), Arc::clone(&pings), Arc::clone(&stops));
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(stream) = stream else { return };
+                    let how = treat(seen.fetch_add(1, Ordering::SeqCst));
+                    let (pinged, stopped) = (Arc::clone(&pinged), Arc::clone(&stopped));
+                    std::thread::spawn(move || serve_fake(stream, how, &pinged, &stopped));
+                }
+            });
+            FakeGui { addr, connections, pings, stops }
+        }
+
+        fn target(&self) -> BridgeTarget {
+            BridgeTarget::Addr { addr: self.addr, token: TokenSource::Inline(Token::generate().unwrap().to_hex()) }
+        }
+
+        fn connections(&self) -> usize {
+            self.connections.load(Ordering::SeqCst)
+        }
+    }
+
+    fn serve_fake(stream: TcpStream, how: Treat, pings: &AtomicUsize, stops: &AtomicUsize) {
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        if how == Treat::Refuse {
+            // As the control server does: the auth frame is read (closing with it unread would reset the
+            // connection and could discard the refusal), then refused with id null, then closed.
+            let _ = reader.read_line(&mut line);
+            let _ = writeln!(writer, "{}", json!({"id": null, "ok": false, "error": "connection limit reached"}));
+            return;
+        }
+        while matches!(reader.read_line(&mut line), Ok(n) if n > 0) {
+            let Ok(request) = serde_json::from_str::<Request>(&line) else { return };
+            line.clear();
+            let result = match request.method.as_str() {
+                "auth" => json!({"authenticated": true, "stopOnly": how == Treat::StopOnly}),
+                "ping" => {
+                    pings.fetch_add(1, Ordering::SeqCst);
+                    json!({"pong": true})
+                }
+                "machine.stop" => {
+                    stops.fetch_add(1, Ordering::SeqCst);
+                    json!({"latched": true, "confirmed": true})
+                }
+                _ => json!("done"),
+            };
+            if how == Treat::Oversized && request.method != "auth" {
+                let mut big = vec![b'x'; budgets::MAX_RESPONSE_BYTES + 2];
+                big.push(b'\n');
+                let _ = writer.write_all(&big);
+                let _ = reader.read(&mut [0_u8; 1]); // silent until the client goes
+                return;
+            }
+            if writeln!(writer, "{}", json!({"id": request.id, "ok": true, "result": result})).is_err() {
+                return;
+            }
+            if how == Treat::StopOnly && request.method == "machine.stop" {
+                return;
+            }
+        }
+    }
+
+    /// X1 (4) and (2): every slot taken, the GUI answers each new connection with an id-null "connection limit
+    /// reached". The stop keeps trying (well past 4 attempts) for the whole delivery budget, then says why it failed
+    /// in the GUI's words, not "authentication did not complete".
+    #[test]
+    fn stop_names_the_connection_limit_and_retries_for_the_whole_budget() {
+        let gui = FakeGui::start(|_| Treat::Refuse);
+        let handle = StopHandle::lazy(Link::new(gui.target(), info()));
+        let started = Instant::now();
+        let ToolOutput::Error { message, .. } = handle.stop(None) else { panic!("a refused stop was reported as done") };
+        let elapsed = started.elapsed();
+        assert!(message.starts_with("not_connected:") && message.contains("connection limit reached"), "{message}");
+        assert!(!message.contains("authentication did not complete"), "{message}");
+        assert!(gui.connections() > 8, "gave up after {} attempts", gui.connections());
+        assert!(elapsed >= STOP_DELIVERY_BUDGET - Duration::from_millis(100), "gave up after {elapsed:?}");
+        assert!(elapsed < STOP_DELIVERY_BUDGET + Duration::from_millis(500), "overran the budget: {elapsed:?}");
+    }
+
+    /// X1 (2): the slots free up after a while (here, after 12 refused connections): the stop gets through.
+    #[test]
+    fn stop_gets_through_once_a_slot_frees() {
+        let gui = FakeGui::start(|n| if n < 12 { Treat::Refuse } else { Treat::Serve });
+        let handle = StopHandle::lazy(Link::new(gui.target(), info()));
+        let started = Instant::now();
+        let outcome = handle.stop(Some("m1"));
+        assert!(matches!(&outcome, ToolOutput::Json(report) if report["latched"] == json!(true)), "{:?}", stop_text(&outcome));
+        assert!(started.elapsed() < STOP_DELIVERY_BUDGET);
+        assert_eq!(gui.stops.load(Ordering::SeqCst), 1);
+    }
+
+    /// X1 (3): once open, the stop connection is kept warm with pings, so the next stop needs no new connection
+    /// (here with a 100 ms keep-alive and a 300 ms reconnect threshold standing in for 10 s and 25 s).
+    #[test]
+    fn stop_connection_is_kept_warm() {
+        let gui = FakeGui::start(|_| Treat::Serve);
+        let handle = StopHandle::tuned(Link::new(gui.target(), info()), Duration::from_millis(100), Duration::from_millis(300));
+        assert!(matches!(handle.stop(None), ToolOutput::Json(_)));
+        assert_eq!(gui.connections(), 1);
+        std::thread::sleep(Duration::from_millis(1000));
+        assert!(gui.pings.load(Ordering::SeqCst) >= 3, "{} pings", gui.pings.load(Ordering::SeqCst));
+        assert!(matches!(handle.stop(None), ToolOutput::Json(_)));
+        assert_eq!(gui.connections(), 1, "the stop after an idle second opened a new connection");
+        assert_eq!(gui.stops.load(Ordering::SeqCst), 2);
+        // The keep-alive holds only a weak reference: it ends with the handle.
+        drop(handle);
+        let pings = gui.pings.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(gui.pings.load(Ordering::SeqCst) <= pings + 1);
+    }
+
+    /// A stop-only connection serves one stop: it is neither kept nor pinged, and the next stop opens another
+    /// straight away instead of failing on the closed one first.
+    #[test]
+    fn stop_only_connection_is_not_kept() {
+        let gui = FakeGui::start(|_| Treat::StopOnly);
+        let handle = StopHandle::tuned(Link::new(gui.target(), info()), Duration::from_millis(50), Duration::from_secs(25));
+        assert!(matches!(handle.stop(None), ToolOutput::Json(_)));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(matches!(handle.stop(None), ToolOutput::Json(_)));
+        assert_eq!((gui.connections(), gui.stops.load(Ordering::SeqCst), gui.pings.load(Ordering::SeqCst)), (2, 2, 0));
+        // A call connection that could only be stop-only is refused before anything is sent...
+        let mut client = BridgeClient::connect(&gui.target(), &info()).unwrap();
+        let refused = client.call("engine.execute", json!({"command":"edit.selectAll"})).unwrap_err();
+        assert!(matches!(&refused, BridgeError::NotSent(m) if m.contains("connection limit reached")), "{refused:?}");
+        // ...but `machine.stop` on it is served (`openlaser-cli ui machine.stop` with every slot taken), and the
+        // connection, closed by the GUI after that one exchange, is not reused.
+        let stops = gui.stops.load(Ordering::SeqCst);
+        assert_eq!(client.call("machine.stop", json!({})).unwrap()["latched"], json!(true));
+        assert_eq!(client.call("machine.stop", json!({})).unwrap()["latched"], json!(true));
+        assert_eq!(gui.stops.load(Ordering::SeqCst), stops + 2);
+    }
+
+    /// An over-budget reply leaves the connection inside that line: it is dropped, and the next call goes out on a
+    /// fresh one (the old connection is never answered again).
+    #[test]
+    fn oversized_reply_drops_the_call_connection() {
+        let gui = FakeGui::start(|n| if n == 0 { Treat::Oversized } else { Treat::Serve });
+        let mut client = BridgeClient::lazy(Link::new(gui.target(), info()));
+        client.timeout = Duration::from_secs(2);
+        let first = client.call("doc.inspect", json!({})).unwrap_err();
+        assert!(matches!(&first, BridgeError::Definite(m) if m.contains("exceeds")), "{first:?}");
+        assert_eq!(client.call("doc.inspect", json!({})).unwrap(), json!("done"));
+        assert_eq!(gui.connections(), 2);
+    }
+
+    /// X1 review item: a report that latched nothing is an error result carrying the report, never a success.
+    #[test]
+    fn unlatched_stop_report_is_an_error() {
+        let none = json!({"latched": false, "confirmed": false, "elapsedMs": 0, "stopped": [], "note": "no machine is connected"});
+        let echoed = none.clone();
+        let (server, _requests, target) = gui(Arc::new(move |_| echoed.clone()));
+        let handle = StopHandle::lazy(Link::new(target, info()));
+        match handle.stop(None) {
+            ToolOutput::Error { message, data } => {
+                assert!(message.starts_with("not_connected:") && message.contains("no machine is connected"), "{message}");
+                assert_eq!(data.unwrap()["reply"], none);
+            }
+            other => panic!("latched:false was reported as a stop: {:?}", stop_text(&other)),
+        }
+        server.shutdown();
+        let partial = json!({"latched": false, "confirmed": false, "stopped": [{"machine": "m1", "latched": false}]});
+        let echoed = partial.clone();
+        let (server, _requests, target) = gui(Arc::new(move |_| echoed.clone()));
+        let handle = StopHandle::lazy(Link::new(target, info()));
+        assert!(matches!(handle.stop(Some("m1")), ToolOutput::Error { message, .. } if message.starts_with("not_latched:")));
+        server.shutdown();
+    }
+
+    fn stop_text(output: &ToolOutput) -> String {
+        match output {
+            ToolOutput::Json(value) => value.to_string(),
+            ToolOutput::Error { message, .. } => message.clone(),
+            ToolOutput::Png { .. } => "png".to_owned(),
+        }
     }
 
     #[test]

@@ -23,11 +23,16 @@ pub const FRAME_REQUEST_TTL: Duration = Duration::from_secs(120);
 
 // ---- WP7 additions (AUT A9/A10, review B7 and the security items) ------------------------------------------------
 
-/// Connections over [`MAX_CONNECTIONS`] that are still accepted, each for exactly one `auth` + `machine.stop`
-/// exchange. Every live socket counts from `accept`, authenticated or not; past this reserve a connection is refused.
+/// Authenticated connections over [`MAX_CONNECTIONS`] that are still served, each for exactly one `machine.stop`
+/// exchange (within [`AUTH_DEADLINE`] of its auth). Only an authenticated connection takes one of these slots or one
+/// of the `MAX_CONNECTIONS`; past both, the auth is answered with an id-null "connection limit reached".
 pub const STOP_ONLY_RESERVE: usize = 4;
+/// Sockets accepted but not yet authenticated: a pool of their own, separate from the authenticated slots and the
+/// stop reserve. When it is full, the oldest pending socket is closed to admit the new one (never the newcomer
+/// refused), so silent sockets cannot keep an agent's stop out: a loopback auth takes about a millisecond.
+pub const MAX_PENDING_AUTH: usize = 32;
 /// The auth frame (and an optional `hello` before it) must arrive within this deadline of `accept`, and the whole
-/// pre-auth exchange is bounded by it (not per read), so a silent or trickling socket cannot hold a slot.
+/// pre-auth exchange is bounded by it (not per read), so a silent or trickling socket cannot hold a thread for long.
 pub const AUTH_DEADLINE: Duration = Duration::from_secs(2);
 /// The longest pre-auth frame (`hello` or `auth`).
 pub const AUTH_MAX_BYTES: usize = 4 << 10;
