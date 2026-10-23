@@ -205,14 +205,22 @@ fn mark_phase(rig: &mut dyn Rig, term: &mut dyn Terminal, env: &Env, target: &Ar
     }
 }
 
+/// Every machine latched and reported a confirmed stop. No machine, no report within the wait, or an unconfirmed
+/// report is not a stop (AGENTS.md §1 rule 3: never proceed after a wait times out).
+pub fn stop_confirmed(acks: &[(openlaser_engine::MachineId, openlaser_engine::StopAck)]) -> bool {
+    !acks.is_empty() && acks.iter().all(|(_, a)| a.latched && a.report.as_ref().is_some_and(|r| r.confirmed))
+}
+
 /// Stops the accepted frame and folds its stop into the engine before anything else happens: a stop the engine
-/// saw only after `request_arm` would void the PendingArm.
+/// saw only after `request_arm` would void the PendingArm. Nothing is armed unless every machine confirmed the stop.
 fn stop_framing(rig: &mut dyn Rig, term: &mut dyn Terminal, env: &Env, target: &Arc<dyn StopTarget>) -> Result<(), HwError> {
     let acks = target.stop_and_wait(STOP_WAIT);
-    if acks.iter().any(|(_, a)| a.report.as_ref().is_some_and(|r| !r.confirmed)) {
+    if !stop_confirmed(&acks) {
         print_stop(term, &acks);
-        return Err(HwError::Failed("the frame stop was not confirmed; nothing was marked".to_owned()));
+        return Err(HwError::Failed(format!("the frame stop was not confirmed within {} ms; nothing was armed or marked", STOP_WAIT.as_millis())));
     }
+    // The confirmed report is what clears the way. Waiting for the engine's own Stopped event only orders it before
+    // `request_arm`; if it is late, it voids the PendingArm and `run_armed` refuses (fail closed), so going on is safe.
     let deadline = env.clock.now().plus(STOP_WAIT.saturating_mul(2));
     loop {
         for ev in rig.poll() {

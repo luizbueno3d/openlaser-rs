@@ -196,6 +196,8 @@ struct Script {
     cap: Option<f64>,
     polls: u32,
     opened: u32,
+    /// What `stop_and_wait` answers instead of one confirmed report (a driver that never reported, say).
+    stop_acks: Option<Vec<(MachineId, StopAck)>>,
 }
 
 type Shared = Arc<Mutex<Script>>;
@@ -212,6 +214,9 @@ impl StopTarget for FakeStop {
     fn stop_and_wait(&self, _max: Duration) -> Vec<(MachineId, StopAck)> {
         let mut s = self.0.lock().unwrap();
         s.calls.push("stop_and_wait".into());
+        if let Some(acks) = s.stop_acks.clone() {
+            return acks;
+        }
         s.urgent.push_back(RigEvent::Stopped(confirmed()));
         vec![(MachineId("jpt-m7-200-sim".into()), StopAck { latched: true, report: Some(confirmed()), elapsed_ms: 40 })]
     }
@@ -475,6 +480,32 @@ fn cli_run_without_allow_emission_stops_after_frame() {
     assert!(stop > frame, "framing is stopped: {c:?}");
     assert!(!has(&c, "request_arm") && !has(&c, "run_armed"), "{c:?}");
     assert!(term.challenges.is_empty());
+}
+
+#[test]
+fn unconfirmed_frame_stop_never_reaches_arm() {
+    // Stopping the accepted frame must end in a confirmed StopReport from every machine; a wait that ran out, a latch
+    // that did not trip, an unconfirmed report or no machine at all ends the run before the ARM step.
+    let m = || MachineId("jpt-m7-200-sim".into());
+    let unconfirmed = StopReport { confirmed: false, ..confirmed() };
+    for acks in [
+        vec![(m(), StopAck { latched: true, report: None, elapsed_ms: 500 })],
+        vec![(m(), StopAck { latched: false, report: None, elapsed_ms: 0 })],
+        vec![(m(), StopAck { latched: true, report: Some(unconfirmed), elapsed_ms: 60 })],
+        vec![],
+    ] {
+        let mut script = one_pass_on_poll_3(1.0, None);
+        script.stop_acks = Some(acks.clone());
+        let (mut env, s) = fake_env(script);
+        let mut term = Scripted::new(true, &[Key::Wait(4), Key::Enter]);
+        term.typing = Some(|c| format!("ARM {c:06}"));
+        let code = run_with(&argv("run --builtin dot --sim --allow-emission"), &mut term, &mut env);
+        let out = term.output();
+        assert_eq!(code, EXIT_FAIL, "{acks:?}: {out}");
+        assert!(out.contains("the frame stop was not confirmed within 500 ms"), "{acks:?}: {out}");
+        assert!(!has(&calls(&s), "request_arm"), "{acks:?}: {:?}", calls(&s));
+        assert!(term.challenges.is_empty());
+    }
 }
 
 #[test]
