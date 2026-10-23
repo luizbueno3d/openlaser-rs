@@ -620,7 +620,6 @@ mod tests {
 
     /// A real refusal: a rectangle outside the ±100 mm field. Needs I1 (format, plan and safety are stubs here).
     #[test]
-    #[ignore = "needs I1"]
     fn cli_plan_exit_1_on_refusal() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("outside.olp").to_string_lossy().into_owned();
@@ -635,7 +634,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn cli_convert_writes_olp() {
         let temp = tempfile::tempdir().unwrap();
         let inputs = openlaser_testkit::golden_dir().join("inputs");
@@ -646,7 +644,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn cli_simulate_writes_png() {
         let temp = tempfile::tempdir().unwrap();
         let png = temp.path().join("simulation.png");

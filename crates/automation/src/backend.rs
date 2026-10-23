@@ -998,7 +998,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn job_plan_refusal_names_outside_work_area() {
         let mut backend = Headless::new(None, None).unwrap();
         backend.call("doc_new", json!({}), &client());
@@ -1010,7 +1009,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs I1"]
     fn job_simulate_business_card() {
         let mut backend = Headless::new(None, None).unwrap();
         backend.call("doc_new", json!({}), &client());
@@ -1021,7 +1019,6 @@ mod tests {
 
     /// The document is rendered, not the window. Needs I1: `openlaser_render` is a stub on this branch (WP2).
     #[test]
-    #[ignore = "needs I1"]
     fn render_preview_is_document() {
         let mut backend = Headless::new(None, None).unwrap();
         backend.call("doc_new", json!({"name":"card"}), &client());
