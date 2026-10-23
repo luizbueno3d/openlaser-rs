@@ -70,11 +70,14 @@ fn redo(s: &mut Session, _: NoParams) -> Result<Value, EngineError> {
     Ok(history_json(s))
 }
 
+/// Through `Session::set_selection_of`: under Cut Selected Graphics a new selection is a new job (revision bump).
 fn set_selection(s: &mut Session, ids: Vec<ObjectId>) -> Result<Value, EngineError> {
-    let d = s.doc_mut()?;
-    d.selection.key = ids.last().copied();
-    d.selection.ids = ids;
-    Ok(json!({ "selection": d.selection.ids }))
+    let index = s.doc_index()?;
+    let mut selection = s.doc()?.selection.clone();
+    selection.key = ids.last().copied();
+    selection.ids = ids;
+    s.set_selection_of(index, selection)?;
+    Ok(json!({ "selection": s.doc()?.selection.ids }))
 }
 
 fn select_all(s: &mut Session, _: NoParams) -> Result<Value, EngineError> {

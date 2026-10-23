@@ -273,10 +273,20 @@ fn save_machine_file(s: &mut Session, p: MachineFileParams) -> Result<Value, Eng
     Ok(json!({ "path": p.path, "lines": job.lines, "fingerprint": job.fingerprint.hex() }))
 }
 
+/// A person quitting while a machine works stops every machine first; an agent cannot end a person's job this way
+/// (§4.5: `app.quit` is refused while busy), it is told to stop the machine first.
 fn exit(s: &mut Session, _: NoParams) -> Result<Value, EngineError> {
-    let active = s.busy_machine().is_some();
-    if active {
+    let busy = s.busy_machine();
+    if let Some(m) = &busy
+        && s.effective_origin() != crate::Origin::Human
+    {
+        return Err(EngineError::refused(
+            openlaser_types::RefusalCode::MachineBusy,
+            format!("{} is framing or running; stop it first (laser.stop), then quit", m.0),
+        ));
+    }
+    if busy.is_some() {
         s.stop_all();
     }
-    Ok(json!({ "ui": "file.exit", "quit": true, "stopped": active }))
+    Ok(json!({ "ui": "file.exit", "quit": true, "stopped": busy.is_some() }))
 }

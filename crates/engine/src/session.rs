@@ -519,7 +519,7 @@ impl Session {
         let in_group = self.group.is_some();
         let Some(doc) = self.docs.get_mut(index) else { return Err(EngineError::NoDocument) };
         if project == *doc.project {
-            doc.selection = selection;
+            self.set_selection_of(index, selection)?;
             return Ok(out);
         }
         if !in_group {
@@ -531,6 +531,25 @@ impl Session {
         doc.revision = doc.revision.saturating_add(1);
         self.after_change(index, "the document changed");
         Ok(out)
+    }
+
+    /// Replaces document `index`'s selection. With Cut Selected Graphics on, the selection decides what `build_job`
+    /// produces, so a change of the selected ids is a revision bump (§3.16): PendingArm voided, requests stale, live
+    /// check invalidated. Selections are not saved, so the bump never marks a clean document dirty.
+    pub(crate) fn set_selection_of(&mut self, index: usize, selection: Selection) -> Result<(), EngineError> {
+        let dry = self.dry_run();
+        let Some(doc) = self.docs.get_mut(index) else { return Err(EngineError::NoDocument) };
+        let job_changes = doc.project.job.cut_selected && doc.selection.ids != selection.ids;
+        doc.selection = selection;
+        if job_changes && !dry {
+            let clean = !doc.dirty();
+            doc.revision = doc.revision.saturating_add(1);
+            if clean {
+                doc.saved_revision = doc.revision;
+            }
+            self.after_change(index, "the selection changed while Cut Selected Graphics is on");
+        }
+        Ok(())
     }
 
     pub fn undo(&mut self) -> Result<(), EngineError> {
