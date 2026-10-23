@@ -631,7 +631,7 @@ mod emission {
         let registry_slot: Arc<Mutex<Option<Arc<openlaser_engine::StopRegistry>>>> = Arc::new(Mutex::new(None));
         let (flag, reg) = (stop_now.clone(), registry_slot.clone());
         let hook: WireHook = Box::new(move |w: &SimWire, _at| {
-            // Second run only: trip the stop on the 2nd packet written (deterministic, on the driver thread).
+            // Second run only: trip the stop on its first packet write (deterministic, on the driver thread).
             if matches!(w, SimWire::Packet { .. })
                 && flag.swap(false, Ordering::SeqCst)
                 && let Some(r) = reg.lock().unwrap().as_ref()
