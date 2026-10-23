@@ -159,7 +159,7 @@ pub(crate) fn plant_pending(s: &mut Session) {
     let doc = &s.docs[idx];
     let fp = Fingerprint([5; 32]);
     let machine = doc.machine.clone();
-    let summary = crate::devices::tests::summary(fp, &machine.0, &[10.0]);
+    let mut summary = crate::devices::tests::summary(fp, &machine.0, &[10.0]);
     let receipt = FrameReceipt {
         fingerprint: fp,
         machine: machine.clone(),
@@ -171,6 +171,7 @@ pub(crate) fn plant_pending(s: &mut Session) {
         origin: FrameOrigin::Human,
     };
     let job = LmcJob { prelude: Vec::new(), lists: Vec::new(), repeats: 1, postlude: Vec::new(), fingerprint: fp, machine: machine.clone() };
+    summary.bytes_hash = job.bytes_hash();
     let frame = LmcFrameJob {
         once: Vec::new(),
         once_passes: 1,
@@ -192,6 +193,7 @@ pub(crate) fn plant_pending(s: &mut Session) {
         revision: doc.revision,
         expires: s.cfg.clock.now().plus(Duration::from_secs(60)),
         job: Encoded::Lmc { job: Arc::new(job), frame: Arc::new(frame) },
+        stop_trips: s.stop_registry.trips(),
     });
     s.pending_doc = Some(idx);
 }
@@ -1065,4 +1067,273 @@ fn edit_after_submit_marks_stale_with_a_planted_submission() {
     // An agent cannot advance it, only withdraw a pending one.
     assert_eq!(s.approve_request(Origin::Synthetic, v.submission).unwrap_err().code(), "human_only");
     assert_eq!(s.withdraw_request(v.submission).unwrap_err().code(), "stale");
+}
+
+// ---- review fixes: stop, ARM race, sticky faults, selection, gantry bytes ----------------------------------------
+
+#[test]
+fn stop_with_an_unknown_machine_stops_the_running_one() {
+    let (mut s, _) = human();
+    with_doc(&mut s);
+    s.execute("device.connect", json!({})).unwrap();
+    let sim = MachineId("jpt-m7-200-sim".into());
+    s.hub[0].status.state = MachineState::Running { packets_acked: 1, total: 9 };
+    s.hub[0].op = Some(crate::devices::Op::Run { fingerprint: Fingerprint([1; 32]) });
+    let v = s.execute_as(Origin::Synthetic, "laser.stop", json!({ "machine": "jpt-m7-200" })).unwrap();
+    assert_eq!(v["stopped"][0]["machine"], sim.0, "{v}");
+    assert_eq!(v["latched"], true);
+    assert_eq!(v["requested"], "jpt-m7-200");
+    assert!(v["note"].as_str().unwrap().contains("not connected"), "{v}");
+    // The WP0 driver sends no StopReport: nothing is "confirmed", and the running machine is STOP NOT CONFIRMED.
+    assert_eq!(v["confirmed"], false);
+    let st = s.status(&sim).unwrap();
+    assert!(matches!(st.state, MachineState::StopNotConfirmed) && st.fault.is_some());
+    // With nothing connected, nothing is claimed.
+    let (mut s, _) = human();
+    let v = s.execute_as(Origin::Headless, "laser.stop", json!({ "machine": "jpt-m7-200" })).unwrap();
+    assert_eq!((v["latched"].clone(), v["confirmed"].clone()), (json!(false), json!(false)), "{v}");
+    assert_eq!(v["stopped"], json!([]));
+    let v = s.execute_as(Origin::Synthetic, "laser.frameStop", Value::Null).unwrap();
+    assert_eq!((v["latched"].clone(), v["confirmed"].clone()), (json!(false), json!(false)), "{v}");
+}
+
+#[test]
+fn stop_voids_pending_arm_without_a_poll() {
+    // A fast-path stop (control transport thread, signal watcher, panic hook) after Start, with no poll in between:
+    // run_armed must refuse, the run must never be queued.
+    let (mut s, _) = human();
+    with_doc(&mut s);
+    plant_pending(&mut s);
+    let token = token_for(&s);
+    let reg = s.stop_registry();
+    std::thread::spawn(move || reg.stop_all(Duration::from_millis(1))).join().unwrap();
+    let e = s.run_armed(token).unwrap_err();
+    assert!(matches!(&e, EngineError::Refused(r) if r.code == RefusalCode::StoppedAfterQueue), "{e}");
+    assert!(s.pending_arm().is_none());
+    // A Start after the stop is a new ARM: the earlier stop does not cancel it (request_arm folds it first, as here).
+    s.fold_stop_trips();
+    plant_pending(&mut s);
+    s.poll();
+    assert!(s.pending_arm().is_some(), "a stop before Start does not void the ARM Start made");
+    // A stop after it does, on the next poll or in run_armed, whichever comes first.
+    s.stop_registry().stop_all(Duration::from_millis(1));
+    s.poll();
+    assert!(s.pending_arm().is_none());
+}
+
+#[test]
+fn faults_are_sticky_until_acknowledged() {
+    let (mut s, _) = human();
+    with_doc(&mut s);
+    s.execute("device.connect", json!({})).unwrap();
+    let m = MachineId("jpt-m7-200-sim".into());
+    s.fold_driver_event(&m, DriverEvent::State(MachineState::Idle));
+    let refused_for_fault = |e: EngineError| matches!(&e, EngineError::Refused(r) if r.code == RefusalCode::MachineBusy && r.message.contains("Clear Fault"));
+    // A driver fault (watchdog, transport): Frame, Start and run_armed are refused, even after the driver says Idle.
+    s.fold_driver_event(&m, DriverEvent::Fault(DriverError::Watchdog { waited_ms: 2000 }));
+    s.fold_driver_event(&m, DriverEvent::State(MachineState::Idle));
+    assert!(matches!(s.status(&m).unwrap().state, MachineState::Fault), "a later Idle never clears a fault");
+    assert!(refused_for_fault(s.execute("laser.frame", json!({})).unwrap_err()));
+    assert!(refused_for_fault(s.execute("laser.start", json!({})).unwrap_err()));
+    assert!(refused_for_fault(s.start_frame(Origin::Human, FrameMode::Loop, None, None).unwrap_err()));
+    plant_pending(&mut s);
+    let token = token_for(&s);
+    assert!(refused_for_fault(s.run_armed(token).unwrap_err()));
+    assert!(s.pending_arm().is_none(), "a refused run spends the pending ARM");
+    // Only a person's acknowledgement clears it.
+    assert_eq!(s.execute_as(Origin::Synthetic, "laser.clearFault", json!({})).unwrap_err().code(), "human_only");
+    s.execute("laser.clearFault", json!({})).unwrap();
+    assert!(!s.status(&m).unwrap().faulted());
+    assert_eq!(s.execute("laser.start", json!({})).unwrap_err().code(), "refused", "now it is the missing frame");
+
+    // An unconfirmed stop (no StopReport within the watchdog) is a sticky fault too.
+    s.hub[0].status.state = MachineState::Running { packets_acked: 1, total: 9 };
+    s.hub[0].op = Some(crate::devices::Op::Run { fingerprint: Fingerprint([1; 32]) });
+    s.stop_all();
+    let st = s.status(&m).unwrap();
+    assert!(matches!(st.state, MachineState::StopNotConfirmed) && st.fault.is_some(), "{:?}", st.state);
+    s.fold_driver_event(&m, DriverEvent::State(MachineState::Idle));
+    assert!(matches!(s.status(&m).unwrap().state, MachineState::StopNotConfirmed), "a later Idle never clears it");
+    let e = s.execute("laser.frame", json!({})).unwrap_err();
+    assert!(refused_for_fault(e.clone()) && e.to_string().contains("STOP NOT CONFIRMED"), "{e}");
+    plant_pending(&mut s);
+    let token = token_for(&s);
+    assert!(refused_for_fault(s.run_armed(token).unwrap_err()));
+    s.execute("laser.clearFault", json!({})).unwrap();
+    assert!(matches!(s.status(&m).unwrap().state, MachineState::Idle));
+
+    // A StopReport that could not confirm is the same.
+    let report =
+        StopReport { confirmed: false, elapsed: Duration::from_millis(500), possible_desync: true, mo_closed: false, ports_zero: false, notes: Vec::new() };
+    s.fold_driver_event(&m, DriverEvent::Stopped(report.clone()));
+    assert!(s.status(&m).unwrap().faulted());
+    s.execute("laser.clearFault", json!({})).unwrap();
+    s.fold_driver_event(&m, DriverEvent::Finished(Outcome::Stopped(report)));
+    assert!(s.status(&m).unwrap().faulted());
+    // A user stop that was confirmed is not sticky.
+    s.execute("laser.clearFault", json!({})).unwrap();
+    let ok = StopReport { confirmed: true, elapsed: Duration::from_millis(40), possible_desync: false, mo_closed: true, ports_zero: true, notes: Vec::new() };
+    s.fold_driver_event(&m, DriverEvent::Stopped(ok));
+    assert!(!s.status(&m).unwrap().faulted());
+}
+
+#[test]
+fn selection_change_under_cut_selected_voids_the_arm() {
+    let mut s = Session::new(config(Origin::Synthetic, true, DeviceAccess::None));
+    with_doc(&mut s);
+    draw(&mut s, json!([[0, 0], [10, 0]]));
+    draw(&mut s, json!([[0, 5], [10, 5]]));
+    // Cut Selected Graphics off: the selection is not part of the job.
+    let r0 = s.active().unwrap().revision;
+    plant_pending(&mut s);
+    s.execute("edit.selectAll", json!({})).unwrap();
+    assert_eq!(s.active().unwrap().revision, r0);
+    assert!(s.pending_arm().is_some(), "without Cut Selected a selection never changes the job");
+    // On: an agent's selection change is a new job.
+    s.execute("laser.cutSelected", json!({ "on": true })).unwrap();
+    let clean_rev = s.active().unwrap().revision;
+    s.docs[0].saved_revision = clean_rev; // as if just saved
+    plant_pending(&mut s);
+    s.poll();
+    s.execute("edit.selectNone", json!({})).unwrap();
+    assert!(s.pending_arm().is_none(), "the ARM dialog was for another selection");
+    assert_eq!(s.active().unwrap().revision, clean_rev + 1);
+    assert!(!s.active().unwrap().dirty(), "selections are not saved: no unsaved changes");
+    assert!(s.poll().iter().any(|e| matches!(e, Event::DocChanged { .. })));
+    // edit.select, and an edit that only changes the selection, too; a dry run and an unchanged selection do not.
+    plant_pending(&mut s);
+    let ids: Vec<u64> = s.active().unwrap().project.shapes.iter().map(|sh| sh.id.0).collect();
+    s.execute("edit.select", json!({ "ids": [ids[0]], "dryRun": true })).unwrap();
+    assert!(s.pending_arm().is_some(), "a dry run changes nothing");
+    s.execute("edit.select", json!({ "ids": [ids[0]] })).unwrap();
+    assert!(s.pending_arm().is_none());
+    plant_pending(&mut s);
+    let r = s.active().unwrap().revision;
+    s.execute("edit.select", json!({ "ids": [ids[0]] })).unwrap();
+    assert_eq!(s.active().unwrap().revision, r, "the same selection is no change");
+    assert!(s.pending_arm().is_some());
+    s.edit(crate::Label::new("Select"), None, |_, sel| {
+        sel.ids.clear();
+        Ok(())
+    })
+    .unwrap();
+    assert!(s.pending_arm().is_none());
+    assert_eq!(s.active().unwrap().revision, r + 1);
+}
+
+#[test]
+fn selection_change_under_cut_selected_stales_requests() {
+    let mut s = Session::new(config(Origin::Synthetic, true, DeviceAccess::None));
+    with_doc(&mut s);
+    draw(&mut s, json!([[0, 0], [10, 0]]));
+    s.execute("laser.cutSelected", json!({ "on": true })).unwrap();
+    s.execute("edit.selectNone", json!({})).unwrap();
+    let fp = Fingerprint([4; 32]);
+    let view = crate::SubmissionView {
+        submission: crate::RequestId(0),
+        machine: MachineId("jpt-m7-200-sim".into()),
+        fingerprint: fp,
+        state: crate::SubmissionState::AwaitingHuman,
+        note: String::new(),
+        client: "agent".into(),
+        summary: crate::devices::tests::summary(fp, "jpt-m7-200-sim", &[10.0]),
+        expires_in_s: 0,
+        outcome: None,
+        stop_report: None,
+    };
+    let now = s.cfg.clock.now();
+    let (v, _) = s.requests.add_submission(view, 0, now);
+    s.execute("edit.selectAll", json!({})).unwrap();
+    let st = s.execute("job.status", json!({ "submission": v.submission.0 })).unwrap();
+    assert_eq!(st["state"], "stale");
+}
+
+#[test]
+fn run_armed_checks_the_encoded_bytes_before_the_token() {
+    let (mut s, _) = human();
+    with_doc(&mut s);
+    plant_pending(&mut s);
+    // The summary the human confirmed no longer describes the object that would be sent.
+    s.pending_arm.as_mut().unwrap().summary.bytes_hash = Fingerprint([9; 32]);
+    let token = token_for(&s);
+    let e = s.run_armed(token).unwrap_err();
+    assert!(matches!(&e, EngineError::Refused(r) if r.code == RefusalCode::BytesMismatch), "{e}");
+    assert!(s.pending_arm().is_none());
+    // And the first-emission cap is applied to the decoded burn, before the token too.
+    let capped = Arc::new(TestProvider { cap: Some(5.0), ..TestProvider::default() });
+    let dyn_p: Arc<dyn DeviceProvider> = capped;
+    let mut s = Session::new(config(Origin::Human, true, DeviceAccess::Provider(dyn_p)));
+    with_doc(&mut s);
+    s.execute("device.connect", json!({})).unwrap();
+    plant_pending(&mut s);
+    let token = token_for(&s);
+    let e = s.run_armed(token).unwrap_err();
+    assert!(matches!(&e, EngineError::Refused(r) if r.code == RefusalCode::BenchPowerCap), "{e}");
+}
+
+#[test]
+fn start_without_a_frame_receipt_is_refused_before_building() {
+    let (mut s, _) = human();
+    with_doc(&mut s);
+    s.execute("device.connect", json!({})).unwrap();
+    let e = s.execute("laser.start", json!({})).unwrap_err();
+    assert!(matches!(&e, EngineError::Refused(r) if r.code == RefusalCode::FrameRequired), "{e}");
+    assert!(s.pending_arm().is_none());
+}
+
+#[test]
+fn batches_never_skip_a_stop() {
+    let (mut s, _) = human();
+    with_doc(&mut s);
+    s.execute("device.connect", json!({})).unwrap();
+    let stop = || ("laser.stop".to_owned(), json!({}));
+    let draw_step = || ("tools.drawLines".to_owned(), json!({ "pointsMm": [[0, 0], [1, 1]] }));
+    // Inside an atomic batch a stop runs in its place.
+    let t = s.stop_registry().trips();
+    let r = s.batch(Origin::Synthetic, vec![draw_step(), stop()], true, Some("Draw and stop".into()));
+    assert_eq!((r.completed, r.failed, r.rolled_back), (2, 0, false), "{r:?}");
+    assert!(s.stop_registry().trips() > t);
+    // An atomic batch refused for another device step still stops.
+    let t = s.stop_registry().trips();
+    let r = s.batch(Origin::Human, vec![("laser.start".into(), json!({})), stop()], true, Some("x".into()));
+    assert_eq!(r.failed, 1);
+    assert!(s.stop_registry().trips() > t, "{r:?}");
+    assert_eq!(r.results.iter().filter(|v| v["step"] == 1).count(), 1, "{r:?}");
+    // A rolled-back atomic batch, and a non-atomic one that stops on an error, still run the stops after the failure.
+    for atomic in [Some("y".to_owned()), None] {
+        let t = s.stop_registry().trips();
+        let r = s.batch(Origin::Synthetic, vec![draw_step(), ("edit.undo".into(), json!({ "bogus": 1 })), draw_step(), stop()], true, atomic.clone());
+        assert!(s.stop_registry().trips() > t, "{atomic:?}: {r:?}");
+        assert_eq!(r.results.last().unwrap()["step"], 3, "{atomic:?}: {r:?}");
+    }
+}
+
+#[test]
+fn agents_cannot_quit_while_a_machine_works() {
+    let (mut s, _) = human();
+    with_doc(&mut s);
+    s.execute("device.connect", json!({})).unwrap();
+    s.hub[0].status.state = MachineState::Running { packets_acked: 1, total: 9 };
+    let t = s.stop_registry().trips();
+    let e = s.execute_as(Origin::Synthetic, "file.exit", json!({})).unwrap_err();
+    assert_eq!(e.code(), "machine_busy", "{e}");
+    assert_eq!(s.stop_registry().trips(), t, "the person's job keeps running");
+    let v = s.execute_as(Origin::Human, "file.exit", json!({})).unwrap();
+    assert_eq!((v["quit"].clone(), v["stopped"].clone()), (json!(true), json!(true)));
+    assert!(s.stop_registry().trips() > t);
+}
+
+#[test]
+#[ignore = "needs I1"]
+fn field_wider_than_rated_is_refused() {
+    // H27: the field grows only as far as the lens was cleared; WP1's validate_profile decides, the engine refuses and
+    // nothing reaches the store.
+    let store = Arc::new(MemStore::default());
+    let mut cfg = config(Origin::Human, true, DeviceAccess::None);
+    cfg.profiles = Some(store.clone());
+    let mut s = Session::new(cfg);
+    with_doc(&mut s);
+    let e = s.execute("device.settings.set", json!({ "fieldWidthMm": 1000 })).unwrap_err();
+    assert_eq!(e.code(), "bad_params", "{e}");
+    assert!(store.saved.lock().unwrap().is_empty());
 }

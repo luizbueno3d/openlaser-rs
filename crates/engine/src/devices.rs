@@ -51,6 +51,10 @@ pub struct PendingArm {
     /// S22: the encoded job `summary` was decoded from; `run_armed` sends exactly this (Arc → owned clone of the
     /// same value, re-checked by bytes_hash in the driver).
     pub job: Encoded,
+    /// `StopRegistry::trips()` when Start was pressed. Any stop after it (control fast path, signal watcher, panic hook:
+    /// none of them touch the session) changes the count, and `run_armed` then refuses (§3.13: a stop between Confirm
+    /// and the driver dequeuing the run cancels the run; §3.16: every stop voids PendingArm).
+    pub(crate) stop_trips: u64,
 }
 
 pub struct CachedStatus {
@@ -84,7 +88,33 @@ impl CachedStatus {
     pub fn busy(&self) -> bool {
         matches!(self.state, MachineState::Framing | MachineState::Running { .. } | MachineState::Stopping)
     }
+
+    /// A fault or an unconfirmed stop that a person has not acknowledged yet (§5.4: faults are sticky until
+    /// acknowledged). Frame, Start and run_armed are refused until `laser.clearFault`.
+    pub fn faulted(&self) -> bool {
+        self.fault.is_some() || matches!(self.state, MachineState::Fault | MachineState::StopNotConfirmed)
+    }
+
+    /// Sets the state the driver reports, except that a sticky fault keeps the machine in Fault / STOP NOT CONFIRMED
+    /// until it is acknowledged (a later Idle or Stopped from the driver never clears it silently).
+    fn settle(&mut self, s: MachineState) {
+        if self.faulted() && matches!(s, MachineState::Idle | MachineState::Stopped) {
+            return;
+        }
+        self.state = s;
+    }
+
+    /// §5.4 watchdog: no StopReport (or a report that could not confirm) → STOP NOT CONFIRMED + sticky fault.
+    fn stop_not_confirmed(&mut self) {
+        self.state = MachineState::StopNotConfirmed;
+        if self.fault.is_none() {
+            self.fault = Some(DriverError::Protocol(STOP_NOT_CONFIRMED.to_owned()));
+        }
+    }
 }
+
+/// The red banner's text (§5.4).
+pub const STOP_NOT_CONFIRMED: &str = "STOP NOT CONFIRMED: use the key switch / E-stop, check the machine, then press Clear Fault";
 
 /// Mutex<Vec<(MachineId, Stopper)>>; a poisoned lock is recovered.
 #[derive(Default)]
@@ -187,6 +217,24 @@ fn busy(m: &MachineId) -> EngineError {
     EngineError::refused(RefusalCode::MachineBusy, format!("{} is framing or running; stop it first", m.0))
 }
 
+/// The refusal while a machine has an unacknowledged fault or an unconfirmed stop.
+fn faulted(m: &MachineId, st: &CachedStatus) -> EngineError {
+    let why = match (&st.fault, &st.state) {
+        (_, MachineState::StopNotConfirmed) => STOP_NOT_CONFIRMED.to_owned(),
+        (Some(e), _) => format!("it reported a fault ({e})"),
+        (None, _) => "it reported a fault".to_owned(),
+    };
+    EngineError::refused(
+        RefusalCode::MachineBusy,
+        format!("{} cannot start anything: {why}. Check the machine, then press Clear Fault in the Laser panel", m.0),
+    )
+}
+
+/// The refusal when a stop landed after Start (nothing was sent).
+fn stopped_after_start() -> EngineError {
+    EngineError::refused(RefusalCode::StoppedAfterQueue, "a stop was pressed after Start, so nothing was sent; press Start again")
+}
+
 fn driver_error(machine: &MachineId, e: DriverError) -> EngineError {
     match e {
         DriverError::Refused(r) => EngineError::Refused(r),
@@ -230,10 +278,12 @@ pub(crate) fn check_receipt(receipt: Option<&FrameReceipt>, summary: &EmissionSu
     Ok(())
 }
 
-/// S23: every row's power must stay within the provider's first-emission cap.
-pub(crate) fn check_cap(cap: Option<f64>, summary: &EmissionSummary) -> Result<(), Refusal> {
+/// S23: every row's power, and every burned segment decoded from the bytes, must stay within the provider's
+/// first-emission cap.
+pub(crate) fn check_cap(cap: Option<f64>, summary: &EmissionSummary, burned: &[EmittedSegment]) -> Result<(), Refusal> {
     let Some(cap) = cap else { return Ok(()) };
-    if let Some(row) = summary.rows.iter().find(|r| r.power_pct.is_nan() || r.power_pct > cap + 1e-9) {
+    let over = |p: f64| p.is_nan() || p > cap + 1e-9;
+    if let Some(row) = summary.rows.iter().find(|r| over(r.power_pct)) {
         return Err(Refusal::new(
             RefusalCode::BenchPowerCap,
             format!(
@@ -242,6 +292,16 @@ pub(crate) fn check_cap(cap: Option<f64>, summary: &EmissionSummary) -> Result<(
             ),
         )
         .layer(row.layer));
+    }
+    if let Some(seg) = burned.iter().find(|s| over(s.power_pct)) {
+        return Err(Refusal::new(
+            RefusalCode::BenchPowerCap,
+            format!(
+                "the first emission of this bench session is capped at {cap} %; the job's bytes burn at {:.2} %. Lower it for the first job",
+                seg.power_pct
+            ),
+        )
+        .at(seg.a));
     }
     Ok(())
 }
@@ -328,6 +388,19 @@ impl Session {
 
     /// `style`/`source` None = the project's JobSettings. Neither changes the fingerprint (S21), so no edit is made.
     pub fn start_frame(&mut self, origin: Origin, mode: FrameMode, style: Option<FrameStyle>, source: Option<FrameSource>) -> Result<Fingerprint, EngineError> {
+        self.start_frame_of(origin, mode, style, source, None)
+    }
+
+    /// `start_frame`, refused as stale when `expect` is given and the current plan's fingerprint differs from it (an
+    /// approved request frames exactly the job the agent asked about, never a later version of it).
+    pub(crate) fn start_frame_of(
+        &mut self,
+        origin: Origin,
+        mode: FrameMode,
+        style: Option<FrameStyle>,
+        source: Option<FrameSource>,
+        expect: Option<Fingerprint>,
+    ) -> Result<Fingerprint, EngineError> {
         require_human(origin, "laser.frame")?;
         self.provider()?;
         let idx = self.doc_index()?;
@@ -341,10 +414,21 @@ impl Session {
         if slot.status.busy() {
             return Err(busy(&machine));
         }
+        if slot.status.faulted() {
+            return Err(faulted(&machine, &slot.status));
+        }
         let style = style.unwrap_or(project.job.frame_style);
         let source = source.unwrap_or(project.job.frame_source);
         let popts = self.plan_options(&project, &selection, project.job.cut_selected, Some(style), Some(source));
         let plan = openlaser_plan::plan(&project, &profile, &popts).map_err(|e| EngineError::JobRefused(Box::new(JobRefused::error(format!("plan: {e}")))))?;
+        if let Some(want) = expect
+            && want != plan.fingerprint
+        {
+            return Err(EngineError::refused(
+                RefusalCode::Stale,
+                format!("the job changed after the request ({} is now {}); ask again", want.short(), plan.fingerprint.short()),
+            ));
+        }
         let frame = openlaser_safety::validate_frame(&plan, &profile, source).map_err(|r| {
             EngineError::JobRefused(Box::new(JobRefused { fingerprint: Some(r.fingerprint), refusals: r.refusals, notices: r.notices, error: None }))
         })?;
@@ -376,10 +460,20 @@ impl Session {
     /// laser.start: cold-builds the job, requires a matching FrameReceipt, stores PendingArm (with the exact encoded
     /// job), raises ArmRequested. Never emits. The ARM dialog shows only `PendingArm.summary`, never a submission's.
     pub fn request_arm(&mut self, origin: Origin) -> Result<&PendingArm, EngineError> {
+        self.request_arm_of(origin, None)
+    }
+
+    /// `request_arm`, refused as stale when `expect` is given and the job built now has another fingerprint (an
+    /// approved submission arms exactly the job the agent submitted).
+    pub(crate) fn request_arm_of(&mut self, origin: Origin, expect: Option<Fingerprint>) -> Result<&PendingArm, EngineError> {
         require_human(origin, "laser.start")?;
         let provider = self.provider()?;
         let idx = self.doc_index()?;
         self.void_pending_arm("Start was pressed again");
+        // A stop the session has not folded yet happened before this Start: fold it now, then remember the count, so
+        // that any later stop cancels this ARM (run_armed compares it).
+        self.fold_stop_trips();
+        let stop_trips = self.stop_registry.trips();
         let (machine, revision) = {
             let d = self.doc()?;
             (d.machine.clone(), d.revision)
@@ -390,14 +484,32 @@ impl Session {
         if slot.status.busy() {
             return Err(busy(&machine));
         }
+        if slot.status.faulted() {
+            return Err(faulted(&machine, &slot.status));
+        }
         let receipt = slot.status.receipt.clone();
+        if receipt.is_none() {
+            // Explained before the build; check_receipt below applies every rule to the built job.
+            return Err(EngineError::Refused(Refusal::new(
+                RefusalCode::FrameRequired,
+                "Frame this job first: Start needs a red-light frame of this exact job from this session",
+            )));
+        }
         let built =
             self.build_job(Some(idx), &JobOptions { machine: Some(machine.clone()), selected_only: None }).map_err(|r| EngineError::JobRefused(Box::new(r)))?;
+        if let Some(want) = expect
+            && want != built.summary.fingerprint
+        {
+            return Err(EngineError::refused(
+                RefusalCode::Stale,
+                format!("the job changed after it was submitted ({} is now {}); submit it again", want.short(), built.summary.fingerprint.short()),
+            ));
+        }
         let now = self.cfg.clock.now();
         check_receipt(receipt.as_ref(), &built.summary, self.id, now).map_err(EngineError::Refused)?;
         let cap =
             provider.emission_cap_pct().map_err(|e| EngineError::refused(RefusalCode::BenchPowerCap, format!("the first-emission cap cannot be read: {e}")))?;
-        check_cap(cap, &built.summary).map_err(EngineError::Refused)?;
+        check_cap(cap, &built.summary, &built.burned).map_err(EngineError::Refused)?;
         if profile.checklist.is_empty() {
             return Err(EngineError::refused(RefusalCode::ChecklistIncomplete, "the machine profile has no job checklist; add one in Device Settings"));
         }
@@ -413,6 +525,7 @@ impl Session {
             revision,
             expires,
             job: built.encoded,
+            stop_trips,
         });
         self.pending_doc = Some(idx);
         self.push_event(Event::ArmRequested);
@@ -445,6 +558,11 @@ impl Session {
         };
         let pending_doc = self.pending_doc.take();
         self.push_event(Event::ArmVoided { reason: "armed".to_owned() });
+        // A stop since Start that the session has not seen (fast path, signal watcher, panic hook) cancels the run: the
+        // driver's generation check only cancels commands queued BEFORE a trip, and this one is not queued yet.
+        if self.stop_registry.trips() != pending.stop_trips {
+            return Err(stopped_after_start());
+        }
         let now = self.cfg.clock.now();
         let current =
             pending_doc.is_some() && pending_doc == self.active && pending_doc.and_then(|i| self.docs.get(i)).is_some_and(|d| d.revision == pending.revision);
@@ -454,23 +572,34 @@ impl Session {
         if now > pending.expires {
             return Err(EngineError::refused(RefusalCode::ArmExpired, "the ARM request expired; press Start again"));
         }
-        token.check(&pending.fingerprint, &pending.summary.bytes_hash, &pending.machine, self.id, now).map_err(EngineError::Refused)?;
-        if token.fingerprint() != &pending.fingerprint || token.bytes() != &pending.summary.bytes_hash || token.machine() != &pending.machine {
-            return Err(EngineError::refused(RefusalCode::BytesMismatch, "the token is for another job"));
-        }
+        // The cheap, non-secret checks first: the encoded object is the one the summary describes (S22), the machine
+        // can take it, and the first-emission cap (S23) holds for the rows and for the decoded burn.
         if pending.job.bytes_hash() != pending.summary.bytes_hash || pending.job.fingerprint() != pending.fingerprint {
             return Err(EngineError::refused(RefusalCode::BytesMismatch, "the encoded job is not the one whose summary was confirmed"));
         }
         let provider = self.provider()?;
-        let cap =
-            provider.emission_cap_pct().map_err(|e| EngineError::refused(RefusalCode::BenchPowerCap, format!("the first-emission cap cannot be read: {e}")))?;
-        check_cap(cap, &pending.summary).map_err(EngineError::Refused)?;
         let machine = pending.machine.clone();
-        let total = pending.summary.packets;
-        let fingerprint = pending.fingerprint;
-        let Some(slot) = self.slot_mut(&machine) else { return Err(not_connected(&machine)) };
+        let Some(slot) = self.slot(&machine) else { return Err(not_connected(&machine)) };
         if slot.status.busy() {
             return Err(busy(&machine));
+        }
+        if slot.status.faulted() {
+            return Err(faulted(&machine, &slot.status));
+        }
+        let cap =
+            provider.emission_cap_pct().map_err(|e| EngineError::refused(RefusalCode::BenchPowerCap, format!("the first-emission cap cannot be read: {e}")))?;
+        check_cap(cap, &pending.summary, &pending.burned).map_err(EngineError::Refused)?;
+        token.check(&pending.fingerprint, &pending.summary.bytes_hash, &pending.machine, self.id, now).map_err(EngineError::Refused)?;
+        if token.fingerprint() != &pending.fingerprint || token.bytes() != &pending.summary.bytes_hash || token.machine() != &pending.machine {
+            return Err(EngineError::refused(RefusalCode::BytesMismatch, "the token is for another job"));
+        }
+        let total = pending.summary.packets;
+        let fingerprint = pending.fingerprint;
+        let stop_trips = pending.stop_trips;
+        let registry = Arc::clone(&self.stop_registry);
+        let Some(slot) = self.slot_mut(&machine) else { return Err(not_connected(&machine)) };
+        if registry.trips() != stop_trips {
+            return Err(stopped_after_start());
         }
         match (pending.job, &slot.driver) {
             (Encoded::Lmc { job, .. }, AnyDriver::Lmc(h)) => {
@@ -482,6 +611,11 @@ impl Session {
                 h.run(job, token);
             }
             _ => return Err(EngineError::refused(RefusalCode::WrongDeviceKind, format!("{} is connected with another kind of driver", machine.0))),
+        }
+        // A stop that landed between the check above and the queueing would not cancel the queued run (it recorded the
+        // newer generation): trip this machine's latch again, so the driver refuses it as queued-then-stopped (§5.3).
+        if registry.trips() != stop_trips {
+            stopper_of(&slot.driver).stop();
         }
         slot.status.state = MachineState::Running { packets_acked: 0, total };
         slot.status.progress = Some((0, total));
@@ -514,14 +648,20 @@ impl Session {
         self.void_pending_arm("stopped");
         for (m, ack) in acks {
             if let Some(slot) = self.slot_mut(m) {
+                // Something was framing or running: its stop must be confirmed (§5.4 watchdog).
+                let needed = slot.op.is_some() || slot.status.busy();
                 match &ack.report {
                     Some(report) => {
                         slot.status.last_stop = Some(report.clone());
-                        slot.status.state = MachineState::Stopped;
                         slot.status.progress = None;
                         slot.op = None;
+                        if report.confirmed {
+                            slot.status.settle(MachineState::Stopped);
+                        } else {
+                            slot.status.stop_not_confirmed();
+                        }
                     }
-                    None if slot.op.is_some() => slot.status.state = MachineState::StopNotConfirmed,
+                    None if needed => slot.status.stop_not_confirmed(),
                     None => {}
                 }
             }
@@ -552,15 +692,7 @@ impl Session {
     /// A `Stopped` event or a tripped latch seen here also voids PendingArm (stops that came through the control
     /// fast path or a signal never touched the Session).
     pub fn poll(&mut self) -> Vec<Event> {
-        let trips = self.stop_registry.trips();
-        if trips != self.seen_stop_trips {
-            self.seen_stop_trips = trips;
-            self.void_pending_arm("stopped");
-            let moved = self.requests.stopped_all();
-            for (id, state) in moved {
-                self.push_event(Event::Request { id, state });
-            }
-        }
+        self.fold_stop_trips();
         let batches: Vec<(MachineId, Vec<DriverEvent>)> = self.hub.iter().map(|s| (s.machine.clone(), drain(&s.driver))).collect();
         for (machine, events) in batches {
             for ev in events {
@@ -577,6 +709,20 @@ impl Session {
             self.push_event(Event::Request { id, state });
         }
         self.events.drain(..).collect()
+    }
+
+    /// A stop that went through the registry without touching the session (control fast path, signal watcher, panic
+    /// hook) voids the pending ARM and ends every framing request.
+    pub(crate) fn fold_stop_trips(&mut self) {
+        let trips = self.stop_registry.trips();
+        if trips != self.seen_stop_trips {
+            self.seen_stop_trips = trips;
+            self.void_pending_arm("stopped");
+            let moved = self.requests.stopped_all();
+            for (id, state) in moved {
+                self.push_event(Event::Request { id, state });
+            }
+        }
     }
 
     /// One driver event → cached status, receipts, requests and the pending ARM.
@@ -597,7 +743,14 @@ impl Session {
                     }
                 }
                 DriverEvent::State(s) => {
-                    slot.status.state = s.clone();
+                    slot.status.settle(s.clone());
+                    match s {
+                        MachineState::StopNotConfirmed => slot.status.stop_not_confirmed(),
+                        MachineState::Fault if slot.status.fault.is_none() => {
+                            slot.status.fault = Some(DriverError::Protocol("the driver reported a fault".to_owned()));
+                        }
+                        _ => {}
+                    }
                     if matches!(
                         s,
                         MachineState::Idle | MachineState::Stopped | MachineState::Fault | MachineState::Disconnected | MachineState::StopNotConfirmed
@@ -613,7 +766,7 @@ impl Session {
                     slot.status.receipt = Some(r.clone());
                     if let Some(Op::Frame { mode: FrameMode::Once, .. }) = slot.op {
                         slot.op = None;
-                        slot.status.state = MachineState::Idle;
+                        slot.status.settle(MachineState::Idle);
                     }
                     request_moves.extend(self.requests.frame_completed(machine, r));
                 }
@@ -628,7 +781,7 @@ impl Session {
                     slot.status.progress = None;
                     match outcome {
                         Outcome::Finished { .. } => {
-                            slot.status.state = MachineState::Idle;
+                            slot.status.settle(MachineState::Idle);
                             if let Some(p) = &provider
                                 && let Err(e) = p.record_emission()
                             {
@@ -636,8 +789,12 @@ impl Session {
                             }
                         }
                         Outcome::Stopped(report) => {
-                            slot.status.state = MachineState::Stopped;
                             slot.status.last_stop = Some(report.clone());
+                            if report.confirmed {
+                                slot.status.settle(MachineState::Stopped);
+                            } else {
+                                slot.status.stop_not_confirmed();
+                            }
                             void = Some("stopped");
                         }
                     }
@@ -646,7 +803,11 @@ impl Session {
                 DriverEvent::Stopped(report) => {
                     slot.op = None;
                     slot.status.progress = None;
-                    slot.status.state = MachineState::Stopped;
+                    if report.confirmed {
+                        slot.status.settle(MachineState::Stopped);
+                    } else {
+                        slot.status.stop_not_confirmed();
+                    }
                     slot.status.last_stop = Some(report.clone());
                     void = Some("stopped");
                     request_moves.extend(self.requests.stopped(machine, Some(report.clone())));
@@ -678,7 +839,8 @@ impl Session {
         }
     }
 
-    /// Acknowledges a sticky fault (the Laser panel's "Clear" button; human-only through `laser.clearFault`).
+    /// Acknowledges a sticky fault or an unconfirmed stop (the Laser panel's "Clear Fault" button; human-only through
+    /// `laser.clearFault`). The only acknowledgement there is: until it, Frame, Start and run_armed are refused.
     pub fn acknowledge_fault(&mut self, origin: Origin, machine: &MachineId) -> Result<(), EngineError> {
         require_human(origin, "laser.clearFault")?;
         let Some(slot) = self.slot_mut(machine) else { return Err(not_connected(machine)) };
@@ -785,13 +947,41 @@ pub(crate) mod tests {
     #[test]
     fn bench_cap_refuses_rows_above_it() {
         let s = summary(Fingerprint([1; 32]), "m", &[5.0, 30.0]);
-        assert!(check_cap(None, &s).is_ok());
-        assert!(check_cap(Some(30.0), &s).is_ok());
-        let r = check_cap(Some(10.0), &s).unwrap_err();
+        assert!(check_cap(None, &s, &[]).is_ok());
+        assert!(check_cap(Some(30.0), &s, &[]).is_ok());
+        let r = check_cap(Some(10.0), &s, &[]).unwrap_err();
         assert_eq!(r.code, RefusalCode::BenchPowerCap);
         assert_eq!(r.layer, Some(openlaser_types::LayerKey::Color(1)));
         let nan = summary(Fingerprint([1; 32]), "m", &[f64::NAN]);
-        assert!(check_cap(Some(10.0), &nan).is_err(), "NaN power never passes a cap");
+        assert!(check_cap(Some(10.0), &nan, &[]).is_err(), "NaN power never passes a cap");
+        // The burn decoded from the bytes is capped too, whatever the rows say.
+        let low = summary(Fingerprint([1; 32]), "m", &[5.0]);
+        let seg = |p: f64| EmittedSegment { a: [1.0, 2.0], b: [3.0, 4.0], power_pct: p };
+        assert!(check_cap(Some(10.0), &low, &[seg(10.0)]).is_ok());
+        let r = check_cap(Some(10.0), &low, &[seg(5.0), seg(40.0)]).unwrap_err();
+        assert_eq!(r.code, RefusalCode::BenchPowerCap);
+        assert!(r.message.contains("40.00"), "{}", r.message);
+        assert!(check_cap(Some(10.0), &low, &[seg(f64::NAN)]).is_err());
+    }
+
+    #[test]
+    fn sticky_status_rules() {
+        let mut st = CachedStatus::new("test");
+        st.state = MachineState::Idle;
+        assert!(!st.faulted());
+        st.stop_not_confirmed();
+        assert!(st.faulted() && st.fault.is_some());
+        assert!(matches!(st.state, MachineState::StopNotConfirmed));
+        // A later Idle or Stopped from the driver never clears it.
+        st.settle(MachineState::Idle);
+        st.settle(MachineState::Stopped);
+        assert!(matches!(st.state, MachineState::StopNotConfirmed));
+        // Other states are shown (a machine still running after an unconfirmed stop is still running), still faulted.
+        st.settle(MachineState::Running { packets_acked: 1, total: 2 });
+        assert!(st.faulted() && st.busy());
+        st.fault = None;
+        st.state = MachineState::Fault;
+        assert!(st.faulted(), "the Fault state alone is sticky too");
     }
 
     #[test]

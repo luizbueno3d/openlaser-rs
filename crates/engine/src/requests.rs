@@ -509,7 +509,7 @@ impl Session {
             return Err(EngineError::human_only("request.approve"));
         }
         if let Some(r) = self.requests.frame_requests.iter().find(|r| r.view.request == id) {
-            let (state, doc, mode) = (r.view.state, r.doc, r.view.mode);
+            let (state, doc, mode, fingerprint) = (r.view.state, r.doc, r.view.mode, r.view.fingerprint);
             if state != FrameRequestState::AwaitingHuman {
                 return Err(not_awaiting(id, state.as_str()));
             }
@@ -517,7 +517,8 @@ impl Session {
                 return Err(not_awaiting(id, "stale"));
             }
             self.select_doc(doc)?;
-            self.start_frame(Origin::Human, mode, None, None)?;
+            // Exactly the job the agent asked about: a fingerprint that moved on is stale, whatever the revision says.
+            self.start_frame_of(origin, mode, None, None, Some(fingerprint))?;
             let mut moved = Vec::new();
             if let Some(r) = self.requests.frame_mut(id) {
                 Requests::set_frame(r, FrameRequestState::Framing, &mut moved);
@@ -528,19 +529,19 @@ impl Session {
             return Ok(());
         }
         let Some(r) = self.requests.submissions.iter().find(|r| r.view.submission == id) else { return Err(unknown(id)) };
-        let (state, doc) = (r.view.state, r.doc);
+        let (state, doc, fingerprint) = (r.view.state, r.doc, r.view.fingerprint);
         if doc >= self.docs.len() {
             return Err(not_awaiting(id, "stale"));
         }
         match state {
             SubmissionState::AwaitingHuman => {
                 self.select_doc(doc)?;
-                self.start_frame(Origin::Human, FrameMode::Once, None, None)?;
+                self.start_frame_of(origin, FrameMode::Once, None, None, Some(fingerprint))?;
                 Ok(())
             }
             SubmissionState::AwaitingArm => {
                 self.select_doc(doc)?;
-                self.request_arm(Origin::Human).map(|_| ())
+                self.request_arm_of(origin, Some(fingerprint)).map(|_| ())
             }
             other => Err(not_awaiting(id, other.as_str())),
         }
