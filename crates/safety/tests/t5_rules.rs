@@ -260,6 +260,84 @@ fn safety_short_path_refused() {
     assert!(frame_codes(&validate_frame(&p, &m, FrameSource::Job)).contains(&RefusalCode::MalformedPoint));
 }
 
+/// Red-zone review blocker: an object with a point beyond `MAX_COORD_MM` is left out of the plan whole and recorded
+/// as a fact; `validate` and `validate_frame` refuse it by name and distance, on a job that is otherwise fine.
+#[test]
+fn safety_far_object_refused_by_name() {
+    let far = |p: &mut JobPlan| p.facts.far_objects.push((ObjectId(7), LayerKey::Color(0), 1e9));
+    // Gantry (validates in full on WP0 stubs): fine without the fact, refused with it.
+    let m = gantry_profile();
+    let mut p = job(&m, vec![section(0, vec![square(200.0, 200.0, 50.0)], gantry_cut(50.0, 30.0))]);
+    assert_eq!(codes(&validate(&p, &m)), Vec::<RefusalCode>::new());
+    far(&mut p);
+    let r = validate(&p, &m).unwrap_err();
+    assert_eq!(r.refusals.iter().map(|x| x.code).collect::<Vec<_>>(), vec![RefusalCode::OutOfBed]);
+    let x = &r.refusals[0];
+    assert_eq!((x.object, x.layer), (Some(ObjectId(7)), Some(LayerKey::Color(0))));
+    assert!(x.message.contains("object 7") && x.message.contains("1000000000 mm"), "{}", x.message);
+    for source in [FrameSource::Job, FrameSource::ToolLayersOnly, FrameSource::JobAndToolLayers] {
+        let r = validate_frame(&p, &m, source).unwrap_err();
+        assert!(r.refusals.iter().any(|x| x.code == RefusalCode::OutOfBed && x.object == Some(ObjectId(7))), "{source:?}: {:?}", r.refusals);
+    }
+    // Galvo: refused as outside the work area, by object.
+    let (m, mut p) = galvo_job(vec![square(0.0, 0.0, 5.0)]);
+    far(&mut p);
+    let r = validate(&p, &m).unwrap_err();
+    assert!(
+        r.refusals.iter().any(|x| x.code == RefusalCode::OutsideWorkArea && x.object == Some(ObjectId(7)) && x.message.contains("work area")),
+        "{:?}",
+        r.refusals
+    );
+    let r = validate_frame(&p, &m, FrameSource::Job).unwrap_err();
+    assert!(r.refusals.iter().any(|x| x.code == RefusalCode::OutsideWorkArea && x.object == Some(ObjectId(7))), "{:?}", r.refusals);
+}
+
+/// The same blocker end to end: `M(1e9, 0) M(0, 0) C(5, 10)(10, 10)(10, 0)` next to an in-field square. The far
+/// object is refused by name and its in-field subpath is never planned as its control polygon (the trapezoid).
+#[test]
+#[ignore = "needs I1"]
+fn safety_lone_far_move_to_refused_end_to_end() {
+    use std::sync::Arc;
+
+    use openlaser_doc::{BezPath, Geom, Shape};
+
+    let m = jpt();
+    let mut p = openlaser_doc::Project::new(
+        openlaser_doc::Workspace { kind: DeviceKind::GalvoLmc, size_mm: [200.0, 200.0], origin: WorkspaceOrigin::Center },
+        &m.layer_defaults,
+    );
+    let shape = |id: u64, b: BezPath| Shape {
+        id: ObjectId(id),
+        name: None,
+        layer: LayerKey::Color(0),
+        xform: openlaser_geom::Affine::IDENTITY,
+        geom: Geom::Path(Arc::new(b)),
+        locked: false,
+        power_scale: Percent::new(100.0).unwrap(),
+        priority: 0,
+    };
+    let mut b = BezPath::new();
+    b.move_to((1e9, 0.0));
+    b.move_to((0.0, 0.0));
+    b.curve_to((5.0, 10.0), (10.0, 10.0), (10.0, 0.0));
+    p.shapes.push(Arc::new(shape(7, b)));
+    let mut sq = BezPath::new();
+    sq.move_to((-20.0, -20.0));
+    sq.line_to((-10.0, -20.0));
+    sq.line_to((-10.0, -10.0));
+    sq.close_path();
+    p.shapes.push(Arc::new(shape(8, sq)));
+    p.normalize();
+    let opts =
+        openlaser_plan::PlanOptions { selected: None, repeats: 1, frame_style: FrameStyle::Contour, frame_source: FrameSource::Job, flatten_tol_mm: 0.01 };
+    let plan = openlaser_plan::plan(&p, &m, &opts).unwrap();
+    let trapezoid = line(&[[0.0, 0.0], [5.0, 10.0], [10.0, 10.0], [10.0, 0.0]]);
+    assert!(!plan.sections.iter().flat_map(|s| s.paths.iter()).chain(&plan.frame).any(|q| *q == trapezoid), "the control polygon was planned");
+    let r = validate(&plan, &m).unwrap_err();
+    assert!(r.refusals.iter().any(|x| x.code == RefusalCode::OutsideWorkArea && x.object == Some(ObjectId(7))), "{:?}", r.refusals);
+    assert!(validate_frame(&plan, &m, FrameSource::Job).is_err());
+}
+
 #[test]
 fn safety_zero_first_jump_timings_refused() {
     // B3 defence in depth: a profile whose first-jump delay, settle or MO settle is 0 never reaches the galvo.
@@ -289,6 +367,29 @@ fn safety_zero_first_jump_timings_refused() {
         Err(e) => e.refusals,
     };
     assert!(!ok.iter().any(|x| x.message.contains("encode(s) to 0")), "{ok:?}");
+}
+
+#[test]
+fn safety_negative_first_jump_delay_refused() {
+    // B3 defence in depth: a negative (or zero) first-jump delay encodes with the 0x8000 sign; the magnitude alone
+    // is not 0, so the zero rule does not see it. The words match the profile, so only the sign rule refuses it.
+    let mut m = jpt();
+    if let Kinematics::Galvo(g) = &mut m.kind {
+        g.first_jump.delay_us = -200.0;
+    }
+    let q = default_words(&m);
+    assert_eq!(q.timings.jump_delay_long, (200, 0x8000));
+    let p = job(&m, vec![section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(q))]);
+    let r = validate(&p, &m).unwrap_err();
+    assert!(r.refusals.iter().any(|x| x.code == RefusalCode::NotEncodable && x.message.contains("sign word 0x8000")), "{:?}", r.refusals);
+    // The profile's own positive delay carries no sign.
+    let m = jpt();
+    let p = job(&m, vec![section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(default_words(&m)))]);
+    let ok = match validate(&p, &m) {
+        Ok(_) => Vec::new(),
+        Err(e) => e.refusals,
+    };
+    assert!(!ok.iter().any(|x| x.message.contains("sign word")), "{ok:?}");
 }
 
 #[test]

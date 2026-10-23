@@ -8,7 +8,9 @@
 //!   the words.
 //! - **Frame** (Bounds or Contour) from every outline on an emitting layer, hidden or not (frame ⊇ burn); Fill
 //!   layers frame their outlines, never the hatch. Tool layers T1/T2 go to `tool_frame` only.
-//! - **Facts** for everything `safety` must judge; nothing is dropped silently.
+//! - **Facts** for everything `safety` must judge; nothing is dropped silently, and no geometry is ever substituted
+//!   for a shape the planner cannot plan (a non-finite, too detailed or too far shape becomes a fact, never a
+//!   stand-in path).
 //! - **Fingerprint** per S21 ([`fingerprint_of`]), frame style and source excluded.
 #![forbid(unsafe_code)]
 
@@ -30,7 +32,8 @@ pub use openlaser_types::{Fingerprint, FrameSource, FrameStyle, Hz, LayerKey, Ma
 pub use fingerprint::fingerprint_of;
 pub use frame::{HULL_FRAME_UNSUPPORTED, bounds_rect, frame_style_of};
 pub use planner::{
-    MAX_COORD_MM, MAX_DESIGN_POINTS, MAX_HATCH_LINES, MAX_PASSES_PER_LAYER, MAX_SECTION_POINTS, MAX_SECTIONS, MAX_SUB_LAYERS, MIN_FLATTEN_TOL_MM,
+    MAX_COORD_MM, MAX_DESIGN_POINTS, MAX_FLATTEN_TOL_MM, MAX_HATCH_LINES, MAX_PASSES_PER_LAYER, MAX_SECTION_POINTS, MAX_SECTIONS, MAX_SUB_LAYERS,
+    MIN_FLATTEN_TOL_MM,
 };
 pub use transform::{gantry_bed, gantry_transform};
 
@@ -137,6 +140,10 @@ pub struct PlanFacts {
     pub empty_fill_layers: Vec<LayerKey>,
     pub open_fill_shapes: Vec<(ObjectId, LayerKey)>,
     pub non_finite_objects: Vec<ObjectId>,
+    /// Objects with a point beyond [`MAX_COORD_MM`] on either axis (design mm, after every transform), with their
+    /// layer and the distance (mm) of their farthest point from the design origin. Nothing of such an object is
+    /// planned (no section, no frame, no stand-in geometry); `safety` refuses the job, naming each one.
+    pub far_objects: Vec<(ObjectId, LayerKey, f64)>,
     /// OffsetFill, timings, wobble, Hull frame.
     pub unsupported: Vec<(LayerKey, String)>,
     pub tool_layer_objects: Vec<ObjectId>,

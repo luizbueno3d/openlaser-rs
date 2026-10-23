@@ -5,6 +5,9 @@
 //! notices the confirmation shows. [`validate_frame`] applies only the geometry rules, for framing a job that
 //! cannot burn yet. The table of rules is [`rules`].
 //!
+//! An object the planner could not plan as drawn is a fact, never stand-in geometry: a point beyond
+//! `openlaser_plan::MAX_COORD_MM` refuses the job (`outside_work_area` / `out_of_bed`) by object, in both.
+//!
 //! Beyond the §3.8 table, both re-derive the plan's fingerprint and quantised words from its contents and refuse a
 //! plan that does not match (`Stale`), so a plan edited after planning cannot reach an encoder, and both check that
 //! the job frame's bounds contain every burn point (`FrameDoesNotCoverJob`, defence in depth for frame ⊇ burn).
@@ -195,6 +198,7 @@ pub fn validate(plan: &JobPlan, machine: &MachineProfile) -> Result<Validated, R
         }
     }
     checks::check_frame_covers(&mut out, &plan.frame, &plan.sections);
+    checks::check_far_objects(&mut out, &area, &plan.facts);
     checks::tool_layer_notice(&mut out, &plan.facts);
 
     if !out.refusals.is_empty() {
@@ -216,7 +220,8 @@ pub fn validate(plan: &JobPlan, machine: &MachineProfile) -> Result<Validated, R
 /// Framing a job that cannot burn (e.g. tool layers only, or to look at placement while a power refusal is open)
 /// needs only the geometry rules. A receipt from it never covers a refused job (the fingerprint differs).
 ///
-/// Checks: the plan's identity (machine, kind, fingerprint); a Hull frame (P1) is refused; the traced paths
+/// Checks: the plan's identity (machine, kind, fingerprint); a Hull frame (P1) is refused; an object the planner
+/// left out (non-finite, or with a point beyond `MAX_COORD_MM`) is refused whatever the source; the traced paths
 /// (`frame`, `tool_frame` or both, per `source`) must be finite, inside the work area or bed, encodable and
 /// within the limits; a frame that stands for the job (`Job`, `JobAndToolLayers`) must cover every burn point.
 pub fn validate_frame(plan: &JobPlan, machine: &MachineProfile, source: FrameSource) -> Result<FramePlan, Refused> {
@@ -247,6 +252,7 @@ pub fn validate_frame(plan: &JobPlan, machine: &MachineProfile, source: FrameSou
         out.refuse(Refusal::new(RefusalCode::NothingToMark, what));
     }
     let area = Area::of(machine);
+    checks::check_far_objects(&mut out, &area, &plan.facts);
     checks::check_paths(&mut out, &area, &machine.limits, "the frame", None, &paths);
     if source != FrameSource::ToolLayersOnly {
         checks::check_frame_covers(&mut out, &paths, &plan.sections);

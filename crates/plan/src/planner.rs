@@ -1,9 +1,11 @@
 //! `plan()`: document + machine → `JobPlan` (SPEC §3.7, §7.4).
 //!
 //! Every shape lands in exactly one place: a burn section, the frame, the tool frame, or a fact that `safety`
-//! turns into a refusal or a numbered notice. Nothing is clamped or truncated. The one exception to "lands
-//! somewhere": a path with fewer than 2 points (a lone point, an empty path) has nothing to burn or trace, so it
-//! burns nothing and is not framed (it can only burn less, never more; PlanFacts has no field for it yet).
+//! turns into a refusal or a numbered notice. Nothing is clamped, truncated or substituted: a shape the planner
+//! cannot flatten as drawn (non-finite, too detailed, or with any point beyond [`MAX_COORD_MM`]) is a fact as a
+//! whole, never partly planned and never replaced by stand-in geometry. The one exception to "lands somewhere":
+//! an in-range subpath with fewer than 2 points (a lone `MoveTo`) has nothing to burn or trace, so it burns
+//! nothing and is not framed (it can only burn less, never more; PlanFacts has no field for it yet).
 
 use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
@@ -25,10 +27,11 @@ pub const MIN_FLATTEN_TOL_MM: f64 = 1e-3;
 /// Curve tolerances above this (0.1 mm) are refused (an `unsupported` fact), never used: a coarse tolerance turns
 /// curves into chords that burn visibly off the design.
 pub const MAX_FLATTEN_TOL_MM: f64 = 0.1;
-/// A shape with a control point farther than this from the origin (100 m) is not flattened: its control polygon
-/// (every on- and off-curve point, in order) stands in for it. The curve lies inside the convex hull of those
-/// points, and the stand-in holds the far point itself, so `safety` always refuses it (outside the work area or
-/// the bed); it is never quietly replaced by an in-field chord.
+/// A shape with any point farther than this from the design origin on either axis (100 m), after its own and its
+/// groups' transforms, is not planned at all: no section, no frame and no stand-in geometry (not its control
+/// polygon, not a chord, not the subpaths that do lie in the field). Every point counts: a `MoveTo` (a lone one
+/// too), a `LineTo`, and every on- and off-curve point of every subpath. The shape is recorded in
+/// `PlanFacts::far_objects` with its farthest point's distance, and `safety` refuses the job, naming it.
 pub const MAX_COORD_MM: f64 = 100_000.0;
 /// Budget of flattened design points (a pre-flatten upper estimate), against forged or runaway documents.
 pub const MAX_DESIGN_POINTS: f64 = 5_000_000.0;
@@ -57,6 +60,8 @@ enum Flat {
     Polys(Vec<Polyline>),
     NonFinite,
     TooDetailed(f64),
+    /// A point lies beyond [`MAX_COORD_MM`]: the distance (mm) of the shape's farthest point from the design origin.
+    TooFar(f64),
 }
 
 fn finite_point(p: Point) -> bool {
@@ -96,33 +101,9 @@ fn flatten_estimate(bez: &BezPath, tol: f64) -> f64 {
     n
 }
 
-/// The control polygon of each subpath: every on- and off-curve point in order (ClosePath repeats the subpath's
-/// first point). It contains the far control point that made the shape too big to flatten, so the stand-in is
-/// never inside the field when the real curve is not.
-fn control_polygons(bez: &BezPath) -> Vec<Polyline> {
-    let mut out: Vec<Polyline> = Vec::new();
-    let mut cur: Vec<[f64; 2]> = Vec::new();
-    for el in bez.elements() {
-        if let PathEl::MoveTo(_) = el
-            && !cur.is_empty()
-        {
-            out.push(Polyline(std::mem::take(&mut cur)));
-        }
-        if let PathEl::ClosePath = el {
-            if let Some(&first) = cur.first() {
-                cur.push(first);
-            }
-            continue;
-        }
-        cur.extend(el_points(el).into_iter().map(|p| [p.x, p.y]));
-    }
-    if !cur.is_empty() {
-        out.push(Polyline(cur));
-    }
-    out
-}
-
-/// Flattens one object-space path placed by `xf` (design mm), within the job's point budget.
+/// Flattens one object-space path placed by `xf` (design mm), within the job's point budget. A shape with any
+/// point (of any element, in any subpath) beyond [`MAX_COORD_MM`] is `TooFar` as a whole: nothing of it is
+/// flattened or returned.
 fn flatten_placed(mut bez: BezPath, xf: Affine, tol: f64, budget: &mut f64) -> Flat {
     if !xf.is_finite() {
         return Flat::NonFinite;
@@ -133,7 +114,7 @@ fn flatten_placed(mut bez: BezPath, xf: Affine, tol: f64, budget: &mut f64) -> F
         return Flat::NonFinite;
     }
     if pts.iter().any(|p| p.x.abs() > MAX_COORD_MM || p.y.abs() > MAX_COORD_MM) {
-        return Flat::Polys(control_polygons(&bez));
+        return Flat::TooFar(pts.iter().map(|p| p.x.hypot(p.y)).fold(0.0, f64::max));
     }
     let estimate = flatten_estimate(&bez, tol);
     if estimate > *budget {
@@ -155,9 +136,10 @@ struct Ctx<'a> {
     out_of_budget: bool,
     frame_outlines: Vec<Polyline>,
     tool_outlines: Vec<Polyline>,
-    /// Membership mirrors of `facts.non_finite_objects` / `facts.open_fill_shapes` / `facts.unsupported` (no
-    /// quadratic scans on forged documents).
+    /// Membership mirrors of `facts.non_finite_objects` / `facts.far_objects` / `facts.open_fill_shapes` /
+    /// `facts.unsupported` (no quadratic scans on forged documents).
     non_finite_seen: HashSet<ObjectId>,
+    far_seen: HashSet<(ObjectId, LayerKey)>,
     open_seen: HashSet<(ObjectId, LayerKey)>,
     unsupported_seen: HashSet<(LayerKey, String)>,
     /// `opts.selected` as a set.
@@ -182,6 +164,7 @@ impl<'a> Ctx<'a> {
             frame_outlines: Vec::new(),
             tool_outlines: Vec::new(),
             non_finite_seen: HashSet::new(),
+            far_seen: HashSet::new(),
             open_seen: HashSet::new(),
             unsupported_seen: HashSet::new(),
             selection: opts.selected.as_ref().map(|s| s.iter().copied().collect()),
@@ -223,6 +206,12 @@ impl<'a> Ctx<'a> {
 
     /// Walks the shape tree in draw order (explicit stack: no recursion depth limit to hit).
     fn leaves(&mut self, tol: f64) -> Vec<Leaf> {
+        self.leaves_with(tol, Geom::to_bez)
+    }
+
+    /// [`Self::leaves`] with each drawable geometry's object-space path given by `bez_of` (`Geom::to_bez` in
+    /// production; unit tests read `Geom::Path` directly).
+    fn leaves_with(&mut self, tol: f64, bez_of: impl Fn(&Geom) -> BezPath) -> Vec<Leaf> {
         let mut out = Vec::new();
         let mut budget = MAX_DESIGN_POINTS;
         let project: &'a Project = self.project;
@@ -239,14 +228,21 @@ impl<'a> Ctx<'a> {
                 continue;
             }
             let bitmap = matches!(shape.geom, Geom::Bitmap(_));
-            match flatten_placed(shape.geom.to_bez(), xf, tol, &mut budget) {
+            match flatten_placed(bez_of(&shape.geom), xf, tol, &mut budget) {
                 Flat::Polys(polys) => {
+                    // Only in-range geometry reaches here (`TooFar` is all or nothing), so a dropped polyline is an
+                    // in-range lone point: it burns nothing, and nothing stands in for it.
                     let polys: Vec<Polyline> = polys.into_iter().filter(|p| p.len() >= 2).collect();
                     out.push(Leaf { id: shape.id, layer: shape.layer, polys, bitmap, power_scale: shape.power_scale.get() });
                 }
                 Flat::NonFinite => {
                     if self.non_finite_seen.insert(shape.id) {
                         self.facts.non_finite_objects.push(shape.id);
+                    }
+                }
+                Flat::TooFar(distance) => {
+                    if self.far_seen.insert((shape.id, shape.layer)) {
+                        self.facts.far_objects.push((shape.id, shape.layer, distance));
                     }
                 }
                 Flat::TooDetailed(n) => self.unsupported(
@@ -600,8 +596,10 @@ impl Ctx<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use openlaser_doc::{ImageCut, ImageMode, Workspace, WorkspaceOrigin, default_layer_name};
-    use openlaser_types::FrameSource;
+    use openlaser_types::{FrameSource, Percent};
 
     use super::*;
 
@@ -723,37 +721,130 @@ mod tests {
         assert_eq!(cx.facts.unsupported, vec![(C0, "x".to_owned()), (C1, "x".to_owned())]);
     }
 
-    #[test]
-    fn control_polygons_keep_subpaths_controls_and_close() {
-        let mut b = BezPath::new();
-        b.move_to((0.0, 0.0));
-        b.curve_to((1.0, 1.0), (2.0, 1.0), (3.0, 0.0));
-        b.close_path();
-        b.move_to((5.0, 5.0));
-        b.quad_to((5.5, 6.0), (6.0, 5.0));
-        b.line_to((7.0, 5.0));
-        assert_eq!(
-            control_polygons(&b),
-            vec![Polyline(vec![[0.0, 0.0], [1.0, 1.0], [2.0, 1.0], [3.0, 0.0], [0.0, 0.0]]), Polyline(vec![[5.0, 5.0], [5.5, 6.0], [6.0, 5.0], [7.0, 5.0]])]
-        );
+    fn shape(id: u64, layer: LayerKey, xform: Affine, geom: Geom, full: Percent) -> Arc<Shape> {
+        Arc::new(Shape { id: ObjectId(id), name: None, layer, xform, geom, locked: false, power_scale: full, priority: 0 })
     }
 
-    /// Review regression: anchors inside the field, one control point 1e9 mm out. The real curve bulges ~750 km
-    /// out; the stand-in must carry that far point (so safety refuses it), never the 10 mm chord between anchors.
+    fn path(b: BezPath) -> Geom {
+        Geom::Path(Arc::new(b))
+    }
+
+    /// `Geom::to_bez` for paths, readable before WP1's `to_bez` lands (the WP0 stub returns an empty path).
+    fn path_bez(g: &Geom) -> BezPath {
+        match g {
+            Geom::Path(b) => (**b).clone(),
+            _ => BezPath::new(),
+        }
+    }
+
+    fn plan_paths(p: &Project, m: &MachineProfile) -> JobPlan {
+        let o = opts(FrameStyle::Contour, 0.01);
+        let mut cx = Ctx::new(p, m, &o);
+        let leaves = cx.leaves_with(0.01, path_bez);
+        cx.finish(&leaves, 0.01).unwrap()
+    }
+
+    /// Red-zone review blocker: `M(1e9, 0) M(0, 0) C(5, 10)(10, 10)(10, 0)`. The control-polygon stand-in dropped
+    /// the lone far `MoveTo` (fewer than 2 points) and planned the in-field subpath as its control polygon, the
+    /// trapezoid (0,0)-(5,10)-(10,10)-(10,0) nobody drew, with no fact, so `validate` accepted it. The object must
+    /// be a fact (safety refuses the job, naming it), and none of its geometry, real or stand-in, may be planned.
     #[test]
-    fn huge_control_point_with_anchors_inside_is_never_a_chord() {
-        let mut budget = MAX_DESIGN_POINTS;
+    fn lone_far_move_to_beside_an_in_field_curve_is_refused_never_substituted() {
+        let m = openlaser_machine::jpt_m7_200_sim();
+        let mut p = two_layer_project(&m);
+        let mut b = BezPath::new();
+        b.move_to((1e9, 0.0));
+        b.move_to((0.0, 0.0));
+        b.curve_to((5.0, 10.0), (10.0, 10.0), (10.0, 0.0));
+        p.shapes = vec![shape(7, C0, Affine::IDENTITY, path(b), Percent::new(100.0).unwrap())];
+        let plan = plan_paths(&p, &m);
+        assert_eq!(plan.facts.far_objects, vec![(ObjectId(7), C0, 1e9)], "the far object is a fact (safety refuses it)");
+        let trapezoid = Polyline(vec![[0.0, 0.0], [5.0, 10.0], [10.0, 10.0], [10.0, 0.0]]);
+        let planned: Vec<&Polyline> = plan.sections.iter().flat_map(|s| s.paths.iter()).chain(&plan.frame).chain(&plan.tool_frame).collect();
+        assert!(!planned.contains(&&trapezoid), "the control polygon was planned: {planned:?}");
+        assert!(planned.is_empty(), "nothing of a too-far object is planned: {planned:?}");
+        assert!(plan.sections.iter().all(|s| !s.objects.contains(&ObjectId(7))));
+    }
+
+    /// Every point counts, whatever element holds it and wherever the transforms put it: the whole shape is
+    /// `TooFar` (never partly flattened, never a stand-in), and it spends no budget.
+    #[test]
+    fn a_far_point_in_any_element_or_after_any_transform_makes_the_whole_shape_too_far() {
+        let far = 2.0 * MAX_COORD_MM;
+        let mut cases: Vec<(&str, BezPath, Affine, f64)> = Vec::new();
         let mut b = BezPath::new();
         b.move_to((0.0, 0.0));
-        b.curve_to((1e9, 0.0), (1e9, 0.0), (10.0, 0.0));
-        match flatten_placed(b, Affine::IDENTITY, 0.01, &mut budget) {
-            Flat::Polys(p) => {
-                assert_eq!(p, vec![Polyline(vec![[0.0, 0.0], [1e9, 0.0], [1e9, 0.0], [10.0, 0.0]])]);
-                assert!(p.iter().flat_map(|l| l.0.iter()).any(|q| q[0].abs() > MAX_COORD_MM), "the far point is kept");
+        b.line_to((10.0, 0.0));
+        b.move_to((0.0, -far));
+        cases.push(("trailing lone MoveTo", b, Affine::IDENTITY, far));
+        let mut b = BezPath::new();
+        b.move_to((0.0, 0.0));
+        b.line_to((far, 0.0));
+        cases.push(("LineTo", b, Affine::IDENTITY, far));
+        let mut b = BezPath::new();
+        b.move_to((0.0, 0.0));
+        b.quad_to((0.0, far), (10.0, 0.0));
+        cases.push(("quad control point", b, Affine::IDENTITY, far));
+        let mut b = BezPath::new();
+        b.move_to((0.0, 0.0));
+        b.curve_to((1.0, 1.0), (-far, 1.0), (10.0, 0.0));
+        cases.push(("cubic second control point", b, Affine::IDENTITY, far.hypot(1.0)));
+        let mut b = BezPath::new();
+        b.move_to((0.0, 0.0));
+        b.line_to((10.0, 0.0));
+        b.line_to((10.0, 10.0));
+        b.close_path();
+        b.move_to((far, far));
+        b.line_to((far, far + 1.0));
+        cases.push(("second subpath after ClosePath", b, Affine::IDENTITY, far.hypot(far + 1.0)));
+        let mut b = BezPath::new();
+        b.move_to((0.0, 0.0));
+        b.line_to((10.0, 0.0));
+        cases.push(("translated", b.clone(), Affine::translate((far, 0.0)), far + 10.0));
+        cases.push(("scaled", b, Affine::scale(far / 10.0), far));
+        for (what, b, xf, distance) in cases {
+            let mut budget = MAX_DESIGN_POINTS;
+            match flatten_placed(b, xf, 0.01, &mut budget) {
+                Flat::TooFar(d) => assert_eq!(d, distance, "{what}"),
+                _ => panic!("{what}: a shape with a far point must be TooFar"),
             }
-            _ => panic!("a huge shape keeps its control polygon"),
+            assert_eq!(budget, MAX_DESIGN_POINTS, "{what}: a refused shape spends no budget");
         }
-        assert_eq!(budget, MAX_DESIGN_POINTS);
+        // On the limit is in range (the rule is strictly beyond it).
+        let mut b = BezPath::new();
+        b.move_to((-MAX_COORD_MM, 0.0));
+        b.line_to((MAX_COORD_MM, MAX_COORD_MM));
+        let mut budget = MAX_DESIGN_POINTS;
+        assert!(matches!(flatten_placed(b, Affine::IDENTITY, 0.01, &mut budget), Flat::Polys(_)));
+    }
+
+    /// Groups: a parent's transform counts, and a far child is a fact while its in-range sibling still plans.
+    #[test]
+    fn far_objects_inside_groups_are_facts_by_object() {
+        let m = openlaser_machine::jpt_m7_200_sim();
+        let mut p = two_layer_project(&m);
+        let full = Percent::new(100.0).unwrap();
+        let line = |x: f64| {
+            let mut b = BezPath::new();
+            b.move_to((x, 0.0));
+            b.line_to((x + 10.0, 0.0));
+            path(b)
+        };
+        let moved = shape(1, C0, Affine::translate((2.0 * MAX_COORD_MM, 0.0)), Geom::Group(vec![shape(11, C0, Affine::IDENTITY, line(0.0), full)]), full);
+        let mixed = shape(
+            2,
+            C1,
+            Affine::IDENTITY,
+            Geom::Group(vec![shape(21, C1, Affine::IDENTITY, line(1e9), full), shape(22, C1, Affine::IDENTITY, line(0.0), full)]),
+            full,
+        );
+        p.shapes = vec![moved, mixed];
+        let o = opts(FrameStyle::Contour, 0.01);
+        let mut cx = Ctx::new(&p, &m, &o);
+        let leaves = cx.leaves_with(0.01, path_bez);
+        assert_eq!(cx.facts.far_objects, vec![(ObjectId(11), C0, 2.0 * MAX_COORD_MM + 10.0), (ObjectId(21), C1, 1e9 + 10.0)]);
+        let ids: Vec<ObjectId> = leaves.iter().map(|l| l.id).collect();
+        assert_eq!(ids, vec![ObjectId(22)], "only the in-range sibling is a leaf");
     }
 
     #[test]
@@ -778,8 +869,8 @@ mod tests {
         g.move_to((0.0, 0.0));
         g.curve_to((1e9, 0.0), (1e9, 1e9), (0.0, 1e9));
         match flatten_placed(g.clone(), Affine::IDENTITY, 0.01, &mut budget) {
-            Flat::Polys(p) => assert_eq!(p, vec![Polyline(vec![[0.0, 0.0], [1e9, 0.0], [1e9, 1e9], [0.0, 1e9]])]),
-            _ => panic!("a huge shape keeps its control polygon"),
+            Flat::TooFar(d) => assert_eq!(d, 1e9f64.hypot(1e9)),
+            _ => panic!("a huge shape is TooFar, never a stand-in"),
         }
         assert_eq!(budget, MAX_DESIGN_POINTS);
         assert!(matches!(flatten_placed(g, Affine::scale(f64::NAN), 0.01, &mut budget), Flat::NonFinite));

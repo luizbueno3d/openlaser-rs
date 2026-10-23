@@ -7,11 +7,11 @@ pub(crate) static RULES: &[(RefusalCode, &str)] = &[
     // Geometry (burn sections and the frame alike; never clamped, never truncated).
     (
         RefusalCode::OutsideWorkArea,
-        "Galvo: every point lies inside the machine's effective work area (the rated lens field intersected with the strictly encodable square |v| < F/2), within 1e-6 mm; B10",
+        "Galvo: every point lies inside the machine's effective work area (the rated lens field intersected with the strictly encodable square |v| < F/2), within 1e-6 mm; B10. An object with any point beyond plan::MAX_COORD_MM (100 m) is not planned at all and is refused by name",
     ),
     (
         RefusalCode::NotEncodable,
-        "Galvo: every point converts with mm_to_galvo on its axis (+F/2 exactly is refused, never clamped); every quantised word re-derives from its setting; the first-jump long delay, first-jump settle, MO settle and jump speed are never 0 (B3)",
+        "Galvo: every point converts with mm_to_galvo on its axis (+F/2 exactly is refused, never clamped); every quantised word re-derives from its setting; the first-jump long delay, first-jump settle, MO settle and jump speed are never 0, and the first-jump long delay is never sent with a negative (0x8000) sign (B3)",
     ),
     (RefusalCode::NonFinite, "No NaN or infinite coordinate anywhere, and no object whose geometry or transform is not finite"),
     (
@@ -21,7 +21,10 @@ pub(crate) static RULES: &[(RefusalCode, &str)] = &[
     (RefusalCode::TooManyPaths, "At most JobLimits.max_paths (3000) paths in one layer-pass and in the frame"),
     (RefusalCode::TooManyPointsPerPath, "At most JobLimits.max_points_per_path (2000) points in one path"),
     (RefusalCode::TooManyPointsPerPass, "At most JobLimits.max_points_per_pass (20000) points in one layer-pass and in the frame"),
-    (RefusalCode::OutOfBed, "Gantry: every point lies on the bed in machine coordinates, within 1e-6 mm"),
+    (
+        RefusalCode::OutOfBed,
+        "Gantry: every point lies on the bed in machine coordinates, within 1e-6 mm. An object with any point beyond plan::MAX_COORD_MM (100 m) is not planned at all and is refused by name",
+    ),
     // Laser parameters (judged on the values the quantised words carry).
     (RefusalCode::PowerAboveMax, "Power is at most the source's max_power_pct"),
     (RefusalCode::FrequencyOutOfRange, "Galvo frequency lies within the source's freq_khz range (1..4000 kHz for the JPT M7)"),

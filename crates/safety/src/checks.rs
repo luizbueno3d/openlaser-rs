@@ -328,6 +328,36 @@ pub(crate) fn check_facts(out: &mut Out, facts: &PlanFacts) {
     }
 }
 
+/// `5000000000 mm`, or `1.000e15 mm` past what reads well as digits.
+fn distance_text(d: f64) -> String {
+    if d.is_finite() && d < 1e12 { format!("{d:.0} mm") } else { format!("{d:.3e} mm") }
+}
+
+/// Objects the planner left out whole because a point lies beyond `openlaser_plan::MAX_COORD_MM` (never planned in
+/// part, never a stand-in): each is refused by name, with its farthest point's distance. `validate` and
+/// `validate_frame` alike, whatever the frame source: no frame or burn of the job may go ahead without them.
+pub(crate) fn check_far_objects(out: &mut Out, area: &Area, facts: &PlanFacts) {
+    let (code, place) = match area {
+        Area::Galvo { .. } => (RefusalCode::OutsideWorkArea, "the work area"),
+        Area::Gantry { .. } => (RefusalCode::OutOfBed, "the bed"),
+    };
+    for (id, k, d) in &facts.far_objects {
+        out.refuse(
+            Refusal::new(
+                code,
+                format!(
+                    "object {} on {k} has a point {} from the design origin, beyond the {:.0} mm this build plans and far outside {place}, so none of it was planned; move it into {place} or delete it",
+                    id.0,
+                    distance_text(*d),
+                    openlaser_plan::MAX_COORD_MM
+                ),
+            )
+            .object(*id)
+            .layer(*k),
+        );
+    }
+}
+
 /// One notice for the objects on tool layers (never burned).
 pub(crate) fn tool_layer_notice(out: &mut Out, facts: &PlanFacts) {
     let n = facts.tool_layer_objects.len();
@@ -432,6 +462,20 @@ pub(crate) fn check_galvo_cut(out: &mut Out, s: &Section, q: &GalvoCutQ, g: &Gal
             Refusal::new(
                 RefusalCode::NotEncodable,
                 format!("{what}: the machine's {} encode(s) to 0, which the galvo must never be sent; fix the machine profile", zero.join(", ")),
+            )
+            .layer(k),
+        );
+    }
+    // The delay word's sign is 0x0000 only for a positive delay (`delay_word`); 0x8000 (a zero or negative delay)
+    // or any other value on the first jump's long delay is refused.
+    if t.jump_delay_long.1 != 0 {
+        out.refuse(
+            Refusal::new(
+                RefusalCode::NotEncodable,
+                format!(
+                    "{what}: the machine's first-jump long delay is sent with sign word {:#06x} (zero or negative); the first jump of every list must wait a positive delay, fix the machine profile",
+                    t.jump_delay_long.1
+                ),
             )
             .layer(k),
         );
