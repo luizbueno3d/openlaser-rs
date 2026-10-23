@@ -1,0 +1,6 @@
+---
+source: crates/render/src/lib.rs
+expression: png
+extension: png
+snapshot_kind: binary
+---
