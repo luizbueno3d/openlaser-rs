@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use openlaser_machine::DeviceKind;
-use openlaser_types::{Fingerprint, FrameMode, FrameOrigin, FrameReceipt, MachineId, MonoTime, Refusal, SessionId};
+use openlaser_types::{Fingerprint, FrameMode, FrameOrigin, FrameReceipt, MachineId, MonoTime, Refusal, RefusalCode, SessionId};
 use serde::Serialize;
 
 use crate::stop::{Cx, StopReport};
@@ -28,6 +28,13 @@ pub struct Capabilities {
     pub inputs: bool,
 }
 
+/// The device side of one machine, driven only from its driver thread.
+///
+/// Error convention (WP5): `connect`, `frame` and `run` return `Err(DriverError::Refused(..))` only for a refusal
+/// decided before anything reached the wire. When the latch trips during an operation, the backend runs its own
+/// [`Backend::emergency_stop`] and returns the `Stopped(report)` outcome (`connect` returns `Err` and the runtime
+/// stops it). Any other `Err` is a fault: the backend returns at once WITHOUT stopping, and the runtime calls
+/// `emergency_stop`, raises the sticky fault and posts the `StopReport`.
 pub trait Backend: Send + 'static {
     type Job: EncodedJob;
     type Frame: EncodedJob;
@@ -112,6 +119,21 @@ pub enum DriverError {
     NotImplemented(&'static str),
 }
 
+impl DriverError {
+    /// A refusal with its code and one actionable sentence.
+    pub fn refused(code: RefusalCode, message: impl Into<String>) -> Self {
+        DriverError::Refused(Refusal::new(code, message))
+    }
+
+    /// True for a refusal (nothing was sent); false for a fault of the machine or the link.
+    pub fn is_refusal(&self) -> bool {
+        matches!(self, DriverError::Refused(_))
+    }
+}
+
+/// What the driver thread reports. A command the driver thread refuses (`StoppedAfterQueue`, `MachineBusy`,
+/// `NotConnected`, ARM re-checks …) arrives as `Fault(DriverError::Refused(..))`: nothing was sent, and the
+/// machine's state does not change.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "event")]
 pub enum DriverEvent {
