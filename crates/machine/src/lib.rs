@@ -1,7 +1,5 @@
 //! Machine profiles (SPEC §3.4; owned by WP1). No I/O.
 //!
-//! WP0 stubs: the data types are complete; `jpt_m7_200`/`_sim` carry the SPEC's numbers (WP1 checks them against
-//! the OM profile); the queries and importers return neutral values or `Error::NotImplemented`.
 #![forbid(unsafe_code)]
 
 mod builtin;
@@ -23,6 +21,12 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum Error {
+    #[error("invalid machine profile: {0}")]
+    InvalidProfile(String),
+    #[error("invalid markcfg: {0}")]
+    InvalidMarkCfg(String),
+    #[error("invalid OM calibration: {0}")]
+    InvalidCalibration(String),
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
 }

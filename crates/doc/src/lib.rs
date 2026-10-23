@@ -1,7 +1,5 @@
 //! The project model (SPEC §3.3; owned by WP1). Pure data.
 //!
-//! WP0 stubs: the data types are complete; `Project::new` builds an empty table (WP1 adds the 30 colour layers
-//! from the defaults), and the queries return neutral values.
 #![forbid(unsafe_code)]
 
 mod layers;
