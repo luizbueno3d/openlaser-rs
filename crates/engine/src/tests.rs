@@ -992,3 +992,35 @@ fn a_run_called_outside_dispatch_is_headless() {
     assert_eq!(p.opens.load(Ordering::SeqCst), 0);
     assert!(s.status(&MachineId("jpt-m7-200-sim".into())).is_none());
 }
+
+#[test]
+fn edit_after_submit_marks_stale_with_a_planted_submission() {
+    // The real submission needs I1's pipeline (tests/engine.rs); the state change on an edit is the engine's own.
+    let mut s = Session::new(config(Origin::Synthetic, true, DeviceAccess::None));
+    with_doc(&mut s);
+    let fp = Fingerprint([4; 32]);
+    let view = crate::SubmissionView {
+        submission: crate::RequestId(0),
+        machine: MachineId("jpt-m7-200-sim".into()),
+        fingerprint: fp,
+        state: crate::SubmissionState::AwaitingHuman,
+        note: String::new(),
+        client: "agent".into(),
+        summary: crate::devices::tests::summary(fp, "jpt-m7-200-sim", &[10.0]),
+        expires_in_s: 0,
+        outcome: None,
+        stop_report: None,
+    };
+    let now = s.cfg.clock.now();
+    let (v, _) = s.requests.add_submission(view, 0, now);
+    let st = s.execute("job.status", json!({ "submission": v.submission.0 })).unwrap();
+    assert_eq!(st["state"], "awaiting_human");
+    s.poll();
+    draw(&mut s, json!([[0, 0], [1, 0]]));
+    let st = s.execute("job.status", json!({ "submission": v.submission.0 })).unwrap();
+    assert_eq!(st["state"], "stale");
+    assert!(s.poll().iter().any(|e| matches!(e, Event::Request { state, .. } if state == "stale")));
+    // An agent cannot advance it, only withdraw a pending one.
+    assert_eq!(s.approve_request(Origin::Synthetic, v.submission).unwrap_err().code(), "human_only");
+    assert_eq!(s.withdraw_request(v.submission).unwrap_err().code(), "stale");
+}
