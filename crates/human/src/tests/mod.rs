@@ -560,6 +560,24 @@ fn press_synthetic_release_human_ignored() {
 }
 
 #[test]
+fn release_in_tainted_frame_ignored() {
+    // Human press, then a human release in a frame that also carries automation input: the frame is tainted.
+    let (mut h, clock) = button_harness();
+    h.ctx.options_mut(|o| o.input_options.max_click_duration = f64::INFINITY);
+    clock.advance(Duration::from_secs(1));
+    let pos = h.get_by_label("Frame").rect().center();
+    h.event(egui::Event::PointerMoved(pos));
+    h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    h.step();
+    // The release and an injected event land in the same frame.
+    h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    inject_into(&mut h, vec![egui::Event::PointerMoved(pos)]);
+    assert_eq!(h.state().clicks, 1, "egui saw a click");
+    assert_eq!(h.state().human_clicks, 0, "released in a tainted frame");
+}
+
+#[test]
 fn keyboard_activation_is_not_a_human_click() {
     let (mut h, clock) = button_harness();
     clock.advance(Duration::from_secs(1));
