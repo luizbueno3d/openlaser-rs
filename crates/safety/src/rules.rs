@@ -23,7 +23,7 @@ pub(crate) static RULES: &[(RefusalCode, &str)] = &[
     (RefusalCode::TooManyPointsPerPass, "At most JobLimits.max_points_per_pass (20000) points in one layer-pass and in the frame"),
     (
         RefusalCode::OutOfBed,
-        "Gantry: every point lies on the bed in machine coordinates, within 1e-6 mm. An object with any point beyond plan::MAX_COORD_MM (100 m) is not planned at all and is refused by name",
+        "Gantry: every point lies on the bed (centre-origin bed mm, Y up, the plan convention the G-code encoder maps to the controller), within 1e-6 mm. An object with any point beyond plan::MAX_COORD_MM (100 m) is not planned at all and is refused by name",
     ),
     // Laser parameters (judged on the values the quantised words carry).
     (RefusalCode::PowerAboveMax, "Power is at most the source's max_power_pct"),

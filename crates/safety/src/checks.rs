@@ -214,7 +214,7 @@ pub(crate) fn check_paths(out: &mut Out, area: &Area, limits: &JobLimits, what: 
             Area::Gantry { bed, valid: true } => Refusal::new(
                 RefusalCode::OutOfBed,
                 format!(
-                    "{} point(s) of {what} are off the bed x {}..{}, y {}..{} mm (first at {} in machine coordinates); move the artwork onto the bed",
+                    "{} point(s) of {what} are off the bed x {}..{}, y {}..{} mm (first at {}; bed millimetres from its centre, Y up); move the artwork onto the bed",
                     outside.n,
                     mm(bed.min[0]),
                     mm(bed.max[0]),

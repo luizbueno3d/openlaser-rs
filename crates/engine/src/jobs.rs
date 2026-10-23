@@ -215,7 +215,9 @@ pub(crate) fn build(project: &Project, profile: &MachineProfile, popts: &PlanOpt
             let burns = gcode_decode(&job.text, g.s_max);
             // Bytes are the truth (§1.3 rule 3): every burn the text makes must be one the confirmation shows.
             check_gantry_bytes(&summary, &burns).map_err(|r| encode_refused(fp, &notices, r))?;
-            let burned = burns.into_iter().map(|b| b.seg).collect();
+            // The text is in the controller's coordinates; the summary, like the plan, is centre-origin bed mm.
+            let burned =
+                burns.into_iter().map(|b| EmittedSegment { a: bed_centre(b.seg.a, g), b: bed_centre(b.seg.b, g), power_pct: b.seg.power_pct }).collect();
             (Encoded::Gcode { job: Arc::new(job), frame: Arc::new(frame) }, summary, listing, burned)
         }
     };
@@ -244,13 +246,14 @@ fn lmc_refusal(e: &openlaser_lmc::Error) -> Refusal {
     }
 }
 
-/// The work area of a gantry bed in design mm, per its origin corner.
-fn bed_bounds(g: &GantryMachine) -> Bounds {
+/// A point of G-code text (the controller's coordinates) in the plan's centre-origin bed mm, Y up: the inverse of the
+/// encoder's mapping (OM `gcode._xy`), so decoded burns, the bed and the rows share one frame.
+fn bed_centre(p: [f64; 2], g: &GantryMachine) -> [f64; 2] {
     let [w, h] = g.bed_mm;
     match g.origin {
-        WorkspaceOrigin::BottomLeft => Bounds { min: [0.0, 0.0], max: [w, h] },
-        WorkspaceOrigin::TopLeft => Bounds { min: [0.0, -h], max: [w, 0.0] },
-        WorkspaceOrigin::Center => Bounds { min: [-w / 2.0, -h / 2.0], max: [w / 2.0, h / 2.0] },
+        WorkspaceOrigin::Center => p,
+        WorkspaceOrigin::BottomLeft => [p[0] - w / 2.0, p[1] - h / 2.0],
+        WorkspaceOrigin::TopLeft => [p[0] - w / 2.0, h / 2.0 - p[1]],
     }
 }
 
@@ -297,7 +300,7 @@ fn gantry_summary(plan: &JobPlan, prog: &GcodeProgram, profile: &MachineProfile,
         estimate: plan.estimate,
         crash_bound: plan.estimate,
         packets: 0,
-        work_area: bed_bounds(g),
+        work_area: openlaser_plan::gantry_bed(g),
         negate: [false, false],
         swap_xy: false,
     }

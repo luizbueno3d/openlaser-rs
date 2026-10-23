@@ -3,7 +3,7 @@
 //! - **Sections** in burn order: Cuts / Layers order, then sub-layer, then pass (global passes repeat the whole
 //!   sub-layer stack); draw order inside. Line sections carry the flattened outlines; Fill sections carry 2-point
 //!   hatch segments from `geom::hatch`, one section per hatch pass. Coordinates are machine mm
-//!   ([`machine_transform`] for a galvo, [`gantry_transform`] for a gantry).
+//!   ([`machine_transform`] for a galvo; centre-origin bed mm, Y up, by [`gantry_transform`] for a gantry).
 //! - **Quantised words** ([`GalvoCutQ`], [`GantryCutQ`]) are computed once, here ([`quantise`]); encoders read only
 //!   the words.
 //! - **Frame** (Bounds or Contour) from every outline on an emitting layer, hidden or not (frame ⊇ burn); Fill
@@ -35,7 +35,7 @@ pub use planner::{
     MAX_COORD_MM, MAX_DESIGN_POINTS, MAX_FLATTEN_TOL_MM, MAX_HATCH_LINES, MAX_PASSES_PER_LAYER, MAX_SECTION_POINTS, MAX_SECTIONS, MAX_SUB_LAYERS,
     MIN_FLATTEN_TOL_MM,
 };
-pub use transform::{gantry_bed, gantry_transform};
+pub use transform::{gantry_bed, gantry_home, gantry_transform};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 

@@ -400,16 +400,18 @@ impl LmcTransport for FakeLmc {
     fn submit_packet(&mut self, pkt: &Packet) -> Result<(), XferError> {
         self.check()?;
         self.pump()?;
+        if self.single_pending.is_some() {
+            return Err(XferError::Io("single transfer in flight".into()));
+        }
+        // The OUT transfer goes on the wire whatever the board's state, so it is recorded first: a write into a board
+        // that is not READY shows in `wire` as well as in `writes_while_not_ready` (it is then refused).
+        let at = self.clock.now();
+        self.notify(SimWire::Packet { at, sha256: pkt.sha256_hex() });
         if !self.ready() {
             self.note_not_ready_write();
             return Err(XferError::Io("packet submitted while not READY".into()));
         }
-        if self.single_pending.is_some() {
-            return Err(XferError::Io("single transfer in flight".into()));
-        }
         self.packet_count = self.packet_count.saturating_add(1);
-        let at = self.clock.now();
-        self.notify(SimWire::Packet { at, sha256: pkt.sha256_hex() });
         if self.cfg.faults.iter().any(|f| matches!(f,Fault::StallWrites{after_packets} if self.packet_count>*after_packets)) {
             return Err(XferError::Stall);
         }

@@ -76,7 +76,8 @@ pub fn estimate_galvo(paths: &[Polyline], q: &GalvoCutQ, m: &GalvoMachine) -> Du
 /// layer speed. No acceleration (a lower bound, shown as an estimate).
 pub fn estimate_gantry(paths: &[Polyline], q: &GantryCutQ, m: &GantryMachine) -> Duration {
     let mut s = 0.0;
-    let mut at: P2 = [0.0, 0.0];
+    // Paths are centre-origin bed mm; the first travel starts at the controller's origin.
+    let mut at: P2 = crate::transform::gantry_home(m);
     for path in paths {
         let Some(&start) = path.0.first() else { continue };
         s += travel(dist(at, start), m.travel_speed.get());

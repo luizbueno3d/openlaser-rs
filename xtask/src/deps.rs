@@ -493,7 +493,7 @@ fn check_source_rules(root: &Path, rust_files: &[std::path::PathBuf], v: &mut Ve
 
             // Rule 13: Origin::Human only where a human is (the engine defines and matches it).
             let human_ok = ["crates/ui-egui/", "crates/human/", "apps/openlaser/", "apps/openlaser-hw/", "crates/engine/"].iter().any(|p| r.starts_with(p));
-            if !human_ok && code.contains(&origin_human) {
+            if !human_ok && names_path(code, &origin_human) {
                 v.push(format!("rule 13: {at} names {origin_human}; only ui-egui, human, the GUI, openlaser-hw (and the engine) may"));
             }
             // Rule 14: test-only modules only from tests/ and #[cfg(test)].
@@ -553,9 +553,25 @@ fn uses_process_command(text: &str) -> bool {
     false
 }
 
+/// `code` names `path` (e.g. `Origin::Human`) as a path of its own: an occurrence preceded by an identifier character
+/// (`FrameOrigin::Human`, a different enum) does not count.
+fn names_path(code: &str, path: &str) -> bool {
+    code.match_indices(path).any(|(i, _)| !code.get(..i).and_then(|before| before.chars().next_back()).is_some_and(|c| c.is_alphanumeric() || c == '_'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rule_13_matches_the_engine_origin_not_frame_origin() {
+        let p = ["Origin::", "Human"].concat();
+        assert!(names_path("let o = Origin::Human;", &p));
+        assert!(names_path("x(openlaser_engine::Origin::Human)", &p));
+        assert!(!names_path("use openlaser_types::FrameOrigin::Human;", &p));
+        assert!(!names_path("let o = MyOrigin::Human;", &p));
+        assert!(names_path("FrameOrigin::Human; Origin::Human", &p));
+    }
 
     #[test]
     fn process_command_grep() {

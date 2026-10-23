@@ -3,6 +3,7 @@
 //! - `registry`: ids, aliases, schemas, the policy table, the `command_list` snapshot;
 //! - `undo`: an undo round trip for every Edit command and `prop_undo_redo_roundtrip`;
 //! - `emission`: the human emission path end to end on a FakeLmc (WP1–WP5, merged at I1);
+//! - `gantry`: a gantry job lands where it was designed (plan → safety → G-code coordinates, pinned at I1);
 //! - `panic_hunt`: every command × `testkit::adversarial::params()` (`#[ignore]`, run at I2).
 //!
 //! Nothing here opens a real device: every provider is a test double or a FakeLmc (AGENTS.md §1).
@@ -859,6 +860,90 @@ mod emission {
         let rec = b.provider.recorder.lock().unwrap().as_ref().unwrap().snapshot();
         assert!(rec.burned.is_empty(), "framing never burns");
         let _ = FrameMode::Loop;
+    }
+}
+
+// ---- gantry coordinates (plan → safety → G-code) -------------------------------------------------------------------
+
+mod gantry {
+    use openlaser_engine::{Encoded, JobOptions};
+    use openlaser_types::Bounds;
+
+    use super::*;
+
+    /// The (x, y) of every G1 line of a program.
+    fn g1_points(text: &str) -> Vec<[f64; 2]> {
+        let mut at = [f64::NAN, f64::NAN];
+        let mut out = Vec::new();
+        for line in text.lines().filter(|l| l.starts_with("G1") || l.starts_with("G0")) {
+            for w in line.split_whitespace() {
+                if let Some(v) = w.strip_prefix('X').and_then(|v| v.parse().ok()) {
+                    at[0] = v;
+                }
+                if let Some(v) = w.strip_prefix('Y').and_then(|v| v.parse().ok()) {
+                    at[1] = v;
+                }
+            }
+            if line.starts_with("G1") {
+                out.push(at);
+            }
+        }
+        out
+    }
+
+    /// I1: `Section.paths` of a gantry plan are centre-origin bed mm (the convention `openlaser_gcode` maps to the
+    /// controller). WP3 had planned controller coordinates, so the encoder moved them by half the bed again: a 10 mm
+    /// square at the centre of a 600 × 400 mm bottom-left bed was refused as off the bed.
+    #[test]
+    fn gantry_job_lands_where_it_was_designed() {
+        let mut machines = vec![jpt_m7_200_sim()];
+        machines.extend(openlaser_machine::om_gantries());
+        let g = machines.iter().find(|m| m.id.0 == "co2-grbl-600x400").cloned().expect("OM's CO2 gantry profile");
+        let openlaser_machine::Kinematics::Gantry(gm) = &g.kind else { panic!("a gantry") };
+        assert_eq!((gm.bed_mm, gm.origin), ([600.0, 400.0], openlaser_doc::WorkspaceOrigin::BottomLeft));
+        for (design, square, want) in [
+            // A centre-origin design: its (0, 0) is the bed's centre, (300, 200) on the controller.
+            (openlaser_doc::WorkspaceOrigin::Center, [[-5.0, -5.0], [5.0, -5.0], [5.0, 5.0], [-5.0, 5.0]], [[295.0, 195.0], [305.0, 205.0]]),
+            // A design whose origin is the controller's: design mm are G-code mm.
+            (openlaser_doc::WorkspaceOrigin::BottomLeft, [[50.0, 50.0], [60.0, 50.0], [60.0, 60.0], [50.0, 60.0]], [[50.0, 50.0], [60.0, 60.0]]),
+        ] {
+            let cfg = SessionConfig {
+                origin: Origin::Human,
+                window: true,
+                devices: DeviceAccess::None,
+                machines: machines.clone(),
+                profiles: None,
+                files: FsAuthority::TrustedLocal,
+                clock: Arc::new(VirtualClock::new()),
+            };
+            let mut s = Session::new(cfg);
+            let ws = openlaser_doc::Workspace { kind: openlaser_types::DeviceKind::Grbl, size_mm: [600.0, 400.0], origin: design };
+            s.open_project(Project::new(ws, &g.layer_defaults), None, Some(g.id.clone())).unwrap();
+            s.execute("tools.drawLines", json!({ "pointsMm": square, "closed": true })).unwrap();
+            let built = s
+                .build_job(None, &JobOptions { machine: Some(g.id.clone()), selected_only: None })
+                .unwrap_or_else(|r| panic!("{design:?}: {:?} {:?}", r.refusals, r.error));
+            let Encoded::Gcode { job, .. } = &built.encoded else { panic!("a G-code job") };
+            let points = g1_points(&job.text);
+            assert!(!points.is_empty(), "{design:?}: the program burns");
+            for p in &points {
+                assert!(
+                    p[0] >= want[0][0] - 1e-6 && p[0] <= want[1][0] + 1e-6 && p[1] >= want[0][1] - 1e-6 && p[1] <= want[1][1] + 1e-6,
+                    "{design:?}: G1 at {p:?}, want inside {want:?}"
+                );
+            }
+            // The confirmation and the decoded burn share the plan's frame: centre-origin bed mm.
+            assert_eq!(built.summary.work_area, Bounds { min: [-300.0, -200.0], max: [300.0, 200.0] });
+            let row = &built.summary.rows[0].bounds;
+            for seg in &built.burned {
+                for q in [seg.a, seg.b] {
+                    assert!(
+                        q[0] >= row.min[0] - 1e-6 && q[0] <= row.max[0] + 1e-6 && q[1] >= row.min[1] - 1e-6 && q[1] <= row.max[1] + 1e-6,
+                        "{design:?}: burn {q:?} outside the row {row:?}"
+                    );
+                }
+            }
+        }
     }
 }
 

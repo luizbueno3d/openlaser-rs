@@ -3,9 +3,11 @@
 //! Galvo: field angle, then axis swap, then per-axis negate, then offset; never scale (the per-axis scale lives in
 //! the encoding field F, `GalvoMachine::field_f`). Design (0, 0) is the field centre (S13).
 //!
-//! Gantry: the project's design origin (its `Workspace.origin`) is moved to the machine's origin on its bed, the
-//! way OM `gcode._xy` does it for a centre-origin design. Section paths of a gantry plan are therefore machine
-//! (G-code) coordinates, and `safety` checks them against [`gantry_bed`].
+//! Gantry: section and frame paths are **centre-origin bed millimetres, Y up**, whatever the controller's origin:
+//! the project's design origin (its `Workspace.origin`) is placed on the bed and the bed's centre is (0, 0). That is
+//! the convention `openlaser_gcode` takes (`gcode/src/lib.rs`, as OM's `gcode._xy`): the G-code encoder maps them to
+//! the controller's origin and refuses a point off the bed. `safety` checks them against [`gantry_bed`] (pinned at I1:
+//! WP3 had planned controller coordinates, so the encoder moved every job by half the bed again and refused it).
 
 use openlaser_doc::WorkspaceOrigin;
 use openlaser_geom::{Affine, Bounds};
@@ -35,32 +37,32 @@ pub fn machine_transform(m: &GalvoMachine) -> Affine {
     a
 }
 
-/// Design mm (origin `design`, Y up) → the gantry's machine coordinates. A top-left machine counts Y downwards
-/// (OM `gcode._xy`: `h/2 − y` for a centre-origin design).
+/// Design mm (origin `design`, Y up) → centre-origin bed mm, Y up (the gantry plan convention, see the module doc).
+/// The controller's origin plays no part: `openlaser_gcode` maps these to it.
 pub fn gantry_transform(design: WorkspaceOrigin, m: &GantryMachine) -> Affine {
-    if design == m.origin {
-        return Affine::IDENTITY;
-    }
     let [w, h] = m.bed_mm;
-    // Where design (0, 0) sits on the bed, in bed coordinates (bottom-left origin, Y up).
+    // Where design (0, 0) sits on the bed, relative to the bed's centre (Y up).
     let (dx, dy) = match design {
-        WorkspaceOrigin::Center => (w / 2.0, h / 2.0),
-        WorkspaceOrigin::BottomLeft => (0.0, 0.0),
-        WorkspaceOrigin::TopLeft => (0.0, h),
+        WorkspaceOrigin::Center => return Affine::IDENTITY,
+        WorkspaceOrigin::BottomLeft => (-w / 2.0, -h / 2.0),
+        WorkspaceOrigin::TopLeft => (-w / 2.0, h / 2.0),
     };
-    match m.origin {
-        WorkspaceOrigin::BottomLeft => Affine::new([1.0, 0.0, 0.0, 1.0, dx, dy]),
-        WorkspaceOrigin::Center => Affine::new([1.0, 0.0, 0.0, 1.0, dx - w / 2.0, dy - h / 2.0]),
-        WorkspaceOrigin::TopLeft => Affine::new([1.0, 0.0, 0.0, -1.0, dx, h - dy]),
-    }
+    Affine::new([1.0, 0.0, 0.0, 1.0, dx, dy])
 }
 
-/// The bed in machine coordinates: `[0, w] × [0, h]`, or centred on (0, 0) for a centre-origin machine.
+/// The bed in plan coordinates: `[-w/2, w/2] × [-h/2, h/2]` (centre origin, Y up), whatever the controller's origin.
 pub fn gantry_bed(m: &GantryMachine) -> Bounds {
     let [w, h] = m.bed_mm;
+    Bounds { min: [-w / 2.0, -h / 2.0], max: [w / 2.0, h / 2.0] }
+}
+
+/// The controller's origin (where `G0 X0 Y0` goes, and a job's first travel starts) in plan coordinates.
+pub fn gantry_home(m: &GantryMachine) -> [f64; 2] {
+    let [w, h] = m.bed_mm;
     match m.origin {
-        WorkspaceOrigin::Center => Bounds { min: [-w / 2.0, -h / 2.0], max: [w / 2.0, h / 2.0] },
-        WorkspaceOrigin::BottomLeft | WorkspaceOrigin::TopLeft => Bounds { min: [0.0, 0.0], max: [w, h] },
+        WorkspaceOrigin::Center => [0.0, 0.0],
+        WorkspaceOrigin::BottomLeft => [-w / 2.0, -h / 2.0],
+        WorkspaceOrigin::TopLeft => [-w / 2.0, h / 2.0],
     }
 }
 
@@ -132,23 +134,46 @@ mod tests {
         }
     }
 
-    #[test]
-    fn gantry_matches_om_xy_for_a_centre_design() {
-        use WorkspaceOrigin::*;
-        let p = [12.5, -7.25];
-        // OM gcode._xy: centre → (x, y); bottom_left → (x + w/2, y + h/2); top_left → (x + w/2, h/2 − y).
-        assert_eq!(apply(gantry_transform(Center, &gantry(Center)), p), p);
-        assert_eq!(apply(gantry_transform(Center, &gantry(BottomLeft)), p), [12.5 + 300.0, -7.25 + 200.0]);
-        assert_eq!(apply(gantry_transform(Center, &gantry(TopLeft)), p), [12.5 + 300.0, 200.0 - -7.25]);
-        // A bottom-left design on a top-left machine flips Y within the bed.
-        assert_eq!(apply(gantry_transform(BottomLeft, &gantry(TopLeft)), [10.0, 30.0]), [10.0, 370.0]);
-        assert_eq!(apply(gantry_transform(TopLeft, &gantry(BottomLeft)), [10.0, -30.0]), [10.0, 370.0]);
-        assert_eq!(apply(gantry_transform(BottomLeft, &gantry(Center)), [0.0, 0.0]), [-300.0, -200.0]);
+    /// OM `gcode._xy` as `openlaser_gcode` applies it: centre-origin bed mm → the controller's coordinates.
+    fn om_xy(p: [f64; 2], m: &GantryMachine) -> [f64; 2] {
+        let [w, h] = m.bed_mm;
+        match m.origin {
+            WorkspaceOrigin::Center => p,
+            WorkspaceOrigin::BottomLeft => [p[0] + w / 2.0, p[1] + h / 2.0],
+            WorkspaceOrigin::TopLeft => [p[0] + w / 2.0, h / 2.0 - p[1]],
+        }
     }
 
     #[test]
-    fn gantry_bed_rect_follows_origin() {
-        assert_eq!(gantry_bed(&gantry(WorkspaceOrigin::Center)), Bounds { min: [-300.0, -200.0], max: [300.0, 200.0] });
-        assert_eq!(gantry_bed(&gantry(WorkspaceOrigin::TopLeft)), Bounds { min: [0.0, 0.0], max: [600.0, 400.0] });
+    fn gantry_plans_centre_origin_bed_mm_whatever_the_controller() {
+        use WorkspaceOrigin::*;
+        let p = [12.5, -7.25];
+        for machine in [Center, BottomLeft, TopLeft] {
+            let g = gantry(machine);
+            // A centre design is already centre-origin bed mm: bit for bit.
+            assert_eq!(gantry_transform(Center, &g), Affine::IDENTITY);
+            assert_eq!(apply(gantry_transform(BottomLeft, &g), [10.0, 30.0]), [-290.0, -170.0], "{machine:?}");
+            assert_eq!(apply(gantry_transform(TopLeft, &g), [10.0, -30.0]), [-290.0, 170.0], "{machine:?}");
+            assert_eq!(gantry_bed(&g), Bounds { min: [-300.0, -200.0], max: [300.0, 200.0] }, "{machine:?}");
+            // The encoder then lands every design where OM put it (gcode._xy for a centre design) ...
+            let q = om_xy(apply(gantry_transform(Center, &g), p), &g);
+            let want = match machine {
+                Center => p,
+                BottomLeft => [12.5 + 300.0, -7.25 + 200.0],
+                TopLeft => [12.5 + 300.0, 200.0 - -7.25],
+            };
+            assert_eq!(q, want, "{machine:?}");
+            // ... and the controller's origin is where G0 X0 Y0 goes.
+            assert_eq!(om_xy(gantry_home(&g), &g), [0.0, 0.0], "{machine:?}");
+        }
+        // A design whose origin is the controller's lands on the same controller coordinates (design = G-code).
+        for origin in [BottomLeft, TopLeft] {
+            let g = gantry(origin);
+            // 30 mm up from the bottom-left corner, or 30 mm down from the top-left one (design Y is up).
+            let d = if origin == TopLeft { [10.0, -30.0] } else { [10.0, 30.0] };
+            assert_eq!(om_xy(apply(gantry_transform(origin, &g), d), &g), [10.0, 30.0], "{origin:?}");
+        }
+        // A bottom-left design on a top-left controller flips Y within the bed (OM `_xy`).
+        assert_eq!(om_xy(apply(gantry_transform(BottomLeft, &gantry(TopLeft)), [10.0, 30.0]), &gantry(TopLeft)), [10.0, 370.0]);
     }
 }

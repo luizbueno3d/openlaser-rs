@@ -400,6 +400,7 @@ mod lmc {
         let rec = r.recorder.snapshot();
         let abort = &rec.wire[before..];
         assert!(!abort.iter().any(|w| matches!(w, SimWire::Packet { .. })), "no packet into a board that is not READY");
+        assert_eq!(rec.writes_while_not_ready, 0, "no packet into a board that is not READY");
         assert_eq!(final_mo_and_port(&rec.wire), (Some(0), Some(0)));
     }
 
@@ -716,15 +717,34 @@ mod lmc {
         r.handle.frame(frame_job(box10(), FrameSource::Job), FrameMode::Once, BY_HUMAN);
         until(&r.handle, idle);
         let job = mark_job(&box10(), 30.0, 1000.0, 1);
+        let run_packets: Vec<String> = job.lists[0].packets.iter().map(Packet::sha256_hex).collect();
         let t = token(&job, 7, far());
         let before = r.recorder.snapshot().wire.len();
         // Queue the run behind a connect that the stop interrupts, so the driver cannot dequeue it first.
         r.handle.connect();
         r.handle.run(job, t);
         r.handle.stop();
-        until(&r.handle, |e| matches!(e, DriverEvent::Fault(openlaser_driver::DriverError::Refused(x)) if x.code == RefusalCode::StoppedAfterQueue));
+        // The run's refusal and the stop's report, in whichever order the driver thread produced them.
+        let (refused, reported) = (std::cell::Cell::new(false), std::cell::Cell::new(false));
+        until(&r.handle, |e| {
+            if matches!(e, DriverEvent::Fault(openlaser_driver::DriverError::Refused(x)) if x.code == RefusalCode::StoppedAfterQueue && x.message.starts_with("run"))
+            {
+                refused.set(true);
+            }
+            reported.set(reported.get() || stopped(e));
+            refused.get() && reported.get()
+        });
+        // The stop's own abort may write its dummy end-of-list packet (the board is READY); nothing of the run is.
         let wire = r.recorder.snapshot().wire;
-        assert!(!wire[before..].iter().any(|w| matches!(w, SimWire::Packet { .. })), "nothing of the run was written");
+        let written: Vec<&String> = wire[before..]
+            .iter()
+            .filter_map(|w| match w {
+                SimWire::Packet { sha256, .. } => Some(sha256),
+                _ => None,
+            })
+            .collect();
+        assert!(written.iter().all(|sha| !run_packets.contains(sha)), "nothing of the run was written");
+        assert!(written.iter().all(|sha| **sha == openlaser_lmc::abort_packet().sha256_hex()), "only the abort's dummy packet");
         assert!(!singles(&wire[before..]).iter().any(|w| w[0] == FIBER_SET_MO && w[1] == 1));
     }
 

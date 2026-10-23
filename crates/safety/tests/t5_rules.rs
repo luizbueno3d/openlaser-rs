@@ -264,7 +264,7 @@ fn safety_far_object_refused_by_name() {
     let far = |p: &mut JobPlan| p.facts.far_objects.push((ObjectId(7), LayerKey::Color(0), 1e9));
     // Gantry (validates in full on WP0 stubs): fine without the fact, refused with it.
     let m = gantry_profile();
-    let mut p = job(&m, vec![section(0, vec![square(200.0, 200.0, 50.0)], gantry_cut(50.0, 30.0))]);
+    let mut p = job(&m, vec![section(0, vec![square(0.0, 0.0, 50.0)], gantry_cut(50.0, 30.0))]);
     assert_eq!(codes(&validate(&p, &m)), Vec::<RefusalCode>::new());
     far(&mut p);
     let r = validate(&p, &m).unwrap_err();
@@ -491,12 +491,17 @@ fn safety_limits_refused_not_truncated() {
 #[test]
 fn safety_out_of_bed_refused() {
     let m = gantry_profile();
-    let ok = job(&m, vec![section(0, vec![square(200.0, 200.0, 50.0), line(&[[0.0, 0.0], [400.0, 400.0]])], gantry_cut(50.0, 30.0))]);
+    // Gantry plans are centre-origin bed mm, Y up (the G-code encoder maps them to the controller): the 400 × 400 mm
+    // bed is ±200 mm whatever the controller's origin.
+    let ok = job(&m, vec![section(0, vec![square(0.0, 0.0, 50.0), line(&[[-200.0, -200.0], [200.0, 200.0]])], gantry_cut(50.0, 30.0))]);
     assert_eq!(codes(&validate(&ok, &m)), Vec::<RefusalCode>::new());
-    let bad = job(&m, vec![section(0, vec![line(&[[-0.5, 10.0], [10.0, 10.0]])], gantry_cut(50.0, 30.0))]);
+    let bad = job(&m, vec![section(0, vec![line(&[[-200.5, 10.0], [10.0, 10.0]])], gantry_cut(50.0, 30.0))]);
     let r = validate(&bad, &m);
     assert_eq!(codes(&r), vec![RefusalCode::OutOfBed]);
-    assert_eq!(r.unwrap_err().refusals[0].at, Some([-0.5, 10.0]));
+    assert_eq!(r.unwrap_err().refusals[0].at, Some([-200.5, 10.0]));
+    // The controller's bottom-left corner coordinates (what WP3 planned before I1) are off the centred bed.
+    let corner = job(&m, vec![section(0, vec![line(&[[200.0, 200.0], [390.0, 390.0]])], gantry_cut(50.0, 30.0))]);
+    assert_eq!(codes(&validate(&corner, &m)), vec![RefusalCode::OutOfBed]);
 }
 
 // ---- laser parameters ----------------------------------------------------------------------------------------
@@ -624,11 +629,11 @@ fn safety_speed_above_max_refused() {
 fn safety_gantry_overspeed_refused() {
     // OM gcode.py caps the feed at the machine maximum; we refuse instead.
     let m = gantry_profile();
-    let fast = job(&m, vec![section(0, vec![square(200.0, 200.0, 10.0)], gantry_cut(120.0, 30.0))]);
+    let fast = job(&m, vec![section(0, vec![square(0.0, 0.0, 10.0)], gantry_cut(120.0, 30.0))]);
     let r = validate(&fast, &m);
     assert_eq!(codes(&r), vec![RefusalCode::SpeedAboveMax]);
     assert!(r.unwrap_err().refusals[0].message.contains("120"));
-    let at_max = job(&m, vec![section(0, vec![square(200.0, 200.0, 10.0)], gantry_cut(100.0, 30.0))]);
+    let at_max = job(&m, vec![section(0, vec![square(0.0, 0.0, 10.0)], gantry_cut(100.0, 30.0))]);
     let v = validate(&at_max, &m).unwrap();
     assert_eq!(v.emit().sections()[0].cut, gantry_cut(100.0, 30.0));
 }

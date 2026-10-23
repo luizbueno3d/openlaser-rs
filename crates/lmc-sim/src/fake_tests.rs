@@ -141,7 +141,10 @@ fn fake_counts_writes_while_not_ready() {
     let p = packet(&[]);
     b.submit_packet(&p).unwrap_or_else(|e| panic!("{e}"));
     assert!(b.submit_packet(&p).is_err());
-    assert_eq!(b.recorder().snapshot().writes_while_not_ready, 1);
+    let r = b.recorder().snapshot();
+    assert_eq!(r.writes_while_not_ready, 1);
+    // The refused write still went out on the wire: the recording shows it (T6's "no packet in the abort" sees it).
+    assert_eq!(r.wire.iter().filter(|w| matches!(w, SimWire::Packet { .. })).count(), 2);
 }
 #[test]
 fn buffer_depth_ready_busy_and_progress_200_runs() {
