@@ -13,6 +13,7 @@ pub struct UiState {
     pub active_layer: usize,
     pub selected_tool: &'static str,
     pub active_panel: &'static str,
+    pub laser_floated: bool,
     pub cut_settings_open: bool,
     pub preview_open: bool,
     pub machine_active: bool,
@@ -483,16 +484,33 @@ impl eframe::App for OpenLaserApp {
                         self.ui.active_panel = tab;
                     }
                 }
+                if self.ui.active_panel == "Laser" && !self.ui.laser_floated && ui.button("Float Laser").clicked() {
+                    self.ui.laser_floated = true;
+                }
             });
             ui.separator();
             if self.ui.active_panel == "Laser" {
-                let ctx = ui.ctx().clone();
-                self.laser_panel(ui, &ctx);
+                if self.ui.laser_floated {
+                    ui.label("Laser panel is floating");
+                } else {
+                    let ctx = ui.ctx().clone();
+                    self.laser_panel(ui, &ctx);
+                }
             } else {
                 ui.heading(self.ui.active_panel);
                 ui.label(if self.ui.active_panel == "Console" { "Console output" } else { "No items" });
             }
         });
+        if self.ui.laser_floated {
+            let mut open = true;
+            let mut dock_clicked = false;
+            egui::Window::new("Laser Panel").open(&mut open).show(ui.ctx(), |ui| {
+                let ctx = ui.ctx().clone();
+                self.laser_panel(ui, &ctx);
+                dock_clicked = ui.button("Dock Laser Panel").clicked();
+            });
+            self.ui.laser_floated = open && !dock_clicked;
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("0 mm");
@@ -634,7 +652,7 @@ mod kittests {
         }
     }
 
-    fn harness() -> egui_kittest::Harness<'static, OpenLaserApp> {
+    fn harness_with_size(size: egui::Vec2) -> egui_kittest::Harness<'static, OpenLaserApp> {
         let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
         let session = Session::new(SessionConfig {
             origin: Origin::Human,
@@ -653,10 +671,11 @@ mod kittests {
             automation: Box::new(Automation),
             quit: Box::new(|| {}),
         };
-        egui_kittest::Harness::builder()
-            .with_size(egui::vec2(1440.0, 900.0))
-            .with_step_dt(0.05)
-            .build_eframe(move |cc| OpenLaserApp::new(cc, session, services))
+        egui_kittest::Harness::builder().with_size(size).with_step_dt(0.05).build_eframe(move |cc| OpenLaserApp::new(cc, session, services))
+    }
+
+    fn harness() -> egui_kittest::Harness<'static, OpenLaserApp> {
+        harness_with_size(egui::vec2(1440.0, 900.0))
     }
 
     #[test]
@@ -691,12 +710,44 @@ mod kittests {
 
     #[test]
     fn kittest_stop_always_visible_and_enabled() {
-        let mut harness = harness();
+        // Exercise the matrix from §7.9: idle and active states, the default and compact
+        // layouts, the Laser dock selected/closed/floated, and a modal.
+        // STOP is intentionally duplicated in the toolbar and active overlay; the toolbar
+        // control must remain exposed even when other UI layers cover the workspace.
+        for size in [egui::vec2(1440.0, 900.0), egui::vec2(1024.0, 768.0)] {
+            for (machine_state, active) in
+                [("Disconnected", false), ("Ready", false), ("Framing", true), ("Armed", true), ("Marking", true), ("Stopping", true)]
+            {
+                for panel in ["Laser", "Library", "Floated"] {
+                    let mut harness = harness_with_size(size);
+                    harness.state_mut().ui.machine_active = active;
+                    harness.state_mut().ui.active_panel = if panel == "Floated" { "Laser" } else { panel };
+                    harness.state_mut().ui.laser_floated = panel == "Floated";
+                    harness.run();
+                    let stop = harness.get_by_label("Stop laser");
+                    assert!(stop.rect().is_positive(), "STOP has no visible area at {size:?}, state={machine_state}, panel={panel}");
+                    stop.click();
+                    harness.run();
+                    assert_eq!(
+                        harness.state().ui.status_message,
+                        "Stop requested",
+                        "STOP did not accept a click at {size:?}, state={machine_state}, panel={panel}"
+                    );
+                }
+            }
+        }
+
+        // High-DPI and floating/modal conditions used by the STOP acceptance matrix.
+        let mut harness = harness_with_size(egui::vec2(1440.0, 900.0));
+        harness.ctx.set_pixels_per_point(2.0);
+        harness.state_mut().ui.machine_active = true;
+        harness.state_mut().ui.cut_settings_open = true;
         harness.run();
         let stop = harness.get_by_label("Stop laser");
+        assert!(stop.rect().is_positive(), "STOP disappeared behind the cut settings modal at 2× ppp");
         stop.click();
         harness.run();
-        assert_eq!(harness.state().ui.status_message, "Stop requested", "STOP must accept a click");
+        assert_eq!(harness.state().ui.status_message, "Stop requested");
     }
 
     #[test]

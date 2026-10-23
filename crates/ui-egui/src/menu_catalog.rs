@@ -419,7 +419,54 @@ mod tests {
     #[test]
     fn menu_catalog_matches_cat() {
         assert_eq!(MENUS, &["File", "Edit", "Tools", "Arrange", "Laser Tools", "Window", "Language", "Help"]);
-        assert!(!CATALOG.is_empty());
+        // CAT §3 is the source of truth. Keep the complete menu table tied to the
+        // reference document, including row and separator counts, then verify every
+        // directly named CAT command is represented in the UI catalogue.
+        let cat = include_str!("../../../docs/design/lightburn-command-catalog.md");
+        let menus = cat.split("## 3. Menus").nth(1).and_then(|s| s.split("\n## 4.").next()).unwrap_or_default();
+        let cat_rows: Vec<&str> = menus
+            .lines()
+            .filter(|line| line.starts_with("| P0 | `") || line.starts_with("| P1 | `") || line.starts_with("| P2 | `") || line.starts_with("| P3 | `"))
+            .collect();
+        assert_eq!(cat_rows.len(), 196, "CAT §3 changed: review the menu catalogue against the new source rows");
+        assert_eq!(CATALOG.iter().filter(|row| is_separator(row)).count(), 32, "menu separators changed; review their positions against CAT §3");
+        assert_eq!(CATALOG.iter().filter(|row| !is_separator(row)).count(), 215, "menu item count changed; review every item against CAT §3");
+
+        let mut documented = std::collections::BTreeSet::new();
+        for row in &cat_rows {
+            let id_cell = row.split('|').nth(2).unwrap_or_default();
+            let mut base = String::new();
+            for id in id_cell.replace('`', "").split(" / ").map(str::trim) {
+                let id = if id.starts_with('.') && !base.is_empty() {
+                    format!("{}{id}", base.rsplit_once('.').map(|(prefix, _)| prefix).unwrap_or(""))
+                } else {
+                    base = id.to_owned();
+                    id.to_owned()
+                };
+                if let Some((prefix, variants)) = id.split_once(".{") {
+                    if let Some(variants) = variants.strip_suffix('}') {
+                        for variant in variants.split(',').map(str::trim) {
+                            documented.insert(camel_id(&format!("{prefix}.{variant}")));
+                        }
+                    }
+                } else if id.contains('.') && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_') {
+                    documented.insert(camel_id(&id));
+                }
+            }
+        }
+        for row in CATALOG.iter().filter(|row| !is_separator(row)) {
+            let id = row.id.strip_prefix(HW_PREFIX).unwrap_or(row.id);
+            let documented_directly = documented.contains(id);
+            let expanded_catalog_id = id.contains('.') && documented.iter().any(|entry| entry.starts_with(id) || id.starts_with(entry));
+            let shell_panel = id.starts_with("window.show.") || id == "window.lockLayout";
+            let language_choice = id.starts_with("prefs.language.");
+            let live_framing = id == "laser.liveFraming"; // CAT lists this in the Laser panel inventory, not §3.
+            assert!(
+                documented_directly || expanded_catalog_id || shell_panel || language_choice || live_framing,
+                "catalogue id `{id}` is not backed by a CAT §3 command"
+            );
+        }
+
         for row in CATALOG {
             assert!(!row.path.is_empty(), "menu rows need a path: {row:?}");
             if is_separator(row) {

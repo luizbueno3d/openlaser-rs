@@ -104,7 +104,6 @@ pub(crate) fn error_reply(id: serde_json::Value, error: &str) -> Reply {
 #[cfg(test)]
 mod tests {
     #[test]
-    #[ignore = "needs I2"]
     fn every_control_method_has_a_handler() {
         for method in openlaser_control::methods::METHODS {
             assert!(super::has_handler(method), "control method lacks a route: {method}");
