@@ -107,19 +107,28 @@ struct Flags<'a> {
     values: Vec<(&'a str, Option<&'a str>)>,
 }
 
+/// `-0.5,-0.25` or `-50`: a negative number is a value (`profile set cal.offsetMm -0.5,-0.25`), never a flag.
+fn negative_number(a: &str) -> bool {
+    a.strip_prefix('-').is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit() || c == '.'))
+}
+
 impl<'a> Flags<'a> {
-    /// `valued` flags take one value; `bare` flags take none. Anything else starting with `-` is a usage error.
+    /// `valued` flags take one value; `bare` flags take none. Anything else starting with `-` (other than a negative
+    /// number) is a usage error, and so is a valued flag followed by another flag instead of its value.
     fn parse(sub: &'a str, args: &'a [String], valued: &[&str], bare: &[&str]) -> Result<Self, HwError> {
         let mut out = Flags { sub, positional: Vec::new(), values: Vec::new() };
         let mut it = args.iter();
         while let Some(a) = it.next() {
             let a = a.as_str();
-            if a.starts_with('-') && a.len() > 1 {
+            if a.starts_with('-') && a.len() > 1 && !negative_number(a) {
                 if out.values.iter().any(|(n, _)| *n == a) {
                     return Err(usage(format!("`{sub}`: {a} given twice")));
                 }
                 if valued.contains(&a) {
                     let v = it.next().ok_or_else(|| usage(format!("`{sub}`: {a} needs a value")))?;
+                    if v.starts_with("--") {
+                        return Err(usage(format!("`{sub}`: {a} needs a value, got the flag {v}")));
+                    }
                     out.values.push((a, Some(v.as_str())));
                 } else if bare.contains(&a) {
                     out.values.push((a, None));
@@ -324,6 +333,26 @@ mod tests {
         let Ok(Cmd::Run(r)) = p("run --builtin dot --power-pct 1 --allow-emission") else { panic!("run builtin") };
         assert_eq!(r.power_pct, Some(1.0));
         assert!(!r.device.sim);
+    }
+
+    #[test]
+    fn negative_numbers_are_values_and_flags_need_values() {
+        let Ok(Cmd::Profile(pr)) = p("profile set cal.offsetMm -0.5,-0.25") else { panic!("negative offset") };
+        assert_eq!(pr.action, ProfileAction::Set { key: "cal.offsetMm".into(), value: "-0.5,-0.25".into() });
+        let Ok(Cmd::Profile(pr)) = p("profile set workArea -50,-40,50,40 --machine jpt-m7-200") else { panic!("negative work area") };
+        assert_eq!(pr.action, ProfileAction::Set { key: "workArea".into(), value: "-50,-40,50,40".into() });
+        let Ok(Cmd::Profile(pr)) = p("profile set cal.offsetMm -.5") else { panic!("leading dot") };
+        assert_eq!(pr.action, ProfileAction::Set { key: "cal.offsetMm".into(), value: "-.5".into() });
+        // A valued flag never swallows the next flag; unknown single-dash words are still flags.
+        for bad in [
+            "frame a.olp --trace --sim",
+            "run a.olp --machine --allow-emission",
+            "status --machine --sim",
+            "frame a.olp -x",
+            "run --builtin dot --power-pct -1",
+        ] {
+            assert!(is_usage(p(bad)), "`{bad}` must be a usage error");
+        }
     }
 
     #[test]
