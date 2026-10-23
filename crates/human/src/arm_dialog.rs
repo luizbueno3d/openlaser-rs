@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use openlaser_types::{Fingerprint, MachineId, MonoTime, Refusal, RefusalCode, SessionId};
+use openlaser_types::{Fingerprint, FrameReceipt, MachineId, MonoTime, Refusal, RefusalCode, SessionId};
 use openlaser_ui_egui::{ArmModel, ArmOutcome};
 
 use crate::Human;
@@ -25,15 +25,20 @@ const FIELD_HINT: &str = "Type ARM";
 pub const NO_CHECKLIST: &str = "This machine profile has no checklist, so nothing can be armed. Add one in Device Settings.";
 const THUMB_SIDE: f32 = 160.0;
 
-/// What identifies one opening: a different `PendingArm` is a different dialog.
+/// What identifies one opening: a different `PendingArm` is a different dialog. Everything the person confirms by
+/// ticking and typing is in it: the bytes (whose decoded summary is shown), the frame receipt, the checklist items
+/// themselves (not only how many there are) and the bench cap.
 #[derive(Debug, Clone, PartialEq)]
 struct ModelKey {
     fingerprint: Fingerprint,
     bytes: Fingerprint,
     machine: MachineId,
     session: SessionId,
-    receipt_at: MonoTime,
+    receipt: FrameReceipt,
     rows: usize,
+    checklist: Vec<String>,
+    /// Compared bit for bit, so a NaN cap is still one key.
+    cap_bits: Option<u64>,
 }
 
 impl ModelKey {
@@ -43,8 +48,10 @@ impl ModelKey {
             bytes: m.summary.bytes_hash,
             machine: m.summary.machine.clone(),
             session: m.session,
-            receipt_at: m.receipt.at,
+            receipt: m.receipt.clone(),
             rows: m.summary.rows.len(),
+            checklist: m.checklist.clone(),
+            cap_bits: m.emission_cap_pct.map(f64::to_bits),
         }
     }
 }

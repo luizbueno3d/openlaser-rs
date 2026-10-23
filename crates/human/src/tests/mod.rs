@@ -363,6 +363,39 @@ fn arm_dialog_closed_by_revision_bump() {
 }
 
 #[test]
+fn arm_dialog_forgets_input_when_what_is_confirmed_changes() {
+    // Same job bytes, but a different checklist (same length), frame receipt or bench cap is a different PendingArm:
+    // what was ticked and typed for one never confirms the other.
+    let changes: [fn(&mut ArmModel); 3] =
+        [|m| m.checklist = vec!["Shield closed".into(), "Fume extraction on".into()], |m| m.receipt.full_passes += 1, |m| m.emission_cap_pct = Some(10.0)];
+    for change in changes {
+        let (mut h, clock) = harness();
+        human_fills(&mut h);
+        assert_eq!(ticks(&h), vec![true, true]);
+        change(&mut h.state_mut().model);
+        h.run();
+        assert_eq!(field_value(&h), "");
+        assert_eq!(ticks(&h), vec![false, false]);
+        clock.advance(Duration::from_secs(1));
+        click_confirm(&mut h);
+        assert_eq!(mints(), 0);
+    }
+}
+
+#[test]
+fn one_undrawn_pass_closes_the_arm_dialog() {
+    // Exactly one pass without the dialog (a stop voided the PendingArm), then drawn again: a new opening.
+    let (mut h, _clock) = harness();
+    human_fills(&mut h);
+    h.state_mut().show = false;
+    h.step();
+    h.state_mut().show = true;
+    h.step();
+    assert_eq!(field_value(&h), "");
+    assert_eq!(ticks(&h), vec![false, false]);
+}
+
+#[test]
 fn arm_dialog_closed_by_stop() {
     let (mut h, clock) = harness();
     human_fills(&mut h);
