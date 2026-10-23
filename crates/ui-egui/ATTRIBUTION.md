@@ -1,28 +1,59 @@
-# Attribution: `openlaser-ui-egui`
+# Attribution: openlaser-ui-egui
 
-Third-party assets and ported code in this crate (AGENTS.md §3). No LightBurn code, icons, images, screenshots or
-help text are used: LightBurn was studied for its layout, menus and behaviour only, and its name never appears in
-the UI.
+LightBurn was studied for behavior, layout and interoperability only. No LightBurn assets or code are included.
 
-## Icons (`assets/icons/`)
+## Icons
 
-Every embedded SVG has a row here; `icons::tests::every_icon_has_an_attribution_row` fails otherwise.
+Lucide Icons and Contributors, ISC. These assets were supplied by the WP8 scaffold from the vetted Craft icon set. Source: <https://github.com/lucide-icons/lucide/tree/main/icons>. Notices: [LICENSE-lucide.txt](assets/icons/LICENSE-lucide.txt).
 
-| File | What | Author | Source | Licence |
-|---|---|---|---|---|
-| `assets/icons/camera circle clipboard-paste copy eye file-input file-plus flip-horizontal-2 flip-vertical-2 folder-open hand layers link-2 lock-open lock maximize mouse-pointer-2 move pen-tool pentagon rectangle-horizontal redo-2 rotate-ccw rotate-cw ruler save scan scissors settings-2 settings spline square-terminal swatch-book trash-2 triangle-alert type undo-2 unlink wand-sparkles zoom-in zoom-out .svg` | Lucide icon `camera circle clipboard-paste copy eye file-input file-plus flip-horizontal-2 flip-vertical-2 folder-open hand layers link-2 lock-open lock maximize mouse-pointer-2 move pen-tool pentagon rectangle-horizontal redo-2 rotate-ccw rotate-cw ruler save scan scissors settings-2 settings spline square-terminal swatch-book trash-2 triangle-alert type undo-2 unlink wand-sparkles zoom-in zoom-out ` | Lucide Icons and Contributors | <https://github.com/lucide-icons/lucide> `icons/camera circle clipboard-paste copy eye file-input file-plus flip-horizontal-2 flip-vertical-2 folder-open hand layers link-2 lock-open lock maximize mouse-pointer-2 move pen-tool pentagon rectangle-horizontal redo-2 rotate-ccw rotate-cw ruler save scan scissors settings-2 settings spline square-terminal swatch-book trash-2 triangle-alert type undo-2 unlink wand-sparkles zoom-in zoom-out .svg` (lucide-static 1.49.0, copied from PdfCraft/PhotoCraft `assets/icons/`, already vetted there) | ISC, [`assets/icons/LICENSE-lucide.txt`](assets/icons/LICENSE-lucide.txt) |
+| File | Icon | License |
+|---|---|---|
+| `assets/icons/camera.svg` | camera | ISC |
+| `assets/icons/circle.svg` | circle | ISC |
+| `assets/icons/clipboard-paste.svg` | clipboard-paste | ISC |
+| `assets/icons/copy.svg` | copy | ISC |
+| `assets/icons/eye.svg` | eye | ISC |
+| `assets/icons/file-input.svg` | file-input | ISC |
+| `assets/icons/file-plus.svg` | file-plus | ISC |
+| `assets/icons/flip-horizontal-2.svg` | flip-horizontal-2 | ISC |
+| `assets/icons/flip-vertical-2.svg` | flip-vertical-2 | ISC |
+| `assets/icons/folder-open.svg` | folder-open | ISC |
+| `assets/icons/hand.svg` | hand | ISC |
+| `assets/icons/layers.svg` | layers | ISC |
+| `assets/icons/link-2.svg` | link-2 | ISC |
+| `assets/icons/lock-open.svg` | lock-open | ISC |
+| `assets/icons/lock.svg` | lock | ISC |
+| `assets/icons/maximize.svg` | maximize | ISC |
+| `assets/icons/mouse-pointer-2.svg` | mouse-pointer-2 | ISC |
+| `assets/icons/move.svg` | move | ISC |
+| `assets/icons/pen-tool.svg` | pen-tool | ISC |
+| `assets/icons/pentagon.svg` | pentagon | ISC |
+| `assets/icons/rectangle-horizontal.svg` | rectangle-horizontal | ISC |
+| `assets/icons/redo-2.svg` | redo-2 | ISC |
+| `assets/icons/rotate-ccw.svg` | rotate-ccw | ISC |
+| `assets/icons/rotate-cw.svg` | rotate-cw | ISC |
+| `assets/icons/ruler.svg` | ruler | ISC |
+| `assets/icons/save.svg` | save | ISC |
+| `assets/icons/scan.svg` | scan | ISC |
+| `assets/icons/scissors.svg` | scissors | ISC |
+| `assets/icons/settings-2.svg` | settings-2 | ISC |
+| `assets/icons/settings.svg` | settings | ISC |
+| `assets/icons/spline.svg` | spline | ISC |
+| `assets/icons/square-terminal.svg` | square-terminal | ISC |
+| `assets/icons/swatch-book.svg` | swatch-book | ISC |
+| `assets/icons/trash-2.svg` | trash-2 | ISC |
+| `assets/icons/triangle-alert.svg` | triangle-alert | ISC |
+| `assets/icons/type.svg` | type | ISC |
+| `assets/icons/undo-2.svg` | undo-2 | ISC |
+| `assets/icons/unlink.svg` | unlink | ISC |
+| `assets/icons/wand-sparkles.svg` | wand-sparkles | ISC |
+| `assets/icons/zoom-in.svg` | zoom-in | ISC |
+| `assets/icons/zoom-out.svg` | zoom-out | ISC |
 
-Some of these Lucide icons derive from Feather (Cole Bemis, MIT); `LICENSE-lucide.txt` carries both notices and
-the list of derived icons.
+## Libraries and implementation
 
-## Ported code
-
-| Source | Licence | What | Where |
-|---|---|---|---|
-| PhotoCraft (`~/AI/PDF_Craft_Edit/photocraft`, storytold) | MIT OR Apache-2.0 | patterns: `menu_catalog.rs`, `parity.rs`, `shortcuts.rs` (strict parser), `icons.rs`, the `logic`/`ui` split, the control dispatcher shape, the docking adapter | `src/menu_catalog.rs`, `src/parity.rs`, `src/shortcuts.rs`, `src/icons.rs`, `src/app.rs`, `src/control/`, `src/dock.rs` (each file names its source) |
-| craft-libs `craft-ui` @ `5c874d51` | MIT OR Apache-2.0 | docking, icon set, buttons (used as a library, not copied) | dependency |
+craft-ui docking and SVG icon preparation are used as library APIs at revision `5c874d51eeb3de70e735c8ce87a59a7dedd47675` (MIT OR Apache-2.0). The shell, catalogue rows, renderer and dispatcher are OpenLaser implementations; no source files were copied from PhotoCraft.
 
 ## Fonts
 
-egui's `default_fonts` feature embeds Ubuntu-Light (Ubuntu Font Licence 1.0), Hack (MIT), Noto Emoji (OFL 1.1)
-and emoji-icon-font (MIT/OFL); their licences ship inside the `epaint_default_fonts` crate.
+egui default fonts ship their notices in epaint_default_fonts.

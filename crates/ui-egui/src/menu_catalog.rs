@@ -14,7 +14,7 @@
 //! - Shortcuts use the strict grammar of `crate::shortcuts` (`Cmd` = ⌘ on macOS and Ctrl elsewhere, `Ctrl` = the
 //!   Control key, `Alt` = ⌥/Alt), LightBurn's defaults with CAT §10's macOS decisions applied. Esc is never in
 //!   this table: it is STOP while a machine is active (S18).
-//! - Window › (panel) rows use `window.show.<panelId>`, the shell's per-panel form of CAT's `window.show` family.
+//! - Panel rows dispatch `window.show {panel, visible}` as specified in Appendix A.
 
 /// One catalogue row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +23,7 @@ pub struct Row {
     pub label: &'static str,
     pub shortcut: Option<&'static str>,
     pub id: &'static str,
+    pub panel: Option<&'static str>,
 }
 
 /// The id of a separator row (its label is "---" too).
@@ -32,11 +33,15 @@ pub const SEPARATOR: &str = "---";
 pub const HW_PREFIX: &str = "hw:";
 
 const fn r(path: &'static [&'static str], label: &'static str, shortcut: Option<&'static str>, id: &'static str) -> Row {
-    Row { path, label, shortcut, id }
+    Row { path, label, shortcut, id, panel: None }
 }
 
 const fn sep(path: &'static [&'static str]) -> Row {
-    Row { path, label: SEPARATOR, shortcut: None, id: SEPARATOR }
+    Row { path, label: SEPARATOR, shortcut: None, id: SEPARATOR, panel: None }
+}
+
+const fn panel(path: &'static [&'static str], label: &'static str, panel: &'static str) -> Row {
+    Row { path, label, shortcut: None, id: "window.show", panel: Some(panel) }
 }
 
 /// The top-level menus in LightBurn's order (macOS menu bar; the app menu is built by `crate::native_menu`).
@@ -69,20 +74,20 @@ pub static CATALOG: &[Row] = &[
     // ---- File (CAT §3.1) ----
     r(FILE, "New", Some("Cmd+N"), "file.new"),
     r(FILE, "New Window", None, "file.newWindow"),
-    r(FILE, "Open…", Some("Cmd+O"), "file.open"),
     r(FILE, "Recent Projects", None, "file.openRecent"),
     r(FILE, "Recent Templates", None, "file.openRecentTemplate"),
+    r(FILE, "Open…", Some("Cmd+O"), "file.open"),
     r(FILE, "Import…", Some("Cmd+I"), "file.import"),
     sep(FILE),
+    r(FILE, "Show Notes", Some("Cmd+Alt+N"), "file.notes"),
     r(FILE, "Save", Some("Cmd+S"), "file.save"),
     r(FILE, "Save As…", Some("Cmd+Shift+S"), "file.saveAs"),
     r(FILE, "Save As Template…", None, "file.saveAsTemplate"),
-    r(FILE, "Export…", Some("Alt+X"), "file.export"),
     r(FILE, "Save GCode…", Some("Alt+Shift+L"), "file.saveMachineFile"),
-    r(FILE, "Save Processed Bitmap…", None, "file.saveProcessedBitmap"),
-    r(FILE, "Save Background Capture…", None, "file.saveBackgroundCapture"),
+    r(FILE, "Export…", Some("Alt+X"), "file.export"),
+    r(FILE, "Print (black only)", Some("Cmd+P"), "file.printBlack"),
     sep(FILE),
-    r(FILE, "Show Notes", Some("Cmd+Alt+N"), "file.notes"),
+    r(FILE, "Print (keep colors)", Some("Cmd+Shift+P"), "file.printColors"),
     sep(FILE),
     r(FILE_PREFS, "Import Prefs…", None, "file.prefs.import"),
     r(FILE_PREFS, "Export Prefs…", None, "file.prefs.export"),
@@ -92,8 +97,8 @@ pub static CATALOG: &[Row] = &[
     r(FILE_BUNDLES, "Import Bundles…", None, "file.bundle.import"),
     r(FILE_BUNDLES, "Export Bundle…", None, "file.bundle.export"),
     sep(FILE),
-    r(FILE, "Print (black only)", Some("Cmd+P"), "file.printBlack"),
-    r(FILE, "Print (keep colors)", Some("Cmd+Shift+P"), "file.printColors"),
+    r(FILE, "Save Processed Bitmap…", None, "file.saveProcessedBitmap"),
+    r(FILE, "Save Background Capture…", None, "file.saveBackgroundCapture"),
     sep(FILE),
     r(FILE, "Exit", Some("Cmd+Q"), "file.exit"),
     // ---- Edit (CAT §3.2) ----
@@ -103,13 +108,6 @@ pub static CATALOG: &[Row] = &[
     sep(EDIT),
     r(EDIT, "Select All", Some("Cmd+A"), "edit.selectAll"),
     r(EDIT, "Invert Selection", Some("Cmd+Shift+I"), "edit.selectInvert"),
-    r(EDIT, "Select Open Shapes", None, "edit.selectOpenShapes"),
-    r(EDIT, "Select Open Shapes Set to Fill", None, "edit.selectOpenFillShapes"),
-    r(EDIT, "Select All Shapes in Current Layer", None, "edit.selectLayerShapes"),
-    r(EDIT, "Select Contained Shapes", None, "edit.selectContained"),
-    r(EDIT, "Select Shapes Smaller Than Selected", None, "edit.selectSmaller"),
-    r(EDIT, "Select Circles…", None, "edit.selectCircles"),
-    sep(EDIT),
     r(EDIT, "Cut", Some("Cmd+X"), "edit.cut"),
     r(EDIT, "Copy", Some("Cmd+C"), "edit.copy"),
     r(EDIT, "Duplicate", Some("Cmd+D"), "edit.duplicate"),
@@ -123,9 +121,16 @@ pub static CATALOG: &[Row] = &[
     r(EDIT, "Close Path", None, "edit.closePath"),
     r(EDIT, "Close Selected Paths with Tolerance…", None, "edit.closePathsTolerance"),
     r(EDIT, "Auto-Join Selected Shapes", Some("Alt+J"), "edit.autoJoin"),
+    sep(EDIT),
     r(EDIT, "Optimize Selected Shapes…", Some("Alt+Shift+O"), "edit.optimizeShapes"),
     r(EDIT, "Delete Duplicates", Some("Alt+D"), "edit.deleteDuplicates"),
     r(EDIT, "Reverse Shape Direction", None, "edit.reverseDirection"),
+    r(EDIT, "Select Open Shapes", None, "edit.selectOpenShapes"),
+    r(EDIT, "Select Open Shapes Set to Fill", None, "edit.selectOpenFillShapes"),
+    r(EDIT, "Select All Shapes in Current Layer", None, "edit.selectLayerShapes"),
+    r(EDIT, "Select Contained Shapes", None, "edit.selectContained"),
+    r(EDIT, "Select Shapes Smaller Than Selected", None, "edit.selectSmaller"),
+    r(EDIT, "Select Circles…", None, "edit.selectCircles"),
     sep(EDIT),
     r(EDIT_IMAGE, "Refresh Image", None, "edit.image.refresh"),
     r(EDIT_IMAGE, "Replace Image…", None, "edit.image.replace"),
@@ -206,26 +211,26 @@ pub static CATALOG: &[Row] = &[
     r(ARRANGE_DOCK, "Dock Up", None, "arrange.dock.up"),
     r(ARRANGE_DOCK, "Dock Down", None, "arrange.dock.down"),
     sep(ARRANGE),
-    r(ARRANGE_MOVE_SEL, "Upper Left", None, "arrange.moveSelection.upperLeft"),
-    r(ARRANGE_MOVE_SEL, "Top", None, "arrange.moveSelection.top"),
-    r(ARRANGE_MOVE_SEL, "Upper Right", None, "arrange.moveSelection.upperRight"),
-    r(ARRANGE_MOVE_SEL, "Left", None, "arrange.moveSelection.left"),
     r(ARRANGE_MOVE_SEL, "Page Center", Some("P"), "arrange.moveSelection.pageCenter"),
-    r(ARRANGE_MOVE_SEL, "Right", None, "arrange.moveSelection.right"),
+    r(ARRANGE_MOVE_SEL, "Upper Left", None, "arrange.moveSelection.upperLeft"),
+    r(ARRANGE_MOVE_SEL, "Upper Right", None, "arrange.moveSelection.upperRight"),
     r(ARRANGE_MOVE_SEL, "Lower Left", None, "arrange.moveSelection.lowerLeft"),
-    r(ARRANGE_MOVE_SEL, "Bottom", None, "arrange.moveSelection.bottom"),
     r(ARRANGE_MOVE_SEL, "Lower Right", None, "arrange.moveSelection.lowerRight"),
+    r(ARRANGE_MOVE_SEL, "Left", None, "arrange.moveSelection.left"),
+    r(ARRANGE_MOVE_SEL, "Right", None, "arrange.moveSelection.right"),
+    r(ARRANGE_MOVE_SEL, "Top", None, "arrange.moveSelection.top"),
+    r(ARRANGE_MOVE_SEL, "Bottom", None, "arrange.moveSelection.bottom"),
     sep(ARRANGE_MOVE_SEL),
     r(ARRANGE_MOVE_SEL, "Move to Laser Position", None, "hw:arrange.moveSelection.laserPosition"),
-    r(ARRANGE_MOVE_LASER, "Upper Left", None, "hw:arrange.moveLaser.upperLeft"),
-    r(ARRANGE_MOVE_LASER, "Top", None, "hw:arrange.moveLaser.top"),
-    r(ARRANGE_MOVE_LASER, "Upper Right", None, "hw:arrange.moveLaser.upperRight"),
-    r(ARRANGE_MOVE_LASER, "Left", None, "hw:arrange.moveLaser.left"),
     r(ARRANGE_MOVE_LASER, "Center", None, "hw:arrange.moveLaser.center"),
-    r(ARRANGE_MOVE_LASER, "Right", None, "hw:arrange.moveLaser.right"),
+    r(ARRANGE_MOVE_LASER, "Upper Left", None, "hw:arrange.moveLaser.upperLeft"),
+    r(ARRANGE_MOVE_LASER, "Upper Right", None, "hw:arrange.moveLaser.upperRight"),
     r(ARRANGE_MOVE_LASER, "Lower Left", None, "hw:arrange.moveLaser.lowerLeft"),
-    r(ARRANGE_MOVE_LASER, "Bottom", None, "hw:arrange.moveLaser.bottom"),
     r(ARRANGE_MOVE_LASER, "Lower Right", None, "hw:arrange.moveLaser.lowerRight"),
+    r(ARRANGE_MOVE_LASER, "Left", None, "hw:arrange.moveLaser.left"),
+    r(ARRANGE_MOVE_LASER, "Right", None, "hw:arrange.moveLaser.right"),
+    r(ARRANGE_MOVE_LASER, "Top", None, "hw:arrange.moveLaser.top"),
+    r(ARRANGE_MOVE_LASER, "Bottom", None, "hw:arrange.moveLaser.bottom"),
     sep(ARRANGE_MOVE_LASER),
     r(ARRANGE_MOVE_LASER, "Jog Laser", None, "hw:arrange.jog"),
     sep(ARRANGE),
@@ -253,74 +258,74 @@ pub static CATALOG: &[Row] = &[
     r(ARRANGE, "Lock Selected Shapes", None, "arrange.lock"),
     r(ARRANGE, "Unlock Selected Shapes", None, "arrange.unlock"),
     // ---- Laser Tools (CAT §3.5) ----
-    r(LASER_TOOLS, "Material Test…", None, "laserTools.materialTest"),
-    r(LASER_TOOLS, "Interval Test…", None, "laserTools.intervalTest"),
-    r(LASER_TOOLS, "Focus Test…", None, "laserTools.focusTest"),
-    r(LASER_TOOLS, "Center Finder…", None, "hw:laserTools.centerFinder"),
-    sep(LASER_TOOLS),
-    r(LASER_TOOLS, "Calibrate Galvo Lens…", None, "laserTools.calibrateGalvoLens"),
-    r(LASER_TOOLS, "Cylinder Correction Setup…", None, "laserTools.cylinderCorrection"),
-    r(LASER_TOOLS, "Rotary Setup…", Some("Cmd+Shift+R"), "laserTools.rotarySetup"),
-    r(LASER_TOOLS, "Split Marking…", None, "hw:laserTools.splitMarking"),
-    r(LASER_TOOLS, "Repeat Marking…", None, "hw:laserTools.repeatMarking"),
-    r(LASER_TOOLS, "Taper Warp…", None, "laserTools.taperWarp"),
-    sep(LASER_TOOLS),
     r(LASER_TOOLS, "Print and Cut", None, "hw:laserTools.printAndCut"),
     r(LASER_TOOLS, "Manage Cameras…", None, "laserTools.cameras"),
+    r(LASER_TOOLS, "Rotary Setup…", Some("Cmd+Shift+R"), "laserTools.rotarySetup"),
+    r(LASER_TOOLS, "Cylinder Correction Setup…", None, "laserTools.cylinderCorrection"),
+    sep(LASER_TOOLS),
+    r(LASER_TOOLS, "Split Marking…", None, "hw:laserTools.splitMarking"),
+    r(LASER_TOOLS, "Repeat Marking…", None, "hw:laserTools.repeatMarking"),
+    r(LASER_TOOLS, "Focus Test…", None, "laserTools.focusTest"),
+    r(LASER_TOOLS, "Interval Test…", None, "laserTools.intervalTest"),
+    r(LASER_TOOLS, "Material Test…", None, "laserTools.materialTest"),
+    r(LASER_TOOLS, "Center Finder…", None, "hw:laserTools.centerFinder"),
+    sep(LASER_TOOLS),
+    r(LASER_TOOLS, "Taper Warp…", None, "laserTools.taperWarp"),
+    r(LASER_TOOLS, "Calibrate Galvo Lens…", None, "laserTools.calibrateGalvoLens"),
     sep(LASER_TOOLS),
     r(LASER_TOOLS, "Manage Devices…", None, "device.manage"),
     r(LASER_TOOLS, "Device Settings…", None, "device.settings"),
     r(LASER_TOOLS, "Machine Settings…", None, "hw:device.machineSettings"),
     // ---- Window (CAT §3.7, §5) ----
-    r(WINDOW, "Cuts / Layers", None, "window.show.cuts"),
-    r(WINDOW, "Laser", None, "window.show.laser"),
-    r(WINDOW, "Library", None, "window.show.library"),
-    r(WINDOW, "Move", None, "window.show.move"),
-    r(WINDOW, "Console", None, "window.show.console"),
-    r(WINDOW, "Shape Properties", None, "window.show.shapeProperties"),
-    r(WINDOW, "Variable Text", None, "window.show.variableText"),
-    r(WINDOW, "Camera Control", None, "window.show.camera"),
-    r(WINDOW, "Art Library", None, "window.show.artLibrary"),
-    r(WINDOW, "Undo History", None, "window.show.undoHistory"),
-    r(WINDOW, "File List", None, "window.show.fileList"),
+    panel(WINDOW, "Cuts / Layers", "cuts"),
+    panel(WINDOW, "Laser", "laser"),
+    panel(WINDOW, "Library", "library"),
+    panel(WINDOW, "Move", "move"),
+    panel(WINDOW, "Console", "console"),
+    panel(WINDOW, "Shape Properties", "shapeProperties"),
+    panel(WINDOW, "Variable Text", "variableText"),
+    panel(WINDOW, "Camera Control", "camera"),
+    panel(WINDOW, "Art Library", "artLibrary"),
+    panel(WINDOW, "Undo History", "undoHistory"),
+    panel(WINDOW, "File List", "fileList"),
     r(WINDOW, "Live Framing", Some("F1"), "laser.liveFraming"),
     sep(WINDOW),
-    r(WINDOW, "Preview", Some("Alt+P"), "preview.open"),
+    r(WINDOW, "Reset to Default Layout", None, "window.resetLayout"),
     sep(WINDOW),
     r(WINDOW_ZOOM, "Zoom In", Some("Cmd+Equals"), "view.zoomIn"),
     r(WINDOW_ZOOM, "Zoom Out", Some("Cmd+Minus"), "view.zoomOut"),
     r(WINDOW_ZOOM, "Zoom to Page", Some("Cmd+0"), "view.zoomPage"),
     r(WINDOW_ZOOM, "Frame Selection", Some("Cmd+Shift+A"), "view.zoomSelection"),
-    r(WINDOW, "Pan / Drag View", None, "view.pan"),
+    r(WINDOW, "Preview", Some("Alt+P"), "preview.open"),
     r(WINDOW_STYLE, "Wireframe", None, "view.style.wireframe"),
     r(WINDOW_STYLE, "Filled", None, "view.style.filled"),
     r(WINDOW_STYLE, "Smooth Edges", None, "view.edgeQuality"),
     sep(WINDOW),
+    r(WINDOW, "Pan / Drag View", None, "view.pan"),
     r(WINDOW, "Toggle Side Panels", Some("F12"), "window.toggleSidePanels"),
     r(WINDOW, "Lock Window Layout", None, "window.lockLayout"),
-    r(WINDOW, "Reset to Default Layout", None, "window.resetLayout"),
     // ---- Language (CAT §3.8) ----
     r(LANGUAGE, "English", None, "prefs.language.en"),
     r(LANGUAGE, "Português (Brasil)", None, "prefs.language.ptBr"),
     // ---- Help (CAT §3.9) ----
+    r(HELP, "About OpenLaser", None, "help.about"),
+    r(HELP, "License", None, "help.license"),
+    r(HELP, "Support Forum", None, "help.forum"),
+    r(HELP, "Submit Feature Request", None, "help.featureRequest"),
+    sep(HELP),
     r(HELP, "Quick Help and Notes", Some("Cmd+Shift+Slash"), "help.quickHelp"),
     r(HELP, "Online Documentation", None, "help.docs"),
     r(HELP, "PDF Documentation Link", None, "help.docsPdf"),
     r(HELP, "Online Video Tutorials", None, "help.videos"),
     sep(HELP),
-    r(HELP, "Support Forum", None, "help.forum"),
-    r(HELP, "Submit Feature Request", None, "help.featureRequest"),
     r(HELP, "Report a Bug", None, "help.reportBug"),
     r(HELP, "Generate Support Data", None, "help.supportData"),
+    r(HELP, "Camera Selection Help", None, "help.cameraSelection"),
+    r(HELP, "Check for Updates", None, "help.checkUpdates"),
     sep(HELP),
     r(HELP, "Enable Debug Log", None, "help.debugLog"),
     r(HELP, "Debug Drawing", None, "help.debugDrawing"),
     r(HELP, "Real-Time Statistics", None, "help.networkCameraStats"),
-    r(HELP, "Camera Selection Help", None, "help.cameraSelection"),
-    sep(HELP),
-    r(HELP, "Check for Updates", None, "help.checkUpdates"),
-    r(HELP, "License", None, "help.license"),
-    r(HELP, "About OpenLaser", None, "help.about"),
 ];
 
 /// True for a row that stands for a hardware action (never dispatched, never live; S18).
@@ -370,6 +375,24 @@ pub fn camel_id(snake: &str) -> String {
         }
     }
     out
+}
+
+/// Live engine commands and implemented shell actions share the same native and egui menu policy.
+pub fn is_live(row: &Row) -> bool {
+    !is_hw_row(row) && (openlaser_engine::registry().find(row.id).is_some() || is_shell_row(row))
+}
+
+pub fn is_shell_row(row: &Row) -> bool {
+    match row.id {
+        "window.show" => row.panel.is_some_and(|p| crate::dock::PANELS.contains(&p)),
+        "file.open" | "file.import" | "file.exit" | "preview.open" | "edit.settings" | "edit.deviceSettings" | "device.settings" | "laser.liveFraming" => true,
+        _ => false,
+    }
+}
+
+/// Stable native-menu identity; panel commands share a command id but have distinct parameters.
+pub fn native_id(row: &Row) -> String {
+    row.panel.map(|p| format!("window.show:{p}")).unwrap_or_else(|| row.id.into())
 }
 
 #[cfg(test)]
@@ -433,6 +456,7 @@ mod tests {
         assert_eq!(CATALOG.iter().filter(|row| !is_separator(row)).count(), 215, "menu item count changed; review every item against CAT §3");
 
         let mut documented = std::collections::BTreeSet::new();
+        let mut order = std::collections::BTreeMap::new();
         for row in &cat_rows {
             let id_cell = row.split('|').nth(2).unwrap_or_default();
             let mut base = String::new();
@@ -446,19 +470,33 @@ mod tests {
                 if let Some((prefix, variants)) = id.split_once(".{") {
                     if let Some(variants) = variants.strip_suffix('}') {
                         for variant in variants.split(',').map(str::trim) {
-                            documented.insert(camel_id(&format!("{prefix}.{variant}")));
+                            let id = camel_id(&format!("{prefix}.{variant}"));
+                            let next = order.len();
+                            order.entry(id.clone()).or_insert(next);
+                            documented.insert(id);
                         }
                     }
                 } else if id.contains('.') && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_') {
-                    documented.insert(camel_id(&id));
+                    let id = camel_id(&id);
+                    let next = order.len();
+                    order.entry(id.clone()).or_insert(next);
+                    documented.insert(id);
                 }
+            }
+        }
+        let mut previous = std::collections::BTreeMap::new();
+        for row in CATALOG.iter().filter(|row| !is_separator(row)) {
+            if let Some(rank) = order.get(row.id.strip_prefix(HW_PREFIX).unwrap_or(row.id))
+                && let Some((last, label)) = previous.insert(row.path, (*rank, row.label))
+            {
+                assert!(*rank >= last, "CAT order changed: {} precedes {} in {:?}", row.label, label, row.path);
             }
         }
         for row in CATALOG.iter().filter(|row| !is_separator(row)) {
             let id = row.id.strip_prefix(HW_PREFIX).unwrap_or(row.id);
             let documented_directly = documented.contains(id);
             let expanded_catalog_id = id.contains('.') && documented.iter().any(|entry| entry.starts_with(id) || id.starts_with(entry));
-            let shell_panel = id.starts_with("window.show.") || id == "window.lockLayout";
+            let shell_panel = id == "window.show" || id == "window.lockLayout";
             let language_choice = id.starts_with("prefs.language.");
             let live_framing = id == "laser.liveFraming"; // CAT lists this in the Laser panel inventory, not §3.
             assert!(

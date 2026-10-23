@@ -3,13 +3,13 @@
 
 use openlaser_engine::Registry;
 
-/// The parity floor only rises.
-pub const FLOOR: usize = 0;
+/// Current live engine and shell menu rows. This floor only rises.
+pub const FLOOR: usize = 13;
 
 /// (live, catalogued). WP0 stub: nothing is live.
 pub fn live_count(reg: &Registry) -> (usize, usize) {
     let rows: Vec<_> = crate::menu_catalog::CATALOG.iter().filter(|row| !crate::menu_catalog::is_separator(row)).collect();
-    let live = rows.iter().filter(|row| !crate::menu_catalog::is_hw_row(row) && reg.find(row.id).is_some()).count();
+    let live = rows.iter().filter(|row| !crate::menu_catalog::is_hw_row(row) && (reg.find(row.id).is_some() || crate::menu_catalog::is_shell_row(row))).count();
     (live, rows.len())
 }
 
@@ -18,7 +18,7 @@ mod tests {
     #[test]
     fn parity_floor() {
         let (live, catalogued) = super::live_count(openlaser_engine::registry());
-        assert_eq!(live, live.saturating_sub(super::FLOOR).saturating_add(super::FLOOR));
+        assert!(live >= super::FLOOR, "live menu count regressed: {live} < {}", super::FLOOR);
         assert!(catalogued >= live);
     }
 

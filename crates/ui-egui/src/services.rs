@@ -6,6 +6,7 @@ use openlaser_types::{ArmToken, FrameReceipt, MonoTime, SessionId};
 
 /// Everything platform- or safety-specific is injected; ui-egui does no file or device I/O itself.
 pub struct Services {
+    pub clock: std::sync::Arc<dyn openlaser_types::Clock>,
     pub human: Box<dyn HumanSurfaces>,
     /// Async (rfd) in the app; scripted in tests.
     pub files: Box<dyn FileDialogs>,
@@ -55,7 +56,7 @@ pub struct UiSettings {
 
 impl UiSettings {
     pub fn with_defaults() -> Self {
-        Self { in_window_menus: false, dock_layout: "cuts|laser,library,move,console".to_owned(), show_cuts: true, show_laser: true }
+        Self { in_window_menus: false, dock_layout: crate::dock::encode(&crate::dock::default_layout()), show_cuts: true, show_laser: true }
     }
 }
 
@@ -70,41 +71,9 @@ impl craft_settings::Settings for UiSettings {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Validates the compact panel layout representation and falls back atomically on malformed data.
+/// Validates the serialized craft-ui tree and falls back atomically on malformed data.
 pub fn normalize_dock_layout(value: &str) -> String {
-    let valid_names = ["cuts", "laser", "library", "move", "console"];
-    let mut seen = std::collections::BTreeSet::new();
-    let mut sides = value.split('|');
-    let left = sides.next().unwrap_or_default();
-    let right = sides.next().unwrap_or_default();
-    if sides.next().is_some() {
-        return UiSettings::default().dock_layout;
-    }
-    for name in left.split(',').chain(right.split(',')) {
-        if !valid_names.contains(&name) || !seen.insert(name) {
-            return UiSettings::default().dock_layout;
-        }
-    }
-    if seen.len() != valid_names.len() || !left.split(',').any(|name| name == "cuts") || !right.split(',').any(|name| name == "laser") {
-        return UiSettings::default().dock_layout;
-    }
-    value.to_owned()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dock_layout_roundtrip_and_fallback() {
-        let settings = UiSettings::default();
-        let encoded = serde_json::to_string(&settings).unwrap_or_default();
-        let decoded: UiSettings = serde_json::from_str(&encoded).unwrap_or_default();
-        assert_eq!(decoded, settings);
-        assert_eq!(normalize_dock_layout("cuts|laser,library,move,console"), settings.dock_layout);
-        assert_eq!(normalize_dock_layout("cuts|laser,laser"), settings.dock_layout);
-        assert_eq!(normalize_dock_layout("bad"), settings.dock_layout);
-    }
+    crate::dock::encode(&crate::dock::decode(value))
 }
 
 pub trait SettingsStore: Send {
@@ -120,6 +89,9 @@ pub trait Clipboard: Send {
 pub trait AutomationToggle: Send {
     fn set(&mut self, on: bool) -> Result<Option<ControlInfo>, String>;
     fn info(&self) -> Option<ControlInfo>;
+    fn take_requests(&mut self) -> Option<std::sync::mpsc::Receiver<openlaser_control::server::ControlRequest>> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

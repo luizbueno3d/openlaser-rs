@@ -107,56 +107,135 @@ pub trait CanvasRenderer {
     fn paint(&mut self, painter: &egui::Painter, list: &DisplayList, view: &ViewXform);
 }
 
-/// Stateless renderer: hairline geometry is painted in screen points, preserving a one-pixel outline as zoom changes.
-#[derive(Debug, Default)]
-pub struct PainterRenderer;
+/// Bounded texture cache and zoom-dependent mesh cache. Panning translates cached vertices.
+#[derive(Default)]
+pub struct PainterRenderer {
+    textures: Vec<(std::sync::Arc<[u8]>, [u32; 2], egui::TextureHandle)>,
+    mesh_key: Option<(DisplayList, f64)>,
+    mesh: egui::epaint::Mesh,
+}
+
+fn add_segment(mesh: &mut egui::epaint::Mesh, a: egui::Pos2, b: egui::Pos2, stroke: egui::Stroke) {
+    let vector = b - a;
+    if !a.is_finite() || !b.is_finite() || vector.length_sq() <= f32::EPSILON {
+        return;
+    }
+    let n = egui::vec2(-vector.y, vector.x).normalized() * stroke.width * 0.5;
+    let Ok(base) = u32::try_from(mesh.vertices.len()) else { return };
+    if base > u32::MAX - 4 {
+        return;
+    }
+    for p in [a + n, b + n, b - n, a - n] {
+        mesh.colored_vertex(p, stroke.color);
+    }
+    mesh.indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+fn add_line(mesh: &mut egui::epaint::Mesh, points: &[egui::Pos2], stroke: egui::Stroke, dashed: bool) {
+    for pair in points.windows(2) {
+        let Some((&a, &b)) = pair.first().zip(pair.get(1)) else { continue };
+        if dashed {
+            let length = a.distance(b);
+            // A pathological display list must not generate unbounded dash geometry.
+            if !length.is_finite() || length > 100_000.0 {
+                continue;
+            }
+            let direction = (b - a).normalized();
+            let mut distance = 0.0;
+            while distance < length {
+                add_segment(mesh, a + direction * distance, a + direction * (distance + 6.0).min(length), stroke);
+                distance += 10.0;
+            }
+        } else {
+            add_segment(mesh, a, b, stroke);
+        }
+    }
+}
 
 impl CanvasRenderer for PainterRenderer {
     fn paint(&mut self, painter: &egui::Painter, list: &DisplayList, view: &ViewXform) {
         let clip = painter.with_clip_rect(view.rect);
-        for item in &list.items {
-            match item {
-                Item::Polylines { stroke, color, lines, .. } => {
-                    let stroke = stroke_for(*stroke, *color);
-                    for line in lines.iter() {
-                        let points: Vec<egui::Pos2> = line.0.iter().map(|p| view.world_to_screen(*p)).collect();
-                        if points.len() >= 2 {
-                            clip.add(egui::Shape::line(points, stroke));
+        if self.mesh_key.as_ref().is_none_or(|(cached, zoom)| cached != list || *zoom != view.zoom) {
+            self.mesh.clear();
+            let base = ViewXform { zoom: view.zoom, center: [0.0; 2], rect: egui::Rect::from_center_size(egui::Pos2::ZERO, egui::Vec2::ZERO) };
+            for item in &list.items {
+                match item {
+                    Item::Polylines { stroke, color, lines, .. } => {
+                        for line in lines.iter() {
+                            let points: Vec<_> = line.0.iter().map(|p| base.world_to_screen(*p)).collect();
+                            add_line(&mut self.mesh, &points, stroke_for(*stroke, *color), matches!(stroke, Stroke::Dashed));
                         }
                     }
-                }
-                Item::Segments { color, segs } => {
-                    let stroke = egui::Stroke::new(1.0, rgba(*color));
-                    for segment in segs.iter() {
-                        clip.line_segment([view.world_to_screen(segment[0]), view.world_to_screen(segment[1])], stroke);
+                    Item::Segments { color, segs } => {
+                        for segment in segs.iter() {
+                            add_segment(
+                                &mut self.mesh,
+                                base.world_to_screen(segment[0]),
+                                base.world_to_screen(segment[1]),
+                                egui::Stroke::new(1.0, rgba(*color)),
+                            );
+                        }
                     }
+                    Item::Rect { stroke, color, rect } => {
+                        let a = base.world_to_screen(rect.min);
+                        let b = base.world_to_screen(rect.max);
+                        add_line(
+                            &mut self.mesh,
+                            &[a, egui::pos2(b.x, a.y), b, egui::pos2(a.x, b.y), a],
+                            stroke_for(*stroke, *color),
+                            matches!(stroke, Stroke::Dashed),
+                        );
+                    }
+                    _ => {}
                 }
-                Item::Rect { stroke, color, rect } => {
-                    let min = view.world_to_screen(rect.min);
-                    let max = view.world_to_screen(rect.max);
-                    let screen = egui::Rect::from_two_pos(min, max);
-                    clip.rect_stroke(screen, 0.0, stroke_for(*stroke, *color), egui::StrokeKind::Inside);
-                }
+            }
+            self.mesh_key = Some((list.clone(), view.zoom));
+        }
+        if !self.mesh.is_empty() {
+            let mut mesh = self.mesh.clone();
+            mesh.translate(view.world_to_screen([0.0; 2]).to_vec2());
+            clip.add(egui::Shape::mesh(mesh));
+        }
+        for item in &list.items {
+            match item {
                 Item::Marker { kind, at, color } => {
                     let p = view.world_to_screen(*at);
-                    let radius = match kind {
-                        openlaser_render::MarkerKind::Refusal => 5.0,
-                        _ => 3.5,
-                    };
+                    let radius = if matches!(kind, openlaser_render::MarkerKind::Refusal) { 5.0 } else { 3.5 };
                     clip.circle_filled(p, radius, rgba(*color));
-                    clip.circle_stroke(p, radius + 1.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
                 }
                 Item::Image { rect, gray, px } => {
+                    let limit = painter.ctx().input(|i| i.max_texture_side).min(2048);
                     let Some(count) = usize::try_from(px[0]).ok().and_then(|w| usize::try_from(px[1]).ok().and_then(|h| w.checked_mul(h))) else { continue };
-                    if count != gray.len() || px[0] == 0 || px[1] == 0 {
+                    if count != gray.len() || px.contains(&0) || px.iter().any(|side| *side as usize > limit) {
                         continue;
                     }
-                    let pixels: Vec<egui::Color32> = gray.iter().map(|g| egui::Color32::from_gray(*g)).collect();
-                    let image = egui::ColorImage::new([px[0] as usize, px[1] as usize], pixels);
-                    let texture = painter.ctx().load_texture("openlaser-canvas-image", image, egui::TextureOptions::LINEAR);
-                    let screen = egui::Rect::from_two_pos(view.world_to_screen(rect.min), view.world_to_screen(rect.max));
-                    clip.image(texture.id(), screen, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                    let index = self.textures.iter().position(|(data, size, _)| std::sync::Arc::ptr_eq(data, gray) && size == px);
+                    let index = match index {
+                        Some(index) => index,
+                        None => {
+                            if self.textures.len() >= 8 {
+                                let _ = self.textures.remove(0);
+                            }
+                            let pixels = gray.iter().map(|g| egui::Color32::from_gray(*g)).collect();
+                            let texture = painter.ctx().load_texture(
+                                "openlaser-canvas-image",
+                                egui::ColorImage::new([px[0] as usize, px[1] as usize], pixels),
+                                egui::TextureOptions::LINEAR,
+                            );
+                            self.textures.push((std::sync::Arc::clone(gray), *px, texture));
+                            self.textures.len() - 1
+                        }
+                    };
+                    if let Some((_, _, texture)) = self.textures.get(index) {
+                        clip.image(
+                            texture.id(),
+                            egui::Rect::from_two_pos(view.world_to_screen(rect.min), view.world_to_screen(rect.max)),
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    }
                 }
+                _ => {}
             }
         }
     }
@@ -169,7 +248,7 @@ pub fn paint_fit(painter: &egui::Painter, list: &DisplayList, rect: egui::Rect) 
     let height = (bounds.max[1] - bounds.min[1]).max(0.001);
     let zoom = (f64::from(rect.width().max(1.0)) / width).min(f64::from(rect.height().max(1.0)) / height) * 0.9;
     let view = ViewXform { zoom, center: [(bounds.min[0] + bounds.max[0]) * 0.5, (bounds.min[1] + bounds.max[1]) * 0.5], rect };
-    PainterRenderer.paint(painter, list, &view);
+    PainterRenderer::default().paint(painter, list, &view);
 }
 
 fn bounds(list: &DisplayList) -> Option<openlaser_types::Bounds> {
@@ -230,6 +309,81 @@ fn finite_positive(value: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renderer_caches_textures_meshes_and_bounds_images() {
+        let image = std::sync::Arc::<[u8]>::from(vec![80_u8; 4]);
+        let list = DisplayList {
+            items: vec![
+                Item::Image { rect: openlaser_types::Bounds { min: [0.0; 2], max: [2.0; 2] }, gray: image, px: [2, 2] },
+                Item::Rect { stroke: Stroke::Dashed, color: Rgba([255; 4]), rect: openlaser_types::Bounds { min: [0.0; 2], max: [20.0; 2] } },
+            ],
+        };
+        let mut renderer = PainterRenderer::default();
+        let ctx = egui::Context::default();
+        let view = ViewXform { zoom: 2.0, center: [0.0; 2], rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500.0, 500.0)) };
+        let mut first = ctx.run_ui(egui::RawInput::default(), |ui| renderer.paint(ui.painter(), &list, &view));
+        first.textures_delta.clear();
+        assert_eq!(renderer.textures.len(), 1);
+        let texture = renderer.textures[0].2.id();
+        let mesh = renderer.mesh.clone();
+        assert!(mesh.vertices.len() > 16, "dashed rectangle must contain separate dash quads");
+        let moved = ViewXform { center: [10.0, 20.0], ..view };
+        let mut next = ctx.run_ui(egui::RawInput::default(), |ui| renderer.paint(ui.painter(), &list, &moved));
+        let no_upload = next.textures_delta.set.is_empty();
+        next.textures_delta.clear();
+        assert!(no_upload, "texture was uploaded again");
+        assert_eq!(renderer.textures[0].2.id(), texture);
+        assert_eq!(renderer.mesh, mesh, "pan rebuilt cached geometry");
+        let invalid = DisplayList {
+            items: vec![Item::Image { rect: openlaser_types::Bounds { min: [0.0; 2], max: [2.0; 2] }, gray: vec![0; 4096].into(), px: [4096, 1] }],
+        };
+        let mut next = ctx.run_ui(egui::RawInput::default(), |ui| renderer.paint(ui.painter(), &invalid, &moved));
+        next.textures_delta.clear();
+        assert_eq!(renderer.textures.len(), 1);
+    }
+
+    #[test]
+    #[ignore = "S1 perf: Luiz runs in release on the benchmark machine"]
+    fn s1_large_display_list() {
+        let list = DisplayList {
+            items: vec![Item::Segments {
+                color: Rgba([255; 4]),
+                segs: (0..200_000)
+                    .map(|i| {
+                        let x = f64::from(i % 1000);
+                        [[x, 0.0], [x, 1.0]]
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            }],
+        };
+        let ctx = egui::Context::default();
+        let mut renderer = PainterRenderer::default();
+        let view = ViewXform { zoom: 1.0, center: [0.0; 2], rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 768.0)) };
+        let started = std::time::Instant::now();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| renderer.paint(ui.painter(), &list, &view));
+        output.textures_delta.clear();
+        assert_eq!(renderer.mesh.indices.len(), 200_000 * 6);
+        eprintln!("S1: {:?}", started.elapsed());
+    }
+
+    #[test]
+    #[ignore = "S2 perf: Luiz runs in release on the benchmark machine"]
+    fn s2_cached_pan() {
+        let ctx = egui::Context::default();
+        let mut renderer = PainterRenderer::default();
+        let list = DisplayList {
+            items: vec![Item::Rect { stroke: Stroke::Hairline, color: Rgba([255; 4]), rect: openlaser_types::Bounds { min: [0.0; 2], max: [200.0; 2] } }],
+        };
+        let started = std::time::Instant::now();
+        for i in 0..120 {
+            let view = ViewXform { zoom: 2.0, center: [f64::from(i), 0.0], rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 768.0)) };
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| renderer.paint(ui.painter(), &list, &view));
+            output.textures_delta.clear();
+        }
+        eprintln!("S2: {:?}/120 frames", started.elapsed());
+    }
 
     #[test]
     fn canvas_view_xform_roundtrip() {

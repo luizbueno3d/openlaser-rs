@@ -47,3 +47,15 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ("zoom-in", include_bytes!("../assets/icons/zoom-in.svg")),
     ("zoom-out", include_bytes!("../assets/icons/zoom-out.svg")),
 ];
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_icon_has_an_attribution_row() {
+        let attribution = include_str!("../ATTRIBUTION.md");
+        for (name, bytes) in super::ICONS {
+            assert!(!bytes.is_empty());
+            assert!(attribution.contains(&format!("`assets/icons/{name}.svg`")), "missing attribution for {name}");
+        }
+    }
+}

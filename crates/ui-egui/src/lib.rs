@@ -3,15 +3,18 @@
 //! Everything platform- or safety-specific is injected through [`Services`]; ui-egui does no file or device I/O
 //! itself and can never reach `openlaser-arm` (§2.3 rule 7): ARM tokens come only through [`HumanSurfaces`].
 //!
-//! WP0 stubs: the traits and types are complete; the app draws a placeholder, Esc latches every stop, and the
-//! control dispatcher refuses every method.
+//! Native docking, command routing, display-list rendering and safety chrome are exercised in process.
 #![forbid(unsafe_code)]
 
 mod app;
 pub mod canvas;
 pub mod control;
+mod cut_editor;
+mod dock;
+mod icon_data;
 pub mod menu_catalog;
 pub mod parity;
+mod screenshot;
 mod services;
 pub mod shortcuts;
 
@@ -28,3 +31,8 @@ pub use openlaser_engine::{Registry, Session};
 pub use openlaser_render::DisplayList;
 pub use openlaser_types::{ArmToken, EmissionSummary, FrameReceipt, MonoTime, SessionId};
 pub use {eframe, egui};
+
+/// The always-available simulator profile used by the desktop bootstrap.
+pub fn simulator_profile() -> openlaser_engine::MachineProfile {
+    openlaser_machine::jpt_m7_200_sim()
+}
