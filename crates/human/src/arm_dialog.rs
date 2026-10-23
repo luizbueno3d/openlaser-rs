@@ -21,6 +21,8 @@ pub const CANCEL_LABEL: &str = "Cancel";
 /// SPEC §3.20 wording.
 pub const AUTOMATION_IGNORED: &str = "Automation input reached this dialog and was ignored.";
 const FIELD_HINT: &str = "Type ARM";
+/// An empty checklist can never be confirmed (`mint` refuses it too, SPEC §3.9).
+pub const NO_CHECKLIST: &str = "This machine profile has no checklist, so nothing can be armed. Add one in Device Settings.";
 const THUMB_SIDE: f32 = 160.0;
 
 /// What identifies one opening: a different `PendingArm` is a different dialog.
@@ -127,6 +129,9 @@ impl Human {
             draw_cap(ui, model.emission_cap_pct, &violations);
             ui.separator();
             ui.label("Before you arm:");
+            if model.checklist.is_empty() {
+                ui.colored_label(ui.visuals().error_fg_color, NO_CHECKLIST);
+            }
             for (i, item) in model.checklist.iter().enumerate() {
                 if let Some(t) = state.ticked.get_mut(i) {
                     ui.checkbox(t, item.as_str());

@@ -415,6 +415,21 @@ fn arm_dialog_refuses_rows_above_bench_cap() {
 }
 
 #[test]
+fn empty_checklist_can_never_arm() {
+    let mut m = model(7, None);
+    m.checklist.clear();
+    let (mut h, clock) = harness_with(Some(recording_mint), m);
+    assert!(shows(&h, crate::arm_dialog::NO_CHECKLIST));
+    h.get_by_role(Role::TextInput).click();
+    h.run();
+    h.get_by_role(Role::TextInput).type_text("ARM");
+    h.run();
+    clock.advance(Duration::from_secs(1));
+    click_confirm(&mut h);
+    assert_eq!(mints(), 0);
+}
+
+#[test]
 fn mint_refusal_is_shown_and_nothing_arms() {
     let (mut h, clock) = harness_with(Some(refusing_mint), model(7, None));
     human_fills(&mut h);
