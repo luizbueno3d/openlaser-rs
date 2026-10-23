@@ -39,10 +39,72 @@ pub trait FileDialogs: Send {
 }
 
 /// Persisted UI settings (WP0 fill-in; WP8 adds the fields).
-#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(default)]
 pub struct UiSettings {
     pub in_window_menus: bool,
+    /// Stable serialized docking tree. Invalid values are ignored and replaced with the default layout.
+    #[serde(default)]
+    pub dock_layout: String,
+    #[serde(default)]
+    pub show_cuts: bool,
+    #[serde(default)]
+    pub show_laser: bool,
+}
+
+impl UiSettings {
+    pub fn with_defaults() -> Self {
+        Self { in_window_menus: false, dock_layout: "cuts|laser,library,move,console".to_owned(), show_cuts: true, show_laser: true }
+    }
+}
+
+impl Default for UiSettings {
+    fn default() -> Self {
+        Self::with_defaults()
+    }
+}
+
+impl craft_settings::Settings for UiSettings {
+    const APP_ID: &'static str = "openlaser";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// Validates the compact panel layout representation and falls back atomically on malformed data.
+pub fn normalize_dock_layout(value: &str) -> String {
+    let valid_names = ["cuts", "laser", "library", "move", "console"];
+    let mut seen = std::collections::BTreeSet::new();
+    let mut sides = value.split('|');
+    let left = sides.next().unwrap_or_default();
+    let right = sides.next().unwrap_or_default();
+    if sides.next().is_some() {
+        return UiSettings::default().dock_layout;
+    }
+    for name in left.split(',').chain(right.split(',')) {
+        if !valid_names.contains(&name) || !seen.insert(name) {
+            return UiSettings::default().dock_layout;
+        }
+    }
+    if seen.len() != valid_names.len() || !left.split(',').any(|name| name == "cuts") || !right.split(',').any(|name| name == "laser") {
+        return UiSettings::default().dock_layout;
+    }
+    value.to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dock_layout_roundtrip_and_fallback() {
+        let settings = UiSettings::default();
+        let encoded = serde_json::to_string(&settings).unwrap_or_default();
+        let decoded: UiSettings = serde_json::from_str(&encoded).unwrap_or_default();
+        assert_eq!(decoded, settings);
+        assert_eq!(normalize_dock_layout("cuts|laser,library,move,console"), settings.dock_layout);
+        assert_eq!(normalize_dock_layout("cuts|laser,laser"), settings.dock_layout);
+        assert_eq!(normalize_dock_layout("bad"), settings.dock_layout);
+    }
 }
 
 pub trait SettingsStore: Send {

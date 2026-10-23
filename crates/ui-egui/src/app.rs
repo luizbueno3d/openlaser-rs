@@ -24,11 +24,16 @@ pub struct OpenLaserApp {
     ui: UiState,
     services: Services,
     control_rx: Option<Receiver<ControlRequest>>,
+    pending_dialogs: Vec<(crate::services::DialogTicket, crate::services::DialogKind)>,
+    close_after_stop: bool,
 }
 
 impl OpenLaserApp {
     pub fn new(_cc: &eframe::CreationContext<'_>, session: Session, services: Services) -> Self {
-        Self { session, ui: UiState { selected_tool: "Select", active_panel: "Laser", ..UiState::default() }, services, control_rx: None }
+        let mut ui = UiState { selected_tool: "Select", active_panel: "Laser", ..UiState::default() };
+        let saved = services.settings.load();
+        ui.active_panel = if saved.show_laser { "Laser" } else { "Library" };
+        Self { session, ui, services, control_rx: None, pending_dialogs: Vec::new(), close_after_stop: false }
     }
 
     pub fn with_control(mut self, rx: Receiver<ControlRequest>) -> Self {
@@ -48,7 +53,6 @@ impl OpenLaserApp {
 
     fn stop(&mut self) {
         let _ = self.session.stop_all();
-        self.ui.machine_active = false;
         self.ui.status_message = "Stop requested".to_owned();
     }
 
@@ -71,7 +75,9 @@ impl OpenLaserApp {
                             response.clone().on_hover_text("Not in OpenLaser yet");
                         }
                         if response.clicked() {
-                            self.ui.status_message = format!("{} is not available yet", row.label);
+                            if !crate::menu_catalog::is_hw_row(row) {
+                                self.invoke_ui_action(row.id);
+                            }
                             ui.close();
                         }
                     }
@@ -91,12 +97,9 @@ impl OpenLaserApp {
                 ("Redo", "edit.redo"),
                 ("Preview", "window.preview"),
             ] {
-                if ui.button(label).clicked() {
-                    if id == "window.preview" {
-                        self.ui.preview_open = true;
-                    } else {
-                        self.ui.status_message = format!("{} is not available yet", label);
-                    }
+                let disabled = self.ui.machine_active && matches!(id, "file.open" | "file.import" | "file.new");
+                if ui.add_enabled(!disabled, egui::Button::new(label)).clicked() {
+                    self.invoke_ui_action(id);
                 }
             }
             ui.separator();
@@ -108,6 +111,55 @@ impl OpenLaserApp {
                 self.stop();
             }
         });
+    }
+
+    fn invoke_ui_action(&mut self, id: &str) {
+        if self.ui.machine_active && id.starts_with("file.") {
+            self.ui.status_message = "Stop the active job before using file actions".to_owned();
+            return;
+        }
+        match id {
+            "file.open" | "file.import" => {
+                let kind = if id == "file.open" { crate::services::DialogKind::OpenProject } else { crate::services::DialogKind::Import };
+                let ticket = self.services.files.open(kind);
+                self.pending_dialogs.push((ticket, kind));
+            }
+            "file.save" | "file.saveAs" => self.ui.status_message = "Project saving requires the format package".to_owned(),
+            "window.preview" | "preview.open" => self.ui.preview_open = true,
+            "window.show.laser" => self.ui.active_panel = "Laser",
+            "window.show.library" => self.ui.active_panel = "Library",
+            "window.show.move" => self.ui.active_panel = "Move",
+            "window.show.console" => self.ui.active_panel = "Console",
+            _ => match self.session.execute_as(openlaser_engine::Origin::Human, id, serde_json::Value::Null) {
+                Ok(_) => self.ui.status_message = format!("{id} complete"),
+                Err(error) => self.ui.status_message = error.to_string(),
+            },
+        }
+    }
+
+    fn poll_dialogs(&mut self) {
+        if self.ui.machine_active {
+            return;
+        }
+        let mut pending = Vec::new();
+        for (ticket, kind) in self.pending_dialogs.drain(..) {
+            match self.services.files.poll(ticket) {
+                None => pending.push((ticket, kind)),
+                Some(None) => self.ui.status_message = "File selection cancelled".to_owned(),
+                Some(Some((path, _bytes))) => {
+                    let name = std::path::Path::new(&path).file_name().and_then(|n| n.to_str()).unwrap_or("file");
+                    self.ui.status_message = format!("Selected {name}; loading is unavailable until format integration");
+                }
+            }
+        }
+        self.pending_dialogs = pending;
+    }
+
+    fn persist_ui_settings(&mut self) {
+        let mut settings = self.services.settings.load();
+        settings.show_laser = self.ui.active_panel == "Laser";
+        settings.dock_layout = crate::services::normalize_dock_layout(&settings.dock_layout);
+        self.services.settings.save(&settings);
     }
 
     fn cuts_panel(&mut self, ui: &mut egui::Ui) {
@@ -208,7 +260,36 @@ impl eframe::App for OpenLaserApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let text_focus = ctx.egui_wants_keyboard_input();
+        let shortcut_ids = ctx.input_mut(|input| crate::shortcuts::take_pressed(input, &crate::shortcuts::table(), text_focus));
+        for id in shortcut_ids {
+            if self.services.human.frame_is_synthetic(ctx) {
+                self.ui.status_message = "Shortcut ignored for automated input".to_owned();
+            } else {
+                self.invoke_ui_action(id);
+            }
+        }
         let _ = self.session.poll();
+        let any_active = self.session.machines().iter().filter_map(|machine| self.session.status(&machine.id)).any(|status| {
+            let state = format!("{:?}", status.state);
+            state == "Framing" || state.starts_with("Running") || state == "Stopping"
+        });
+        if any_active {
+            self.ui.machine_active = true;
+        }
+        if self.ui.machine_active && !any_active && self.close_after_stop {
+            self.ui.machine_active = false;
+            self.close_after_stop = false;
+            (self.services.quit)();
+        } else if self.ui.machine_active && !any_active {
+            self.ui.machine_active = false;
+        }
+        self.poll_dialogs();
+        if ctx.input(|input| input.viewport().close_requested()) && self.ui.machine_active {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_after_stop = true;
+            self.stop();
+        }
         if self.ui.machine_active {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
@@ -231,6 +312,7 @@ impl eframe::App for OpenLaserApp {
             let _ = reply_tx.send(reply);
         }
         let _ = &self.services.quit;
+        self.persist_ui_settings();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

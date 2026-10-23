@@ -13,6 +13,7 @@ pub mod control;
 pub mod menu_catalog;
 pub mod parity;
 mod services;
+pub mod shortcuts;
 
 pub use app::{OpenLaserApp, UiState};
 pub use services::{

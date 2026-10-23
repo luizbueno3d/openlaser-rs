@@ -1,9 +1,10 @@
 //! Native OpenLaser GUI entry point. Default builds inject the simulator and never link hardware transport.
 #![forbid(unsafe_code)]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 
 use openlaser_engine::{DeviceAccess, FsAuthority, Origin, Session, SessionConfig};
 use openlaser_format::machines;
@@ -11,27 +12,83 @@ use openlaser_lmc_sim::{SimConfig, SimProvider};
 use openlaser_types::{Clock, SystemClock};
 use openlaser_ui_egui::{AutomationToggle, Clipboard, ControlInfo, DialogKind, DialogTicket, FileDialogs, OpenLaserApp, Services, SettingsStore, UiSettings};
 
-struct EmptyFiles;
-impl FileDialogs for EmptyFiles {
-    fn open(&mut self, _kind: DialogKind) -> DialogTicket {
-        DialogTicket(0)
+type PickResult = Option<(String, Vec<u8>)>;
+type DialogReceiver = mpsc::Receiver<PickResult>;
+
+struct NativeFiles {
+    next: u64,
+    pending: HashMap<u64, DialogReceiver>,
+}
+impl NativeFiles {
+    fn new() -> Self {
+        Self { next: 1, pending: HashMap::new() }
     }
-    fn poll(&mut self, _ticket: DialogTicket) -> Option<Option<(String, Vec<u8>)>> {
-        None
+    fn queue(&mut self, task: impl FnOnce() -> Option<(String, Vec<u8>)> + Send + 'static) -> DialogTicket {
+        let ticket = self.next;
+        self.next = self.next.saturating_add(1).max(1);
+        let (tx, rx) = mpsc::channel();
+        let _ = std::thread::Builder::new().name("openlaser-file-dialog".to_owned()).spawn(move || {
+            let _ = tx.send(task());
+        });
+        self.pending.insert(ticket, rx);
+        DialogTicket(ticket)
     }
-    fn save(&mut self, _kind: DialogKind, _bytes: Vec<u8>) -> DialogTicket {
-        DialogTicket(0)
+}
+impl FileDialogs for NativeFiles {
+    fn open(&mut self, kind: DialogKind) -> DialogTicket {
+        self.queue(move || {
+            let mut dialog = rfd::FileDialog::new();
+            match kind {
+                DialogKind::OpenProject => {
+                    dialog = dialog.add_filter("OpenLaser Project", &["olp"]);
+                }
+                DialogKind::Import => {
+                    dialog = dialog.add_filter("Vector and image files", &["svg", "dxf", "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif"]);
+                }
+                _ => {}
+            }
+            let path = dialog.pick_file()?;
+            let bytes = std::fs::read(&path).ok()?;
+            Some((path.to_string_lossy().into_owned(), bytes))
+        })
+    }
+    fn poll(&mut self, ticket: DialogTicket) -> Option<Option<(String, Vec<u8>)>> {
+        let rx = self.pending.get(&ticket.0)?;
+        match rx.try_recv() {
+            Ok(value) => {
+                self.pending.remove(&ticket.0);
+                Some(value)
+            }
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.pending.remove(&ticket.0);
+                Some(None)
+            }
+        }
+    }
+    fn save(&mut self, _kind: DialogKind, bytes: Vec<u8>) -> DialogTicket {
+        self.queue(move || {
+            let path = rfd::FileDialog::new().add_filter("OpenLaser Project", &["olp"]).save_file()?;
+            std::fs::write(&path, bytes).ok()?;
+            Some((path.to_string_lossy().into_owned(), Vec::new()))
+        })
     }
 }
 
-#[derive(Default)]
-struct MemorySettings(UiSettings);
-impl SettingsStore for MemorySettings {
+struct PersistentSettings(craft_settings::SettingsStore<UiSettings>);
+impl PersistentSettings {
+    fn open() -> Self {
+        let (store, _) = craft_settings::SettingsStore::open(craft_settings::Location::Auto);
+        Self(store)
+    }
+}
+impl SettingsStore for PersistentSettings {
     fn load(&self) -> UiSettings {
-        self.0.clone()
+        self.0.get().clone()
     }
     fn save(&mut self, settings: &UiSettings) {
-        self.0 = settings.clone();
+        self.0.update(|value| *value = settings.clone());
+        let _ = self.0.flush();
     }
 }
 
@@ -82,8 +139,8 @@ fn main() -> ExitCode {
     });
     let services = Services {
         human: Box::new(openlaser_human::Human::new(clock)),
-        files: Box::new(EmptyFiles),
-        settings: Box::new(MemorySettings::default()),
+        files: Box::new(NativeFiles::new()),
+        settings: Box::new(PersistentSettings::open()),
         clipboard: Box::new(EmptyClipboard),
         automation: Box::new(DisabledAutomation),
         quit: Box::new(|| {}),
