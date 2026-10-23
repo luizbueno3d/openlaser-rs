@@ -43,26 +43,18 @@ pub fn load(file: &str) -> Result<Table, String> {
 }
 
 fn string_field(obj: &Map<String, Value>, key: &str, path: &std::path::Path) -> Result<String, String> {
-    obj.get(key)
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| format!("{}: missing string {key}", path.display()))
+    obj.get(key).and_then(Value::as_str).map(str::to_owned).ok_or_else(|| format!("{}: missing string {key}", path.display()))
 }
 
 fn string_array(obj: &Map<String, Value>, key: &str, path: &std::path::Path) -> Result<Vec<String>, String> {
     let values = obj.get(key).and_then(Value::as_array).ok_or_else(|| format!("{}: missing array {key}", path.display()))?;
-    values
-        .iter()
-        .map(|v| v.as_str().map(str::to_owned).ok_or_else(|| format!("{}: {key} contains a non-string", path.display())))
-        .collect()
+    values.iter().map(|v| v.as_str().map(str::to_owned).ok_or_else(|| format!("{}: {key} contains a non-string", path.display()))).collect()
 }
 
 fn row_array(value: Option<&Value>, key: &str, path: &std::path::Path) -> Result<Vec<Vec<Value>>, String> {
     let Some(value) = value else { return Ok(Vec::new()) };
     let rows = value.as_array().ok_or_else(|| format!("{}: {key} is not an array", path.display()))?;
-    rows.iter()
-        .map(|row| row.as_array().cloned().ok_or_else(|| format!("{}: {key} contains a non-array row", path.display())))
-        .collect()
+    rows.iter().map(|row| row.as_array().cloned().ok_or_else(|| format!("{}: {key} contains a non-array row", path.display()))).collect()
 }
 
 fn groups(value: Option<&Value>, path: &std::path::Path) -> Result<Vec<Group>, String> {

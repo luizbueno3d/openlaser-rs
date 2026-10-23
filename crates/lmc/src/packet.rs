@@ -23,7 +23,7 @@ impl Single {
         out
     }
 
-    /// Every single except WriteCorLine. WP0 stub: true.
+    /// Every single command except WriteCorLine has an 8-byte reply.
     pub fn reads_reply(&self) -> bool {
         self.0.first().copied() != Some(op::WRITE_COR_LINE)
     }
@@ -82,12 +82,17 @@ impl Packet {
     pub fn real_commands(&self) -> usize {
         self.words().iter().position(|word| word.first().copied() == Some(op::LIST_END_OF_LIST)).unwrap_or(SLOTS)
     }
+
+    /// SHA-256 of the full wire packet, used to identify fixture and simulator packets.
+    pub fn sha256_hex(&self) -> String {
+        Sha256::digest(self.0.as_slice()).iter().map(|b| format!("{b:02x}")).collect()
+    }
 }
 
 impl fmt::Debug for Packet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let digest = Sha256::digest(self.0.as_slice());
-        let prefix: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
+        let digest = self.sha256_hex();
+        let prefix = digest.get(..8).unwrap_or("????????");
         f.debug_struct("Packet").field("sha256", &prefix).field("commands", &self.real_commands()).finish()
     }
 }
@@ -116,7 +121,7 @@ pub fn status_from_reply(reply: [u16; 4]) -> StatusWord {
 }
 
 /// R05 §1.4 verbatim: GetSerialNo … EnableZ, then a 50 ms pause (the session sleeps; not in the list).
-/// WP0 stub: empty.
+/// Initialization command order from R05 §1.4; the session supplies the final 50 ms pause.
 pub fn init_sequence() -> Vec<Single> {
     vec![
         Single([op::GET_SERIAL_NO, 0, 0, 0, 0, 0]),

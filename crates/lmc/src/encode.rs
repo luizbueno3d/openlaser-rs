@@ -26,7 +26,9 @@ pub struct MarkingList {
 }
 
 impl MarkingList {
-    fn push(&mut self, op: u16, p: [u16; 5]) { self.words.push([op, p[0], p[1], p[2], p[3], p[4]]); }
+    fn push(&mut self, op: u16, p: [u16; 5]) {
+        self.words.push([op, p[0], p[1], p[2], p[3], p[4]]);
+    }
     fn finish(mut self) -> Result<Vec<Packet>, Error> {
         self.push(op::LIST_END_OF_LIST, [0; 5]);
         packetize(&self.words)
@@ -41,7 +43,9 @@ pub struct LightingList {
 }
 
 impl LightingList {
-    fn push(&mut self, op: u16, p: [u16; 5]) { self.words.push([op, p[0], p[1], p[2], p[3], p[4]]); }
+    fn push(&mut self, op: u16, p: [u16; 5]) {
+        self.words.push([op, p[0], p[1], p[2], p[3], p[4]]);
+    }
     fn finish(mut self) -> Result<Vec<Packet>, Error> {
         self.push(op::LIST_END_OF_LIST, [0; 5]);
         packetize(&self.words)
@@ -66,9 +70,15 @@ impl LmcJob {
     pub fn bytes_hash(&self) -> Fingerprint {
         let mut hash = Hasher::new();
         for list in &self.lists {
-            for cmd in &self.prelude { hash.update(&cmd.bytes()); }
-            for packet in &list.packets { hash.update(packet.bytes()); }
-            for cmd in &self.postlude { hash.update(&cmd.bytes()); }
+            for cmd in &self.prelude {
+                hash.update(&cmd.bytes());
+            }
+            for packet in &list.packets {
+                hash.update(packet.bytes());
+            }
+            for cmd in &self.postlude {
+                hash.update(&cmd.bytes());
+            }
         }
         hash.update(&self.repeats.to_le_bytes());
         Fingerprint(*hash.finalize().as_bytes())
@@ -97,7 +107,9 @@ pub struct LmcFrameJob {
 }
 
 pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
-    if emit.sections().is_empty() { return Err(Error::Empty); }
+    if emit.sections().is_empty() {
+        return Err(Error::Empty);
+    }
     let fields = m.field_f();
     let mut lists = Vec::with_capacity(emit.sections().len());
     for section in emit.sections() {
@@ -119,7 +131,9 @@ pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
         let mut last = (CENTER, CENTER);
         let mut wrote_path = false;
         for path in &section.paths {
-            if path.0.len() < 2 { continue; }
+            if path.0.len() < 2 {
+                continue;
+            }
             let start = point(path.0.first(), fields)?;
             let delay = if wrote_path { q.timings.jump_delay_short } else { q.timings.jump_delay_long };
             list.push(op::LIST_JUMP_DELAY, delay_params(delay));
@@ -135,7 +149,9 @@ pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
             }
             wrote_path = true;
         }
-        if !wrote_path { return Err(Error::Empty); }
+        if !wrote_path {
+            return Err(Error::Empty);
+        }
         let packets = list.finish()?;
         let each = divide_duration(section.estimate, packets.len());
         let packet_est = vec![each; packets.len()];
@@ -151,11 +167,7 @@ pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
         ],
         lists,
         repeats: emit.repeats(),
-        postlude: vec![
-            Single([op::FIBER_SET_MO, 0, 0, 0, 0, 0]),
-            Single([op::WRITE_PORT, 0, 0, 0, 0, 0]),
-            Single([op::GET_MARK_TIME, 3, 0, 0, 0, 0]),
-        ],
+        postlude: vec![Single([op::FIBER_SET_MO, 0, 0, 0, 0, 0]), Single([op::WRITE_PORT, 0, 0, 0, 0, 0]), Single([op::GET_MARK_TIME, 3, 0, 0, 0, 0])],
         fingerprint: *emit.fingerprint(),
         machine: emit.machine().clone(),
     })
@@ -163,9 +175,12 @@ pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
 
 pub fn encode_frame(frame: &FramePlan, m: &GalvoMachine) -> Result<LmcFrameJob, Error> {
     let paths: Vec<Vec<[f64; 2]>> = frame.paths().iter().filter(|p| p.0.len() >= 2).map(|p| p.0.clone()).collect();
-    if paths.is_empty() { return Err(Error::Empty); }
+    if paths.is_empty() {
+        return Err(Error::Empty);
+    }
     let points = paths.iter().try_fold(0usize, |n, p| n.checked_add(p.len()).ok_or(Error::TooManyCommands))?;
-    let length = paths.iter().flat_map(|p| p.windows(2)).filter_map(|w| Some((w.first()?, w.get(1)?))).map(|(a, b)| (b[0] - a[0]).hypot(b[1] - a[1])).sum::<f64>();
+    let length =
+        paths.iter().flat_map(|p| p.windows(2)).filter_map(|w| Some((w.first()?, w.get(1)?))).map(|(a, b)| (b[0] - a[0]).hypot(b[1] - a[1])).sum::<f64>();
     let pass_est = Duration::from_secs_f64(length / m.light_speed.get());
     let cap_by_points = u32::try_from(20_000usize / points.max(1)).map_err(|_| Error::TooManyCommands)?.clamp(1, 500);
     let desired = if pass_est.is_zero() { cap_by_points } else { ceil_u32(2.0 / pass_est.as_secs_f64())?.clamp(1, 500) };
@@ -206,7 +221,9 @@ fn lighting_packets(paths: &[Vec<[f64; 2]>], passes: u32, m: &GalvoMachine) -> R
             list.push(op::LIST_JUMP_DELAY, delay_params(if first { long } else { short }));
             list.push(op::LIST_JUMP_TO, motion(start, last));
             last = start;
-            if first { list.push(op::LIST_DELAY_TIME, [m.first_jump.settle_10us, 0, 0, 0, 0]); }
+            if first {
+                list.push(op::LIST_DELAY_TIME, [m.first_jump.settle_10us, 0, 0, 0, 0]);
+            }
             list.push(op::LIST_WRITE_PORT, [red, 0, 0, 0, 0]);
             list.push(op::LIST_JUMP_SPEED, [light_speed, 0, 0, 0, 0]);
             for p in path.iter().skip(1) {
@@ -232,14 +249,15 @@ fn encode_point(p: [f64; 2], fields: [f64; 2]) -> Result<(u16, u16), Error> {
 }
 
 fn encode_light_point(p: [f64; 2], fields: [f64; 2], m: &GalvoMachine) -> Result<(u16, u16), Error> {
-    encode_point([
-        p[0] * m.red_dot.scale[0] + m.red_dot.offset_mm[0],
-        p[1] * m.red_dot.scale[1] + m.red_dot.offset_mm[1],
-    ], fields)
+    encode_point([p[0] * m.red_dot.scale[0] + m.red_dot.offset_mm[0], p[1] * m.red_dot.scale[1] + m.red_dot.offset_mm[1]], fields)
 }
 
-fn motion(to: (u16, u16), last: (u16, u16)) -> [u16; 5] { [to.0, to.1, 0, distance_word(last, to), 0] }
-fn delay_params(d: (u16, u16)) -> [u16; 5] { [d.0, d.1, 0, 0, 0] }
+fn motion(to: (u16, u16), last: (u16, u16)) -> [u16; 5] {
+    [to.0, to.1, 0, distance_word(last, to), 0]
+}
+fn delay_params(d: (u16, u16)) -> [u16; 5] {
+    [d.0, d.1, 0, 0, 0]
+}
 
 fn bit(index: u8) -> Result<u16, Error> {
     1u16.checked_shl(u32::from(index)).ok_or(Error::InvalidPort(index))
@@ -250,7 +268,9 @@ fn divide_duration(d: Duration, count: usize) -> Duration {
 }
 
 fn ceil_u32(v: f64) -> Result<u32, Error> {
-    if !v.is_finite() || v < 0.0 || v > f64::from(u32::MAX) { return Err(Error::TooManyCommands); }
+    if !v.is_finite() || v < 0.0 || v > f64::from(u32::MAX) {
+        return Err(Error::TooManyCommands);
+    }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     Ok(v.ceil() as u32)
 }

@@ -65,34 +65,35 @@ pub fn packet(sha256: &str) -> Result<Vec<u8>, String> {
 
 fn parse_events(value: Option<&Value>, path: &std::path::Path) -> Result<Vec<Event>, String> {
     let values = value.and_then(Value::as_array).ok_or_else(|| format!("{}: missing events", path.display()))?;
-    values.iter().map(|value| {
-        let obj = value.as_object().ok_or_else(|| format!("{}: event is not an object", path.display()))?;
-        let kind = obj.get("kind").and_then(Value::as_str).ok_or_else(|| format!("{}: event has no kind", path.display()))?;
-        match kind {
-            "open" => Ok(Event::Open),
-            "close" => Ok(Event::Close),
-            "single" => Ok(Event::Single {
-                op: required_string(obj, "op", path)?,
-                hex: required_string(obj, "hex", path)?,
-            }),
-            "read" => Ok(Event::Read { status: required_u16(obj, "status", path)? }),
-            "list" => Ok(Event::List {
-                sha256: required_string(obj, "sha256", path)?,
-                n_cmds: required_u16(obj, "n_cmds", path)?,
-            }),
-            _ => Err(format!("{}: unknown event kind {kind}", path.display())),
-        }
-    }).collect()
+    values
+        .iter()
+        .map(|value| {
+            let obj = value.as_object().ok_or_else(|| format!("{}: event is not an object", path.display()))?;
+            let kind = obj.get("kind").and_then(Value::as_str).ok_or_else(|| format!("{}: event has no kind", path.display()))?;
+            match kind {
+                "open" => Ok(Event::Open),
+                "close" => Ok(Event::Close),
+                "single" => Ok(Event::Single { op: required_string(obj, "op", path)?, hex: required_string(obj, "hex", path)? }),
+                "read" => Ok(Event::Read { status: required_u16(obj, "status", path)? }),
+                "list" => Ok(Event::List { sha256: required_string(obj, "sha256", path)?, n_cmds: required_u16(obj, "n_cmds", path)? }),
+                _ => Err(format!("{}: unknown event kind {kind}", path.display())),
+            }
+        })
+        .collect()
 }
 
 fn parse_segments(value: Option<&Value>, path: &std::path::Path) -> Result<BTreeMap<String, [usize; 2]>, String> {
     let Some(obj) = value.and_then(Value::as_object) else { return Ok(BTreeMap::new()) };
-    obj.iter().map(|(name, value)| {
-        let pair = value.as_array().filter(|p| p.len() == 2).ok_or_else(|| format!("{}: bad segment {name}", path.display()))?;
-        let start = pair.first().and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()).ok_or_else(|| format!("{}: bad segment start", path.display()))?;
-        let end = pair.get(1).and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()).ok_or_else(|| format!("{}: bad segment end", path.display()))?;
-        Ok((name.clone(), [start, end]))
-    }).collect()
+    obj.iter()
+        .map(|(name, value)| {
+            let pair = value.as_array().filter(|p| p.len() == 2).ok_or_else(|| format!("{}: bad segment {name}", path.display()))?;
+            let start =
+                pair.first().and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()).ok_or_else(|| format!("{}: bad segment start", path.display()))?;
+            let end =
+                pair.get(1).and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()).ok_or_else(|| format!("{}: bad segment end", path.display()))?;
+            Ok((name.clone(), [start, end]))
+        })
+        .collect()
 }
 
 fn required_string(obj: &serde_json::Map<String, Value>, key: &str, path: &std::path::Path) -> Result<String, String> {
