@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="20mm" height="20mm" viewBox="0 0 20 20">
+  <!-- A 10 mm square, 5 mm in from each edge of a 20 mm page; physical units (mm). Black stroke = layer C00. -->
+  <rect x="5" y="5" width="10" height="10" fill="none" stroke="#000000" stroke-width="0.1"/>
+</svg>

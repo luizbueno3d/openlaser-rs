@@ -1,0 +1,72 @@
+{
+  "layers": [
+    {
+      "layer_id": "vector-engrave",
+      "name": "Vector Engrave",
+      "operation": "vector_engrave",
+      "power_percent": 100.0,
+      "frequency_khz": 30.0,
+      "pulse_width_ns": 200.0,
+      "speed_mm_s": 1000.0,
+      "passes": 1,
+      "visible": true,
+      "output": true,
+      "color": "#26d0a8",
+      "air_assist": false,
+      "raster_pitch_mm": 0.1,
+      "raster_angle_deg": 0.0,
+      "raster_angle_step_deg": 90.0
+    },
+    {
+      "layer_id": "vector-cut",
+      "name": "Vector Cut / Deep Mark",
+      "operation": "vector_cut",
+      "power_percent": 100.0,
+      "frequency_khz": 30.0,
+      "pulse_width_ns": 200.0,
+      "speed_mm_s": 300.0,
+      "passes": 1,
+      "visible": true,
+      "output": true,
+      "color": "#e2b84b",
+      "air_assist": false,
+      "raster_pitch_mm": 0.1,
+      "raster_angle_deg": 0.0,
+      "raster_angle_step_deg": 90.0
+    },
+    {
+      "layer_id": "raster",
+      "name": "Raster",
+      "operation": "raster_engrave",
+      "power_percent": 100.0,
+      "frequency_khz": 45.0,
+      "pulse_width_ns": 200.0,
+      "speed_mm_s": 300.0,
+      "passes": 1,
+      "visible": true,
+      "output": true,
+      "color": "#7aa2ff",
+      "air_assist": false,
+      "raster_pitch_mm": 0.1,
+      "raster_angle_deg": 90.0,
+      "raster_angle_step_deg": 0.0
+    },
+    {
+      "layer_id": "frame-only",
+      "name": "Frame Only",
+      "operation": "frame_only",
+      "power_percent": 0.0,
+      "frequency_khz": 30.0,
+      "pulse_width_ns": 200.0,
+      "speed_mm_s": 1000.0,
+      "passes": 1,
+      "visible": true,
+      "output": true,
+      "color": "#93a09c",
+      "air_assist": false,
+      "raster_pitch_mm": 0.1,
+      "raster_angle_deg": 0.0,
+      "raster_angle_step_deg": 90.0
+    }
+  ]
+}

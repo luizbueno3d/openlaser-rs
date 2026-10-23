@@ -1,0 +1,11 @@
+# LF everywhere, also in Windows checkouts (SPEC §2.6): rustfmt, goldens and G-code exports are compared as bytes.
+* text=auto eol=lf
+
+# Golden fixtures and hand-made inputs are compared byte for byte: git must never rewrite them.
+tests/golden/** -text
+tests/fixtures/** -text
+
+*.png binary
+*.jpg binary
+*.olp binary
+*.zip binary
