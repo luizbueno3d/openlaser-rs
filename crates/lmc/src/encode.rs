@@ -5,6 +5,32 @@
 //! first jump, settle, leading lighting speed and session lifetime are the
 //! reviewed divergences in SPEC §5.6.
 
+//! Protocol source: meerk40t/galvoplotter@fc35136 galvo/controller.py (0.2.0), MIT.
+
+/*
+MIT License
+
+Copyright (c) 2023 MeerK40t
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
 use std::time::Duration;
 
 use blake3::Hasher;
@@ -130,20 +156,29 @@ pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
 
         let mut last = (CENTER, CENTER);
         let mut wrote_path = false;
+        let mut jump_delay = None;
         for path in &section.paths {
             if path.0.len() < 2 {
                 continue;
             }
             let start = point(path.0.first(), fields)?;
             let delay = if wrote_path { q.timings.jump_delay_short } else { q.timings.jump_delay_long };
-            list.push(op::LIST_JUMP_DELAY, delay_params(delay));
-            list.push(op::LIST_JUMP_TO, motion(start, last));
-            last = start;
+            if !wrote_path || start != last {
+                if jump_delay != Some(delay) {
+                    list.push(op::LIST_JUMP_DELAY, delay_params(delay));
+                    jump_delay = Some(delay);
+                }
+                list.push(op::LIST_JUMP_TO, motion(start, last));
+                last = start;
+            }
             if !wrote_path {
                 list.push(op::LIST_DELAY_TIME, [q.timings.first_jump_settle_10us, 0, 0, 0, 0]);
             }
             for p in path.0.iter().skip(1) {
                 let to = encode_point(*p, fields)?;
+                if to == last {
+                    continue;
+                }
                 list.push(op::LIST_MARK_TO, motion(to, last));
                 last = to;
             }
@@ -179,11 +214,21 @@ pub fn encode_frame(frame: &FramePlan, m: &GalvoMachine) -> Result<LmcFrameJob, 
         return Err(Error::Empty);
     }
     let points = paths.iter().try_fold(0usize, |n, p| n.checked_add(p.len()).ok_or(Error::TooManyCommands))?;
-    let length =
-        paths.iter().flat_map(|p| p.windows(2)).filter_map(|w| Some((w.first()?, w.get(1)?))).map(|(a, b)| (b[0] - a[0]).hypot(b[1] - a[1])).sum::<f64>();
-    let pass_est = Duration::from_secs_f64(length / m.light_speed.get());
+    // OM Frame Once includes dark travel between paths and the return to the start.
+    let mut length = 0.0;
+    let mut previous: Option<[f64; 2]> = None;
+    for &p in paths.iter().flatten() {
+        if let Some(a) = previous {
+            length += (p[0] - a[0]).hypot(p[1] - a[1]);
+        }
+        previous = Some(p);
+    }
+    if let (Some(a), Some(b)) = (previous, paths.first().and_then(|p| p.first())) {
+        length += (b[0] - a[0]).hypot(b[1] - a[1]);
+    }
+    let pass_est = Duration::try_from_secs_f64(length / m.light_speed.get()).map_err(|_| Error::Packet("invalid frame duration"))?;
     let cap_by_points = u32::try_from(20_000usize / points.max(1)).map_err(|_| Error::TooManyCommands)?.clamp(1, 500);
-    let desired = if pass_est.is_zero() { cap_by_points } else { ceil_u32(2.0 / pass_est.as_secs_f64())?.clamp(1, 500) };
+    let desired = if pass_est.is_zero() { cap_by_points } else { ceil_u32(2.0 / (length / m.light_speed.get()).max(0.001))?.clamp(1, 500) };
     let once_passes = desired.min(cap_by_points).max(1);
     let pass = lighting_packets(&paths, 1, m)?;
     let once = lighting_packets(&paths, once_passes, m)?;
@@ -211,30 +256,40 @@ fn lighting_packets(paths: &[Vec<[f64; 2]>], passes: u32, m: &GalvoMachine) -> R
     list.push(op::LIST_WRITE_PORT, [red, 0, 0, 0, 0]);
     list.push(op::LIST_WRITE_PORT, [0, 0, 0, 0, 0]);
     list.push(op::LIST_JUMP_SPEED, [light_speed, 0, 0, 0, 0]);
-    let mut last = (CENTER, CENTER);
-    let mut first = true;
+    let start = encode_light_point(paths.first().and_then(|p| p.first()).copied().ok_or(Error::Empty)?, fields, m)?;
+    list.push(op::LIST_JUMP_DELAY, delay_params(long));
+    list.push(op::LIST_JUMP_TO, motion(start, (CENTER, CENTER)));
+    list.push(op::LIST_DELAY_TIME, [m.first_jump.settle_10us, 0, 0, 0, 0]);
+    let mut last = start;
+    let mut port = 0;
+    let mut delay = long;
+    let mut lit_speed = false;
+    // Retain GP's first light-move speed command; D3 adds only the leading dark-jump speed.
     for _ in 0..passes {
         for path in paths {
-            let Some(first_point) = path.first() else { continue };
-            let start = encode_light_point(*first_point, fields, m)?;
-            list.push(op::LIST_WRITE_PORT, [0, 0, 0, 0, 0]);
-            list.push(op::LIST_JUMP_DELAY, delay_params(if first { long } else { short }));
-            list.push(op::LIST_JUMP_TO, motion(start, last));
-            last = start;
-            if first {
-                list.push(op::LIST_DELAY_TIME, [m.first_jump.settle_10us, 0, 0, 0, 0]);
-            }
-            list.push(op::LIST_WRITE_PORT, [red, 0, 0, 0, 0]);
-            list.push(op::LIST_JUMP_SPEED, [light_speed, 0, 0, 0, 0]);
-            for p in path.iter().skip(1) {
-                let to = encode_light_point(*p, fields, m)?;
+            for (i, &p) in path.iter().enumerate() {
+                let to = encode_light_point(p, fields, m)?;
+                if to == last {
+                    continue;
+                }
+                let wanted = if i == 0 { 0 } else { red };
+                if port != wanted {
+                    list.push(op::LIST_WRITE_PORT, [wanted, 0, 0, 0, 0]);
+                    port = wanted;
+                }
+                if wanted == red && !lit_speed {
+                    list.push(op::LIST_JUMP_SPEED, [light_speed, 0, 0, 0, 0]);
+                    lit_speed = true;
+                }
+                if delay != short {
+                    list.push(op::LIST_JUMP_DELAY, delay_params(short));
+                    delay = short;
+                }
                 list.push(op::LIST_JUMP_TO, motion(to, last));
                 last = to;
             }
-            first = false;
         }
     }
-    list.push(op::LIST_WRITE_PORT, [0, 0, 0, 0, 0]);
     list.finish()
 }
 

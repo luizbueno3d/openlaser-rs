@@ -104,3 +104,19 @@ fn required_u16(obj: &serde_json::Map<String, Value>, key: &str, path: &std::pat
     let value = obj.get(key).and_then(Value::as_u64).ok_or_else(|| format!("{}: missing integer {key}", path.display()))?;
     u16::try_from(value).map_err(|_| format!("{}: {key} does not fit u16", path.display()))
 }
+
+/// Load the scenario's inline or referenced millimetre paths, without running the oracle.
+pub fn polylines(scenario: &Scenario) -> Result<Vec<Vec<[f64; 2]>>, String> {
+    let value = if let Some(file) = scenario.inputs.get("polylines_file").and_then(Value::as_str) {
+        let relative = std::path::Path::new(file);
+        if relative.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            return Err("invalid scenario input path".into());
+        }
+        let bytes = std::fs::read(golden_dir().join(relative)).map_err(|e| e.to_string())?;
+        serde_json::from_slice::<Value>(&bytes).map_err(|e| e.to_string())?
+    } else {
+        scenario.inputs.get("polylines").cloned().ok_or("missing polylines")?
+    };
+    let value = value.get("polylines").unwrap_or(&value);
+    serde_json::from_value(value.clone()).map_err(|e| e.to_string())
+}

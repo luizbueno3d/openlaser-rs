@@ -66,7 +66,7 @@ fn setup_path(path: Polyline) -> (openlaser_machine::GalvoMachine, EmitPlan, Job
 }
 
 #[test]
-fn t1_dot_test_has_explicit_jump_and_settle() {
+fn box10_has_explicit_jump_and_settle() {
     let (m, emit, _) = setup();
     let job = encode_job(&emit, &m).unwrap_or_else(|e| panic!("{e}"));
     let decoded: Vec<_> = job.lists.iter().flat_map(|l| l.packets.iter().flat_map(decode_packet)).collect();
@@ -116,13 +116,26 @@ fn bytes_hash_changes_with_any_byte() {
     let clone = encode_job(&emit, &m).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(job, clone);
     let hash = job.bytes_hash();
-    let mut changed = job.clone();
-    let mut words = changed.lists[0].packets[0].words();
-    if let Some(w) = words.get_mut(1) {
-        w[1] = w[1].saturating_add(1);
+    for i in 0..3072 {
+        let mut changed = job.clone();
+        let mut bytes = *changed.lists[0].packets[0].bytes();
+        bytes[i] ^= 1;
+        changed.lists[0].packets[0] = Packet::try_from_bytes(&bytes).unwrap_or_else(|e| panic!("{e}"));
+        assert_ne!(hash, changed.bytes_hash(), "packet byte {i}");
     }
-    let words = words.get(..18).unwrap_or(&[]);
-    changed.lists[0].packets[0] = Packet::from_words(words).unwrap_or_else(|e| panic!("{e}"));
+    for prelude in [true, false] {
+        let count = if prelude { job.prelude.len() } else { job.postlude.len() };
+        for i in 0..count {
+            for byte in 0..12 {
+                let mut changed = job.clone();
+                let singles = if prelude { &mut changed.prelude } else { &mut changed.postlude };
+                singles[i].0[byte / 2] ^= 1u16 << ((byte % 2) * 8);
+                assert_ne!(hash, changed.bytes_hash(), "single byte {i}:{byte}");
+            }
+        }
+    }
+    let mut changed = job.clone();
+    changed.repeats += 1;
     assert_ne!(hash, changed.bytes_hash());
 }
 
@@ -167,5 +180,23 @@ proptest! {
     fn prop_encode_is_session_independent(_seed in any::<u8>()) {
         let (m,emit,_)=setup();
         prop_assert_eq!(encode_job(&emit,&m).unwrap_or_else(|e|panic!("{e}")),encode_job(&emit,&m).unwrap_or_else(|e|panic!("{e}")));
+    }
+}
+
+#[path = "acceptance/t1.rs"]
+mod t1;
+
+#[test]
+fn frame_nonfinite_geometry_returns_error_without_panicking() {
+    let (m, _, _) = setup();
+    for value in [f64::NAN, f64::INFINITY, f64::MAX] {
+        let frame = openlaser_safety::testing::frame_plan_unchecked(
+            vec![Polyline(vec![[value, 0.0], [0.0, 0.0]])],
+            Fingerprint([1; 32]),
+            MachineId("sim".into()),
+            FrameStyle::Contour,
+            FrameSource::Job,
+        );
+        assert!(encode_frame(&frame, &m).is_err());
     }
 }
