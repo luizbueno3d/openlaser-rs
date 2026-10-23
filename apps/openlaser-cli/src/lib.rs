@@ -314,8 +314,10 @@ mod tests {
 
     #[test]
     fn cli_run_is_headless_origin_and_refuses_human_only_commands() {
-        let (code, _, err) = invoke(&["run", "--new", "{}", "--cmd", "laser.start"]);
-        assert_eq!(code, 1);
-        assert!(err.starts_with("human-only:"));
+        for command in ["laser.start", "device.settings.set"] {
+            let (code, _, err) = invoke(&["run", "--new", "{}", "--cmd", command]);
+            assert_eq!(code, 1);
+            assert!(err.starts_with("human-only:"));
+        }
     }
 }

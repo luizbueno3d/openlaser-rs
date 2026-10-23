@@ -276,4 +276,20 @@ mod tests {
         let output = backend.call("job_plan", serde_json::json!({}), &ClientInfo { name: "test".into(), version: "0".into() });
         assert!(matches!(output, ToolOutput::Json(value) if value.get("ok").and_then(serde_json::Value::as_bool) == Some(false)));
     }
+
+    #[test]
+    #[ignore = "needs I1"]
+    fn job_simulate_business_card() {
+        let mut backend = Headless::new(None, None).unwrap();
+        let output = backend.call("job_simulate", serde_json::json!({"index":0}), &ClientInfo { name: "test".into(), version: "0".into() });
+        assert!(matches!(output, ToolOutput::Png { .. }));
+    }
+
+    #[test]
+    #[ignore = "needs I2"]
+    fn render_preview_is_document() {
+        let mut backend = Headless::new(None, None).unwrap();
+        let output = backend.call("render_preview", serde_json::json!({}), &ClientInfo { name: "test".into(), version: "0".into() });
+        assert!(matches!(output, ToolOutput::Png { .. }));
+    }
 }
