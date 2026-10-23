@@ -7,6 +7,12 @@ use openlaser_types::{Bounds, PassRow, SectionMode};
 
 /// Agent notes are plain text, at most this many characters (SPEC §4.4).
 pub const NOTE_MAX_CHARS: usize = 280;
+/// The longest layer name shown beside its decoded numbers.
+pub const NAME_MAX_CHARS: usize = 48;
+/// The longest notice, checklist item or machine id shown.
+pub const MESSAGE_MAX_CHARS: usize = 300;
+/// The longest client name an approval card shows.
+pub const CLIENT_MAX_CHARS: usize = 64;
 
 pub fn mode(m: SectionMode) -> &'static str {
     match m {
@@ -16,9 +22,11 @@ pub fn mode(m: SectionMode) -> &'static str {
     }
 }
 
+/// The layer key, then its (plain, bounded) name when it has one of its own.
 pub fn layer(row: &PassRow) -> String {
     let key = row.layer.to_string();
-    if row.layer_name.is_empty() || row.layer_name == key { key } else { format!("{key} · {}", row.layer_name) }
+    let name = plain(&row.layer_name, NAME_MAX_CHARS);
+    if name.is_empty() || name == key { key } else { format!("{key} · {name}") }
 }
 
 pub fn pass(row: &PassRow) -> String {
@@ -57,13 +65,47 @@ pub fn seconds(d: Duration) -> String {
 
 /// Plain text, control characters dropped, at most [`NOTE_MAX_CHARS`] characters.
 pub fn note(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control() && !invisible_format(*c)).take(NOTE_MAX_CHARS).collect()
+    plain(text, NOTE_MAX_CHARS)
 }
 
-/// Bidirectional overrides, isolates and zero-width characters: they change how the rest of a line reads (or hide
-/// text) without being visible themselves, so an agent's note never carries them.
+/// Text that came from a document, an agent or a file, as one line of plain text: control characters (newlines
+/// included) and [`invisible_format`] characters dropped, at most `max` characters (the last one `…` when cut).
+pub fn plain(text: &str, max: usize) -> String {
+    let kept: Vec<char> = text.chars().filter(|c| !c.is_control() && !invisible_format(*c)).collect();
+    if kept.len() <= max {
+        return kept.into_iter().collect();
+    }
+    let mut out: String = kept.into_iter().take(max.saturating_sub(1)).collect();
+    if max > 0 {
+        out.push('…');
+    }
+    out
+}
+
+/// Bidirectional overrides and isolates, zero-width and other invisible characters, the Unicode tag block: they
+/// change how the rest of a line reads (or hide text) without being visible themselves, so shown text never carries
+/// them.
 fn invisible_format(c: char) -> bool {
-    matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{034F}'
+            | '\u{061C}'
+            | '\u{115F}'
+            | '\u{1160}'
+            | '\u{17B4}'
+            | '\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{E0000}'..='\u{E007F}'
+    )
 }
 
 /// The rows above the S23 first-emission cap, as "C00 at 50.00 % is above the 10 % cap".
@@ -135,5 +177,16 @@ mod tests {
         assert_eq!(note("power \u{202E}%05\u{202C} ok\u{200B}\u{2066}x\u{2069}\u{FEFF}"), "power %05 okx");
         assert_eq!(note("line\u{2028}para\u{2029}end"), "lineparaend");
         assert_eq!(note("Visitenkarte, Ébauche, 名刺 ok"), "Visitenkarte, Ébauche, 名刺 ok");
+    }
+
+    #[test]
+    fn layer_names_are_plain_and_bounded() {
+        let mut r = row(80.0);
+        r.layer_name = "C00 5.00 %\u{1b}[8m\nfake\u{202E}\u{200B}".into();
+        assert_eq!(layer(&r), "C00 · C00 5.00 %[8mfake");
+        r.layer_name = "n".repeat(100);
+        assert_eq!(layer(&r).chars().count(), "C00 · ".chars().count() + NAME_MAX_CHARS);
+        r.layer_name = "\u{200B}".into();
+        assert_eq!(layer(&r), "C00", "a name that is all invisible is no name");
     }
 }

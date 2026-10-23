@@ -41,7 +41,7 @@ impl Human {
         ui.push_id(("openlaser-human::approval", card.id), |ui| {
             ui.group(|ui| {
                 ui.strong(card.title);
-                ui.label(format!("From {} · job {}", card.client, card.fingerprint.short()));
+                ui.label(format!("From {} · job {}", format::plain(card.client, format::CLIENT_MAX_CHARS), card.fingerprint.short()));
                 if let Some(s) = card.summary {
                     for row in &s.rows {
                         ui.label(format!(

@@ -289,6 +289,55 @@ fn accesskit_click_on_arm_confirm_mints_nothing() {
 }
 
 #[test]
+fn accesskit_ticks_are_undone_in_their_own_pass() {
+    // AccessKit Click toggles egui checkboxes in the pass that carries it. That pass is tainted (an AccessKit action
+    // request), but its taint is not recorded in the 3-pass/1 s window, so whatever it ticked must be undone after the
+    // dialog was drawn: otherwise a person who only types ARM and clicks Confirm would arm items nobody ticked.
+    let (mut h, clock) = harness();
+    h.get_by_role(Role::TextInput).click();
+    h.run();
+    h.get_by_role(Role::TextInput).type_text("ARM");
+    h.run();
+    for item in CHECKLIST {
+        h.get_by_label(item).click_accesskit();
+    }
+    h.step();
+    assert_eq!(ticks(&h), vec![false, false], "nothing ticked by AccessKit survives its pass");
+    h.run();
+    assert_eq!(ticks(&h), vec![false, false]);
+    assert!(shows(&h, AUTOMATION_IGNORED));
+    // The person types ARM again and clicks Confirm, never ticking anything: nothing arms.
+    h.get_by_role(Role::TextInput).click();
+    h.run();
+    h.get_by_role(Role::TextInput).type_text("ARM");
+    h.run();
+    assert_eq!(field_value(&h), "ARM");
+    clock.advance(Duration::from_secs(1));
+    click_confirm(&mut h);
+    assert_eq!(mints(), 0);
+    assert!(h.state().armed.is_empty());
+}
+
+#[test]
+fn arm_dialog_shows_document_text_as_plain_text() {
+    // Layer names, notices, checklist items and the machine id are shown without control, bidi or zero-width
+    // characters (egui does not interpret ANSI, but newlines and bidi overrides still mislead).
+    let mut m = model(7, None);
+    if let Some(r) = m.summary.rows.first_mut() {
+        r.layer_name = "C00 5.00 %\u{1b}[8m\nfake\u{202E}".into();
+    }
+    if let Some(n) = m.summary.notices.first_mut() {
+        n.message = "an open shape\non C02\u{200B} is not hatched\u{2066}".into();
+    }
+    m.checklist = vec!["Key switch\nand E-stop\u{202E} within reach".into(), "Laser safety glasses on".into()];
+    let (mut h, _clock) = harness_with(Some(recording_mint), m);
+    h.run();
+    for shown in ["C00 · C00 5.00 %[8mfake", "Notice 1: an open shapeon C02 is not hatched", "Key switchand E-stop within reach"] {
+        assert!(shows(&h, shown), "the dialog shows {shown:?}");
+    }
+}
+
+#[test]
 fn kittest_confirm_shows_decoded_layer_params() {
     // B4: the prototype's confirmation showed the Frame/requested values. The layer here was requested at 30 %,
     // 30 kHz, 1000 mm/s and then changed to 80 % / 60 kHz after the plan; the dialog renders only what the bytes
@@ -505,7 +554,7 @@ fn approval_card_needs_a_human_click() {
             let card = ApprovalCard {
                 id: 1,
                 title: "Job from an agent",
-                client: "claude-code",
+                client: "claude-code\u{202E}\n\u{1b}[8m",
                 fingerprint: &rig.summary.fingerprint,
                 summary: Some(&rig.summary),
                 note: "Business card, C00 vector engrave.\u{7}",
@@ -520,6 +569,8 @@ fn approval_card_needs_a_human_click() {
         rig,
     );
     assert!(h.query_by_label("Note from agent").is_some());
+    let from = format!("From claude-code[8m · job {}", Fingerprint([5; 32]).short());
+    assert!(h.query_by_label(&from).is_some(), "the client is shown as plain text");
     assert!(h.query_by_label("Business card, C00 vector engrave.").is_some(), "control characters are dropped");
     assert!(h.state().human.surface_open());
     // Synthetic click: dropped while the card is open, and tainted anyway.

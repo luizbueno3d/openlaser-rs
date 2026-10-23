@@ -140,7 +140,7 @@ impl Human {
             }
             for (i, item) in model.checklist.iter().enumerate() {
                 if let Some(t) = state.ticked.get_mut(i) {
-                    ui.checkbox(t, item.as_str());
+                    ui.checkbox(t, format::plain(item, format::MESSAGE_MAX_CHARS));
                 }
             }
             ui.add(egui::TextEdit::singleline(&mut state.typed).hint_text(FIELD_HINT).desired_width(120.0));
@@ -209,7 +209,7 @@ fn refusal_text(r: &Refusal) -> String {
 
 fn draw_summary(ui: &mut egui::Ui, model: &ArmModel) {
     let s = &model.summary;
-    ui.label(format!("Machine: {}", s.machine.0));
+    ui.label(format!("Machine: {}", format::plain(&s.machine.0, format::MESSAGE_MAX_CHARS)));
     ui.label(format!("Job {}", s.fingerprint.short()));
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(THUMB_SIDE, THUMB_SIDE), egui::Sense::hover());
@@ -239,7 +239,7 @@ fn draw_summary(ui: &mut egui::Ui, model: &ArmModel) {
     });
     ui.label(format!("Repeats: {}", s.repeats));
     for n in &s.notices {
-        ui.label(format!("Notice {}: {}", n.n, n.message));
+        ui.label(format!("Notice {}: {}", n.n, format::plain(&n.message, format::MESSAGE_MAX_CHARS)));
     }
     ui.label(format!("Total time: {}", format::seconds(s.estimate)));
     ui.label(format!("Emission still possible after a host crash: up to {}", format::seconds(s.crash_bound)));
