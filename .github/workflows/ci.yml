@@ -30,7 +30,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
+        # Private repo: macOS minutes bill at 10x and macOS is gated on Luiz's Mac, so push/PR runs Windows and
+        # Linux; a manual run (workflow_dispatch) adds macOS.
+        os: ${{ github.event_name == 'workflow_dispatch' && fromJSON('["macos-latest","windows-latest","ubuntu-latest"]') || fromJSON('["windows-latest","ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4
 
