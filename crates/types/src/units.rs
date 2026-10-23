@@ -168,3 +168,15 @@ impl From<Hz> for u32 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Rgb(pub [u8; 3]);
+
+#[cfg(test)]
+mod tests {
+    use super::{MmPerS, Percent};
+
+    #[test]
+    fn unit_serde_rejects_out_of_range_values() {
+        assert!(serde_json::from_str::<MmPerS>("0").is_err());
+        assert!(serde_json::from_str::<Percent>("100.01").is_err());
+        assert!(serde_json::from_str::<MmPerS>("1e999").is_err());
+    }
+}

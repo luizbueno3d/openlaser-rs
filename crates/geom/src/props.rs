@@ -60,7 +60,7 @@ proptest! {
         let mut path = BezPath::new();
         path.move_to(p0);
         if quad { path.quad_to(p1, p3); } else { path.curve_to(p1, p2, p3); }
-        let out = flatten(&path, tol);
+        let out = flatten(&path, tol).unwrap();
         prop_assert_eq!(out.len(), 1);
         let poly = &out[0];
         prop_assert_eq!(poly.0.first().copied(), Some([p0.x, p0.y]));

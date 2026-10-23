@@ -38,7 +38,10 @@ pub enum Error {
 }
 
 /// zip: manifest.json {format, formatVersion, generator, project: ProjectM, paths: {pN: "M0 0L10 0…Z"}} +
-/// assets/<blake3>.gray8 (raw row-major grayscale pixels). ProjectM is a separate serde model converted
+/// assets/<blake3>.gray8 (raw row-major grayscale pixels). AssetId remains the hash of the original source bytes,
+/// which cannot be recomputed or verified after conversion because those bytes are not stored; load verifies the
+/// referenced gray8 payload against its asset filename instead. The 64 MiB archive cap applies to decoded
+/// grayscale bytes rather than the original encoded image. ProjectM is a separate serde model converted
 /// with exhaustive struct literals both ways, so a new doc field fails to compile until it is saved.
 pub fn save(project: &Project) -> Result<Vec<u8>, Error> {
     let mut paths = std::collections::BTreeMap::new();
@@ -86,9 +89,7 @@ pub fn load(bytes: &[u8]) -> Result<Project, Error> {
         }
         let size = usize::try_from(file.size()).map_err(|_| Error::LimitExceeded("zip entry is too large".to_owned()))?;
         total = total.checked_add(size).ok_or_else(|| Error::LimitExceeded("decompressed size overflow".to_owned()))?;
-        if total > MAX_DECOMPRESSED {
-            return Err(Error::LimitExceeded("decompressed project exceeds 64 MiB".to_owned()));
-        }
+        check_decompressed_size(total)?;
         if name == "manifest.json" {
             file.read_to_end(&mut manifest_bytes)?;
         } else if name.starts_with("assets/") {
@@ -127,6 +128,7 @@ pub fn load(bytes: &[u8]) -> Result<Project, Error> {
     if manifest.project.workspace.size_mm.iter().any(|v| !v.is_finite()) {
         return Err(Error::NonFinite { path: "project.workspace.sizeMm".to_owned() });
     }
+    validate_project(&manifest.project)?;
     manifest.project.into_project(&manifest.paths, &assets, 0)
 }
 
@@ -149,11 +151,69 @@ const MAX_ENTRIES: usize = 4096;
 const MAX_POINTS: usize = 1_000_000;
 const MAX_GROUP_DEPTH: usize = 32;
 
+fn check_decompressed_size(total: usize) -> Result<(), Error> {
+    if total > MAX_DECOMPRESSED { Err(Error::LimitExceeded("decompressed project exceeds 64 MiB".to_owned())) } else { Ok(()) }
+}
+
 fn bitmap_pixel_count(px: [u32; 2]) -> Result<usize, Error> {
     usize::try_from(px[0])
         .ok()
         .and_then(|width| usize::try_from(px[1]).ok().and_then(|height| width.checked_mul(height)))
         .ok_or_else(|| Error::LimitExceeded("bitmap pixel dimensions overflow".to_owned()))
+}
+
+fn validate_project(project: &ProjectM) -> Result<(), Error> {
+    let corrupt = |message: &str| Error::Corrupt(message.to_owned());
+    if project.layers.colors.len() != openlaser_doc::COLOR_LAYERS {
+        return Err(corrupt("project must have exactly 30 colour layers"));
+    }
+    for (position, layer) in project.layers.colors.iter().enumerate() {
+        if usize::from(layer.index) != position {
+            return Err(corrupt("colour layer index must equal its position"));
+        }
+        if !(1..=11).contains(&layer.ops.len()) {
+            return Err(corrupt("colour layer must have 1..=11 operations"));
+        }
+    }
+    if project.layers.tools[0].which != 1 || project.layers.tools[1].which != 2 {
+        return Err(corrupt("tool layers must be T1 and T2 in order"));
+    }
+    if !(1..=999).contains(&project.job.repeats) {
+        return Err(corrupt("job repeats must be in 1..=999"));
+    }
+    if project.workspace.size_mm.iter().any(|size| *size <= 0.0) {
+        return Err(corrupt("workspace dimensions must be positive"));
+    }
+    let mut order = std::collections::BTreeSet::new();
+    for key in &project.layers.order {
+        let valid = match key {
+            LayerKey::Color(index) => *index < 30,
+            LayerKey::Tool(which) => (1..=2).contains(which),
+        };
+        if !valid || !order.insert(*key) {
+            return Err(corrupt("layer order contains an invalid or duplicate entry"));
+        }
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut max_id = 0u64;
+    collect_shape_ids(&project.shapes, &mut ids, &mut max_id)?;
+    if project.next_id == 0 || project.next_id <= max_id {
+        return Err(corrupt("nextId must be greater than every shape id"));
+    }
+    Ok(())
+}
+
+fn collect_shape_ids(shapes: &[ShapeM], ids: &mut std::collections::BTreeSet<u64>, max_id: &mut u64) -> Result<(), Error> {
+    for shape in shapes {
+        if shape.id.0 == 0 || !ids.insert(shape.id.0) {
+            return Err(Error::Corrupt("shape ids must be unique and nonzero".to_owned()));
+        }
+        *max_id = (*max_id).max(shape.id.0);
+        if let GeomM::Group { shapes } = &shape.geom {
+            collect_shape_ids(shapes, ids, max_id)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -286,6 +346,9 @@ impl ShapeM {
             Geom::Polygon { sides, radius } => GeomM::Polygon { sides: *sides, radius: *radius },
             Geom::Bitmap(bitmap) => {
                 let expected = bitmap_pixel_count(bitmap.px)?;
+                if bitmap.size_mm.iter().any(|size| !size.is_finite()) {
+                    return Err(Error::NonFinite { path: format!("shape[{}].bitmap.sizeMm", shape.id.0) });
+                }
                 if expected != bitmap.gray.len() {
                     return Err(Error::Corrupt("bitmap pixel dimensions do not match grayscale bytes".to_owned()));
                 }
@@ -396,7 +459,15 @@ fn check_paths(paths: &std::collections::BTreeMap<String, String>) -> Result<(),
         .values()
         .try_fold(0usize, |count, path| {
             let commands = decode_path(path).ok()?;
-            let added = commands.iter().filter(|command| !matches!(command, PathCommand::Close)).count();
+            let added = commands
+                .iter()
+                .map(|command| match command {
+                    PathCommand::Move(_) | PathCommand::Line(_) => 1,
+                    PathCommand::Quad(_) => 2,
+                    PathCommand::Curve(_) => 3,
+                    PathCommand::Close => 0,
+                })
+                .sum::<usize>();
             count.checked_add(added)
         })
         .ok_or_else(|| Error::LimitExceeded("point count overflow".to_owned()))?;
@@ -527,10 +598,30 @@ mod tests {
             power_scale: Percent::new(100.0).unwrap(),
             priority: 0,
         }));
+        project.next_id = 8;
         project.job.frame_style = FrameStyle::Bounds;
         project.job.frame_source = FrameSource::Job;
         project.normalize();
         project
+    }
+
+    fn corrupt_manifest(mut edit: impl FnMut(&mut serde_json::Value)) -> Result<Project, Error> {
+        let bytes = save(&project())?;
+        let mut archive = ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|error| Error::Corrupt(error.to_string()))?;
+        let mut manifest: serde_json::Value = serde_json::from_reader(archive.by_name("manifest.json").map_err(|error| Error::Corrupt(error.to_string()))?)
+            .map_err(|error| Error::Corrupt(error.to_string()))?;
+        edit(&mut manifest);
+        let mut json = Vec::new();
+        serde_json::to_writer(&mut json, &manifest).map_err(|error| Error::Corrupt(error.to_string()))?;
+        let mut writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer.start_file("manifest.json", SimpleFileOptions::default()).map_err(|error| Error::Corrupt(error.to_string()))?;
+        writer.write_all(&json).map_err(Error::Io)?;
+        let bytes = writer.finish().map_err(|error| Error::Corrupt(error.to_string()))?.into_inner();
+        load(&bytes)
+    }
+
+    fn assert_corrupt(edit: impl FnMut(&mut serde_json::Value)) {
+        assert!(matches!(corrupt_manifest(edit), Err(Error::Corrupt(_))));
     }
 
     #[test]
@@ -570,11 +661,31 @@ mod tests {
 
     proptest::proptest! {
         #[test]
-        fn olp_roundtrip_equal_for_finite_transforms(x in -10_000.0f64..10_000.0, y in -10_000.0f64..10_000.0) {
+        fn olp_roundtrip_equal_for_random_projects(
+            specs in proptest::collection::vec(
+                ( -10_000.0f64..10_000.0, -10_000.0f64..10_000.0, 0u8..30,
+                  proptest::collection::vec((-1_000.0f64..1_000.0, -1_000.0f64..1_000.0), 2..12)),
+                0..12)
+        ) {
             let mut original = project();
-            let mut shape = (*original.shapes[0]).clone();
-            shape.xform = Affine::translate((x, y));
-            original.shapes[0] = Arc::new(shape);
+            original.shapes.clear();
+            original.next_id = 1;
+            for (x, y, layer, points) in specs {
+                let mut path = BezPath::new();
+                if let Some((first_x, first_y)) = points.first().copied() {
+                    path.move_to((first_x, first_y));
+                    for (px, py) in points.iter().skip(1) {
+                        path.line_to((*px, *py));
+                    }
+                }
+                let shape = Shape {
+                    id: original.alloc_id(), name: None, layer: LayerKey::Color(layer),
+                    xform: Affine::translate((x, y)), geom: Geom::Path(Arc::new(path)),
+                    locked: false, power_scale: Percent::new(100.0).unwrap(), priority: 0,
+                };
+                original.shapes.push(Arc::new(shape));
+            }
+            original.normalize();
             let bytes = save(&original).map_err(|error| proptest::test_runner::TestCaseError::fail(error.to_string()))?;
             let restored = load(&bytes).map_err(|error| proptest::test_runner::TestCaseError::fail(error.to_string()))?;
             proptest::prop_assert_eq!(restored, original);
@@ -606,5 +717,111 @@ mod tests {
         archive.write_all(b"{}").unwrap();
         let bytes = archive.finish().unwrap().into_inner();
         assert!(matches!(load(&bytes), Err(Error::LimitExceeded(_))));
+    }
+
+    #[test]
+    fn olp_load_rejects_invalid_project_invariants() {
+        assert_corrupt(|m| m["project"]["layers"]["colors"] = serde_json::json!([]));
+        assert_corrupt(|m| m["project"]["layers"]["colors"][3]["index"] = serde_json::json!(9));
+        assert_corrupt(|m| m["project"]["layers"]["colors"][0]["ops"] = serde_json::json!([]));
+        assert_corrupt(|m| {
+            let ops = m["project"]["layers"]["colors"][0]["ops"].as_array_mut().unwrap();
+            let op = ops[0].clone();
+            ops.resize(12, op);
+        });
+        assert_corrupt(|m| m["project"]["layers"]["tools"][0]["which"] = serde_json::json!(2));
+        assert_corrupt(|m| m["project"]["job"]["repeats"] = serde_json::json!(0));
+        assert_corrupt(|m| m["project"]["job"]["repeats"] = serde_json::json!(65535));
+        assert_corrupt(|m| {
+            let duplicate = m["project"]["shapes"][0].clone();
+            m["project"]["shapes"].as_array_mut().unwrap().push(duplicate);
+        });
+        assert_corrupt(|m| {
+            let child = m["project"]["shapes"][0].clone();
+            let mut second = child.clone();
+            second["id"] = child["id"].clone();
+            let mut group = child.clone();
+            group["id"] = serde_json::json!(1);
+            group["geom"] = serde_json::json!({"type":"group", "shapes":[child, second]});
+            m["project"]["shapes"] = serde_json::json!([group]);
+            m["project"]["nextId"] = serde_json::json!(8);
+        });
+        assert_corrupt(|m| m["project"]["nextId"] = serde_json::json!(0));
+        assert_corrupt(|m| m["project"]["nextId"] = serde_json::json!(7));
+        assert_corrupt(|m| m["project"]["workspace"]["sizeMm"] = serde_json::json!([-5.0, 0.0]));
+        assert_corrupt(|m| m["project"]["layers"]["order"] = serde_json::json!([2, 2]));
+        assert_corrupt(|m| m["project"]["layers"]["order"] = serde_json::json!([30]));
+    }
+
+    #[test]
+    fn olp_save_refuses_nonfinite_bitmap_dimensions() {
+        let mut invalid = project();
+        let mut shape = (*invalid.shapes[0]).clone();
+        shape.geom = Geom::Bitmap(Arc::new(BitmapData {
+            asset: AssetId([1; 32]),
+            px: [1, 1],
+            size_mm: [f64::INFINITY, 1.0],
+            gray: Arc::from([0_u8]),
+            source_ext: "png".to_owned(),
+        }));
+        invalid.shapes[0] = Arc::new(shape);
+        assert!(matches!(save(&invalid), Err(Error::NonFinite { .. })));
+    }
+
+    #[test]
+    fn olp_loader_rejects_nonfinite_bitmap_dimensions() {
+        let bytes = save(&project()).unwrap();
+        let mut archive = ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut manifest = String::new();
+        archive.by_name("manifest.json").unwrap().read_to_string(&mut manifest).unwrap();
+        let json = manifest.replace("\"sizeMm\":[200.0,200.0]", "\"sizeMm\":[1e999,200.0]");
+        assert_ne!(json, manifest);
+        let mut writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer.start_file("manifest.json", SimpleFileOptions::default()).unwrap();
+        writer.write_all(json.as_bytes()).unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        assert!(matches!(load(&bytes), Err(Error::NonFinite { .. }) | Err(Error::Corrupt(_))));
+    }
+
+    #[test]
+    fn olp_entry_and_point_limits_are_enforced() {
+        assert!(check_decompressed_size(MAX_DECOMPRESSED).is_ok());
+        assert!(matches!(check_decompressed_size(MAX_DECOMPRESSED + 1), Err(Error::LimitExceeded(_))));
+        let mut writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for i in 0..MAX_ENTRIES + 1 {
+            writer.start_file(format!("extra/{i}"), SimpleFileOptions::default()).unwrap();
+        }
+        let bytes = writer.finish().unwrap().into_inner();
+        assert!(matches!(load(&bytes), Err(Error::LimitExceeded(_))));
+        let many_points = std::iter::repeat_n("L 0 0", MAX_POINTS + 1).collect::<Vec<_>>().join(" ");
+        let paths = std::collections::BTreeMap::from([("p0".to_owned(), format!("M 0 0 {many_points}"))]);
+        assert!(matches!(check_paths(&paths), Err(Error::LimitExceeded(_))));
+    }
+
+    #[test]
+    fn olp_group_depth_limit_is_enforced() {
+        let mut nested = ShapeM {
+            id: ObjectId(1),
+            name: None,
+            layer: LayerKey::Color(0),
+            xform: Affine::IDENTITY.as_coeffs(),
+            geom: GeomM::Group { shapes: Vec::new() },
+            locked: false,
+            power_scale: Percent::new(100.0).unwrap(),
+            priority: 0,
+        };
+        for _ in 0..=MAX_GROUP_DEPTH {
+            nested = ShapeM {
+                id: ObjectId(1),
+                name: None,
+                layer: LayerKey::Color(0),
+                xform: Affine::IDENTITY.as_coeffs(),
+                geom: GeomM::Group { shapes: vec![nested] },
+                locked: false,
+                power_scale: Percent::new(100.0).unwrap(),
+                priority: 0,
+            };
+        }
+        assert!(matches!(check_shape_depth(&[nested], 0), Err(Error::LimitExceeded(_))));
     }
 }

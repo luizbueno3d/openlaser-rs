@@ -42,7 +42,14 @@ pub fn load_all(dir: Option<&Path>) -> (Vec<MachineProfile>, Vec<String>) {
         let loaded = fs::read(&path)
             .map_err(|error| error.to_string())
             .and_then(|bytes| serde_json::from_slice::<MachineProfile>(&bytes).map_err(|error| error.to_string()))
-            .and_then(|profile| validate_profile(&profile).map(|()| profile).map_err(|errors| errors.join("; ")));
+            .and_then(|profile| {
+                validate_id(&profile.id.0)?;
+                let stem = path.file_stem().and_then(|stem| stem.to_str()).ok_or_else(|| "profile filename is not valid UTF-8".to_owned())?;
+                if stem != profile.id.0 {
+                    return Err(format!("profile file stem `{stem}` does not match id `{}`", profile.id.0));
+                }
+                validate_profile(&profile).map(|()| profile).map_err(|errors| errors.join("; "))
+            });
         match loaded {
             Ok(profile) => {
                 if let Some(existing) = profiles.iter_mut().find(|item| item.id == profile.id) {
@@ -89,7 +96,10 @@ impl ProfileStore for DirProfileStore {
 }
 
 fn validate_id(id: &str) -> Result<(), String> {
-    if (1..=64).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-') {
+    let lowercase = id.to_ascii_lowercase();
+    let reserved = matches!(lowercase.as_str(), "con" | "nul" | "aux" | "prn")
+        || ["com", "lpt"].iter().any(|prefix| (1..=9).any(|number| lowercase == format!("{prefix}{number}")));
+    if !reserved && (1..=64).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-') {
         Ok(())
     } else {
         Err("machine profile id must match [a-z0-9-]{1,64}".to_owned())
@@ -121,5 +131,19 @@ mod tests {
         assert_eq!(all.len(), 5);
         assert_eq!(messages.len(), 1);
         assert!(messages[0].contains("bad.json"));
+    }
+
+    #[test]
+    fn profile_loader_checks_id_filename_and_windows_reserved_names() {
+        for reserved in ["con", "nul", "aux", "prn", "com1", "com9", "lpt1", "lpt9"] {
+            assert!(validate_id(reserved).is_err(), "accepted reserved id {reserved}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let profile = jpt_m7_200_sim();
+        let bytes = serde_json::to_vec(&profile).unwrap();
+        fs::write(dir.path().join("other.json"), bytes).unwrap();
+        let (_, messages) = load_all(Some(dir.path()));
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("does not match id"));
     }
 }

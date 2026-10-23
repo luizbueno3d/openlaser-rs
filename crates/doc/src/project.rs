@@ -145,7 +145,7 @@ impl Project {
     }
 
     pub fn shape(&self, id: ObjectId) -> Option<&Arc<Shape>> {
-        self.shapes.iter().find(|s| s.id == id)
+        find_shape(&self.shapes, id)
     }
 
     pub fn color_layer(&self, index: u8) -> Option<&ColorLayer> {
@@ -165,19 +165,21 @@ impl Project {
     }
 
     /// Flattened world polylines (design mm) of one shape, groups expanded; bitmaps give their outline rectangle.
-    pub fn world_polylines(&self, id: ObjectId, tol_mm: f64) -> Vec<Polyline> {
-        let Some(shape) = find_shape(&self.shapes, id) else { return Vec::new() };
+    pub fn world_polylines(&self, id: ObjectId, tol_mm: f64) -> Result<Vec<Polyline>, openlaser_geom::Error> {
+        let Some(shape) = find_shape(&self.shapes, id) else { return Ok(Vec::new()) };
         let mut out = Vec::new();
-        append_world_polylines(shape, Affine::IDENTITY, tol_mm, &mut out);
-        out
+        append_world_polylines(shape, Affine::IDENTITY, tol_mm, &mut out)?;
+        Ok(out)
     }
 
-    pub fn bounds(&self, ids: &[ObjectId]) -> Option<Bounds> {
-        let polys: Vec<Polyline> = ids.iter().flat_map(|id| self.world_polylines(*id, DEFAULT_FLATTEN_TOL_MM)).collect();
-        bounds_of(&polys)
+    pub fn bounds(&self, ids: &[ObjectId]) -> Result<Option<Bounds>, openlaser_geom::Error> {
+        let polys: Vec<Polyline> =
+            ids.iter().map(|id| self.world_polylines(*id, DEFAULT_FLATTEN_TOL_MM)).collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect();
+        Ok(bounds_of(&polys))
     }
 
-    /// Keeps `layers.order` consistent with the shapes (appends newly used layers). Call after every edit.
+    /// Removes unused layer entries, then appends newly used layers in draw traversal order. Groups do not use
+    /// their own layer; only non-group shapes contribute. Call after every edit.
     pub fn normalize(&mut self) {
         let used = self.used_layers();
         self.layers.order.retain(|key| used.contains(key));
@@ -198,17 +200,26 @@ impl Geom {
                 let (hw, hh) = (w.get() / 2.0, h.get() / 2.0);
                 let rect = Rect::new(-hw, -hh, hw, hh).abs();
                 let radius = corner_radius.get().max(0.0).min(rect.width().abs() / 2.0).min(rect.height().abs() / 2.0);
-                RoundedRect::from_rect(rect, radius).to_path(DEFAULT_FLATTEN_TOL_MM)
+                RoundedRect::from_rect(rect, radius).to_path(curve_tolerance(rect.width().abs().max(rect.height().abs())))
             }
-            Geom::Ellipse { rx, ry } => Ellipse::new(Point::ORIGIN, (rx.get().abs(), ry.get().abs()), 0.0).to_path(DEFAULT_FLATTEN_TOL_MM),
+            Geom::Ellipse { rx, ry } => {
+                let rx = rx.get().abs();
+                let ry = ry.get().abs();
+                Ellipse::new(Point::ORIGIN, (rx, ry), 0.0).to_path(curve_tolerance(rx.max(ry)))
+            }
             Geom::Polygon { sides, radius } => polygon_path(*sides, radius.get()),
             Geom::Bitmap(bitmap) => {
                 let [w, h] = bitmap.size_mm;
-                Rect::new(-w / 2.0, -h / 2.0, w / 2.0, h / 2.0).abs().to_path(DEFAULT_FLATTEN_TOL_MM)
+                let rect = Rect::new(-w / 2.0, -h / 2.0, w / 2.0, h / 2.0).abs();
+                rect.to_path(curve_tolerance(rect.width().abs().max(rect.height().abs())))
             }
             Geom::Group(_) => BezPath::new(),
         }
     }
+}
+
+fn curve_tolerance(size: f64) -> f64 {
+    DEFAULT_FLATTEN_TOL_MM.max(if size.is_finite() { size * 1e-9 } else { DEFAULT_FLATTEN_TOL_MM })
 }
 
 /// "C00".."C29", "T1", "T2".
@@ -249,13 +260,12 @@ fn color_layer(index: u8, defaults: &LayerDefaults) -> ColorLayer {
 }
 
 fn collect_layers(shape: &Shape, out: &mut Vec<LayerKey>) {
-    if !out.contains(&shape.layer) {
-        out.push(shape.layer);
-    }
     if let Geom::Group(children) = &shape.geom {
         for child in children {
             collect_layers(child, out);
         }
+    } else if !out.contains(&shape.layer) {
+        out.push(shape.layer);
     }
 }
 
@@ -273,16 +283,17 @@ fn find_shape(shapes: &[Arc<Shape>], id: ObjectId) -> Option<&Arc<Shape>> {
     None
 }
 
-fn append_world_polylines(shape: &Shape, parent: Affine, tol_mm: f64, out: &mut Vec<Polyline>) {
+fn append_world_polylines(shape: &Shape, parent: Affine, tol_mm: f64, out: &mut Vec<Polyline>) -> Result<(), openlaser_geom::Error> {
     let xform = parent * shape.xform;
     match &shape.geom {
         Geom::Group(children) => {
             for child in children {
-                append_world_polylines(child, xform, tol_mm, out);
+                append_world_polylines(child, xform, tol_mm, out)?;
             }
         }
-        geom => out.extend(flatten(&geom.to_bez(), tol_mm).into_iter().map(|poly| poly.transformed(&xform))),
+        geom => out.extend(flatten(&geom.to_bez(), tol_mm)?.into_iter().map(|poly| poly.transformed(&xform))),
     }
+    Ok(())
 }
 
 fn polygon_path(sides: u16, radius: f64) -> BezPath {
@@ -374,10 +385,44 @@ mod tests {
             priority: 0,
         }));
         project.normalize();
-        assert_eq!(project.layers.order, vec![LayerKey::Tool(1), LayerKey::Color(2)]);
-        let bounds = project.bounds(&[ObjectId(1)]).unwrap();
+        assert_eq!(project.layers.order, vec![LayerKey::Color(2)]);
+        let bounds = project.bounds(&[ObjectId(1)]).unwrap().unwrap();
         assert_eq!(bounds.min, [14.0, 18.0]);
         assert_eq!(bounds.max, [16.0, 22.0]);
-        assert!(!project.world_polylines(ObjectId(2), 0.01).is_empty());
+        assert!(!project.world_polylines(ObjectId(2), 0.01).unwrap().is_empty());
+        assert!(project.shape(ObjectId(2)).is_some());
+    }
+
+    #[test]
+    fn enormous_ellipse_path_has_bounded_element_count() {
+        let ellipse = Geom::Ellipse { rx: Mm::new(1e200).unwrap(), ry: Mm::new(1e200).unwrap() };
+        let path = ellipse.to_bez();
+        assert!(path.elements().len() <= 32, "unexpected {} ellipse path elements", path.elements().len());
+    }
+
+    #[test]
+    fn group_layer_is_not_counted_as_used() {
+        let mut project = Project::new(workspace(), &defaults());
+        let child = Arc::new(Shape {
+            id: ObjectId(2),
+            name: None,
+            layer: LayerKey::Color(4),
+            xform: Affine::IDENTITY,
+            geom: Geom::Rect { w: Mm::new(1.0).unwrap(), h: Mm::new(1.0).unwrap(), corner_radius: Mm::new(0.0).unwrap() },
+            locked: false,
+            power_scale: Percent::new(100.0).unwrap(),
+            priority: 0,
+        });
+        project.shapes.push(Arc::new(Shape {
+            id: ObjectId(1),
+            name: None,
+            layer: LayerKey::Color(9),
+            xform: Affine::IDENTITY,
+            geom: Geom::Group(vec![child]),
+            locked: false,
+            power_scale: Percent::new(100.0).unwrap(),
+            priority: 0,
+        }));
+        assert_eq!(project.used_layers(), vec![LayerKey::Color(4)]);
     }
 }
