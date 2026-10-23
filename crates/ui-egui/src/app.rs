@@ -771,7 +771,7 @@ mod kittests {
     }
 
     #[test]
-    #[ignore = "needs I2"]
+    #[ignore = "needs I1"]
     fn kittest_cuts_columns_and_actual_speed() {}
 
     #[test]
