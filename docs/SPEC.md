@@ -1,8 +1,9 @@
 # OpenLaser build specification
 
-*Revision 1, 2026-10-23. This file is the authority for the first OpenLaser build. Where it disagrees with
-`docs/design/*.md`, `~/AI/ClaudeCode/openlaser-rust-plan/PLAN.md` or `AGENTS.md`, this file wins and the
-integrator updates the others (WP0 updates `AGENTS.md`).*
+*Revision 2, 2026-10-23: revision 1 plus the adversarial review recorded in the [Review log](#review-log) at the
+end. This file is the authority for the first OpenLaser build. Where it disagrees with `docs/design/*.md`,
+`~/AI/ClaudeCode/openlaser-rust-plan/PLAN.md` or `AGENTS.md`, this file wins and the integrator updates the others
+(WP0 updates `AGENTS.md`).*
 
 **Inputs.** PLAN.md §3, §3.6, §5, §6 (cited **PLAN §n**); research 05, the LMC protocol (**R05 §n**); research 04,
 crates; the design notes in `docs/design/`: `craft-automation-pattern.md` (**AUT**), `craft-engine-pattern.md`
@@ -27,7 +28,7 @@ work package.
 | S3 | **Two CLIs.** `openlaser-cli` can never link `openlaser-arm`, `openlaser-human`, `openlaser-transport`, `nusb` or `serialport`. `openlaser-hw` links no server crate (rmcp, tokio, hyper, axum, tungstenite) | AUT Q1, UI O2 |
 | S4 | **Device I/O by injection.** The engine takes a `DeviceAccess`. Only `openlaser-transport` uses `nusb`/`serialport`. `apps/openlaser` and `apps/openlaser-hw` link it only with their cargo feature **`hw`**; default builds can drive the simulator only. Agents never build with `hw` | AUT Q3 |
 | S5 | **ARM minting** lives in `openlaser-arm`; its normal reverse dependencies are exactly {`openlaser-human`, `openlaser-hw`}. `openlaser-ui-egui` hosts the control dispatcher and cannot reach `mint` (it gets tokens through the `HumanSurfaces` trait that `openlaser-human` implements) | AUT Q4 |
-| S6 | GUI stack pinned to **egui/eframe/egui_extras/egui_kittest `=0.36.2`**, **craft-ui @ `5c874d51`** (PhotoCraft's exact pin) and **craft-atomic, craft-settings, craft-quit @ `3d37da38`** (PhotoCraft's craft-print pin). Docking is `craft_ui::docking`, not egui_tiles. This overrides PLAN D6 | UI U1–U3 |
+| S6 | GUI stack pinned to **egui/eframe/egui_extras/egui_kittest `=0.36.2`**, **craft-ui @ `5c874d51`** (PhotoCraft's exact pin) and **craft-atomic, craft-settings, craft-quit @ `3d37da38`** (PhotoCraft's craft-print pin). Docking is `craft_ui::docking`, not egui_tiles. This overrides PLAN D6. Checked: at `3d37da38` none of atomic/settings/quit depends on craft-ui, so the graph holds one craft-ui; both revisions are in the local cargo git cache | UI U1–U3 |
 | S7 | One geometry stack: **kurbo `=0.11.3`, usvg `=0.45.1`, tiny-skia `=0.11.4`**, the versions `egui_extras[svg]` already pulls (all cached locally). Upgrade together with craft-libs | UI O5, PLAN S4 |
 | S8 | The prototype's "Frame only" layer becomes LightBurn's **tool layers T1/T2**. Live Framing source "Tool layers only" exists, and a frame of tool layers only never counts toward ARM | UI O4 |
 | S9 | Machine profiles, calibration, work area and source limits are **human-only writes**; agents read them (`device.settings.set` is human-only, diverging from CAT's `ok`) | AUT C3.6 |
@@ -39,8 +40,13 @@ work package.
 | S15 | Goldens: `py-compat` must reproduce **oracle v0** (`6aed8ff`); shipping packets are compared with **v1** (`5f7aa63`) minus the listed divergences. `rust-v1` goldens are frozen only after Luiz signs `docs/DIVERGENCES.md` (PLAN D13) | golden Q1 |
 | S16 | Images are imported and shown in P0. Burning images (Threshold and Jarvis as on/off runs, no per-pixel power, so H21 is not needed) is a **stretch** item of this build | CAT Q4 |
 | S17 | Any real-USB open, from the GUI or `openlaser-hw`, needs a valid **bench session** (created at a TTY by `openlaser-hw bench start`, ≤ 2 h old) until Luiz relaxes this | PLAN §3.6 layer 3 |
-| S19 | **Windows is required** (Luiz, 2026-10-23): the whole workspace builds and its tests pass on Windows; see §2.6 | Luiz |
 | S18 | Shortcuts follow CAT §10: Esc is STOP whenever a frame or job is active; ⌘W is Weld (provisional); help is ⌘?. **Human-only commands have no menu item and no shortcut**: they are reached only through human-only widgets (Laser panel, Live Framing, ARM dialog, device dialogs) | CAT Q7 |
+| S19 | **Windows is required** (Luiz, 2026-10-23): the whole workspace builds and its tests pass on Windows; see §2.6 | Luiz |
+| S20 | **A frame receipt means "the board executed this pass"**, not "the packets were accepted". Frame Once is one list (the OM pass count baked in) and yields one receipt after the board reports !BUSY; Frame Loop sends **one list per pass** and yields a receipt after each pass's !BUSY. A frame stopped before !BUSY yields no receipt for that list | review R1 |
+| S21 | **The fingerprint is the emission identity** (machine, device, sections with quantised words and path bits, repeats, calibration and machine transform). Frame style and source are **not** in it: a receipt records them, and `covers_job()` decides. So framing with Bounds or Contour from Live Framing satisfies Start for the same job | review R2 |
+| S22 | **The ARM token binds the bytes.** `EmissionSummary.bytes_hash` = blake3 over every single command and packet the run will send; `mint` copies it into the token; the driver recomputes it from the job it was handed and refuses a mismatch. `PendingArm` keeps the exact encoded job whose summary the human saw, and `run_armed` sends that object | review R3 |
+| S23 | **Hardware is default-deny**: every USB or serial open and every `detect` needs `OPENLASER_HW_PRESENT=1` in the environment, `OPENLASER_NO_HW` unset, a build with feature `hw` and (S17) a bench session. Luiz builds `hw` binaries into his own target directory (`~/AI/OpenLaser/.target/hw`), never an agent lane. The first emission of each bench session is capped at 10 % power in software (`BenchPowerCap`) | review R4, PLAN §5.2 |
+| S24 | **Machine profiles are files written only through an injected `ProfileStore`** (`machine::ProfileStore`, implemented by `format::machines::DirProfileStore` in the per-user app dir `…/OpenLaser/machines/<id>.json`). The GUI and `openlaser-hw` inject it; `openlaser-cli` never does, so no agent path can write a profile even through a policy bug. A saved profile shadows the built-in with the same id | review R5 |
 
 ---
 
@@ -102,10 +108,16 @@ From `AGENTS.md` §1 and PLAN §3.6. Every work package is bound by them.
 4. **Only a human can ARM**: typed `ARM` plus checklist in the GUI behind the provenance gate, or `ARM <nonce>` at a
    TTY in `openlaser-hw`. No API, MCP tool, control method, command id, preference, file field or synthetic input
    can mint an `ArmToken`.
-5. **Stop always works** from every surface, agents included, and is never disabled, hidden, modal-blocked or
-   behind a permission. The software stop is still not the primary safety device; the E-stop and key switch are.
+5. **Stop always works** from every surface, agents included (through the GUI's control channel; `openlaser-hw`
+   has no agent channel by design, because no agent runs during a hardware session, §8.2), and is never disabled,
+   hidden, modal-blocked, queued behind another request or behind a permission. A stop tripped after a command was
+   queued cancels that command (§5.3). The software stop is still not the primary safety device; the E-stop and key
+   switch are.
 6. **Never crash.** Non-test code has no `unwrap`, `expect`, `panic!`, `todo!`, `unimplemented!`, `unreachable!` or
    unchecked indexing on input-derived values. `unsafe_code = "forbid"` everywhere. `panic = "unwind"` explicitly.
+7. **Fail closed.** Every stub, default and test double denies: gates that return `Result` return `Err`, gates that
+   return `bool` return the refusing value (`is_human_click` false, `frame_is_synthetic` true), and nothing is
+   enabled by a missing setting, file or environment variable (S23).
 
 ---
 
@@ -136,34 +148,34 @@ crates; `cargo xtask deps` fails on any edge not listed (dev-dependencies: §2.3
 
 | Crate (`openlaser-…`) | Responsibility | Internal deps (normal) | External deps |
 |---|---|---|---|
-| `types` | Unit newtypes (`Mm`, `MmPerS`, `Percent`, `Hz`, `Ns`, `Us`, `Deg`); ids; `Fingerprint`; `MonoTime` + `Clock`; refusal and notice codes; `EmissionSummary`; `FrameReceipt`; the opaque `ArmToken` (check only); **the T0 numeric encoders** (`galvo.rs`) | — | serde, thiserror |
+| `types` | Unit newtypes (`Mm`, `MmPerS`, `Percent`, `Hz`, `Ns`, `Us`, `Deg`); ids; `Fingerprint`; `DeviceKind`; `MonoTime` + `Clock`; refusal and notice codes; `EmissionSummary`; `FrameReceipt`; the opaque `ArmToken` (check only); the `serde_secs`/`serde_ms` helpers; **the T0 numeric encoders** (`galvo.rs`) | — | serde, thiserror |
 | `geom` | `Polyline`, kurbo flattening, transforms, bounds, join/close/dedupe (OM `geometry.py` port), hatch (OM `raster.py` port, T3), `HitIndex` (rstar) | types | kurbo, rstar, serde, thiserror |
 | `doc` | The project model: shapes, the 30 colour layers + T1/T2, cut settings (galvo/gantry/fill/image), selection, palette. Pure data | types, geom | kurbo, serde, serde_json, thiserror |
-| `machine` | Machine profiles (`GalvoMachine`, `GantryMachine`), calibration, JPT M7 built-in, OM gantry profiles, EZCAD `markcfg` import, OM `calibration.json` import. No I/O | types, geom, doc | serde, thiserror |
-| `format` | `.olp` read/write (zip + manifest model + migrations), atomic save | types, geom, doc | zip, serde, serde_json, blake3, craft-atomic, thiserror |
+| `machine` | Machine profiles (`GalvoMachine`, `GantryMachine`), calibration, JPT M7 built-in, OM gantry profiles, EZCAD `markcfg` import, OM `calibration.json` import, the `ProfileStore` trait (S24). No I/O | types, geom, doc | serde, thiserror |
+| `format` | `.olp` read/write (zip + manifest model + migrations), atomic save; `machines` (profile files: `load_all`, `DirProfileStore`) | types, geom, doc, machine | zip, flate2 (backend selection only), serde, serde_json, blake3, craft-atomic, craft-settings (app dirs), thiserror |
 | `import` | SVG (usvg, true scale), DXF (OM parser port, T4), raster images, OM `workspace.json` + `layer_settings.json` | types, geom, doc | usvg, image, serde, serde_json, blake3, thiserror |
 | `plan` | Document + machine → `JobPlan`: sections per layer/sub-layer/pass, machine transform, hatch, quantised galvo parameters (`GalvoCutQ`), frame paths, plan facts, galvo time model, fingerprint | types, geom, doc, machine | blake3, serde, thiserror |
 | `safety` | `validate()`: every hard refusal and notice; sole constructor of `EmitPlan`/`FramePlan` | types, geom, doc, machine, plan | serde, thiserror |
 | `arm` | `mint()`: the only code that creates an `ArmToken`; `HumanConfirm` witnesses | types | getrandom |
 | `render` | UI-free `DisplayList` (document, plan, emission) and deterministic tiny-skia PNG rendering | types, geom, doc, machine, plan | tiny-skia, thiserror |
-| `gcode` | GRBL G-code encoder (T2 parity, shipping refuses overspeed), number formatting, gantry frame program | types, geom, machine, plan, safety | serde, thiserror |
-| `lmc` | Pure LMC protocol: opcodes, list builder, `LightingList`/`MarkingList`, packetiser, job and frame encoders, disassembler, `EmissionSummary` from bytes, status parser, `LmcTransport` trait, test-only `py-compat` | types, geom, machine, plan, safety | serde, thiserror |
-| `driver` | Driver runtime: `Backend`, driver thread, `StopLatch`/`Stopper`, watchdog, dead-man rule, panic guard, events; **LMC session** (`LmcBackend`); **GRBL streaming** (`GrblBackend`); `DeviceProvider` and `ByteLink` traits | types, machine, lmc, gcode | crossbeam-channel, serde, thiserror, log |
+| `gcode` | GRBL G-code encoder (T2 parity, shipping refuses overspeed), number formatting, gantry frame program (`GcodeFrame`, laser off by type) | types, geom, machine, plan, safety | serde, blake3, thiserror |
+| `lmc` | Pure LMC protocol: opcodes, list builder, `LightingList`/`MarkingList`, packetiser, job and frame encoders, disassembler, `EmissionSummary` from bytes (incl. `bytes_hash`), status parser, `LmcTransport` trait, test-only `py-compat` | types, geom, machine, plan, safety | serde, blake3, thiserror |
+| `driver` | Driver runtime: `Backend`, driver thread, `StopLatch`/`Stopper`, watchdog, dead-man rule, panic guard, events; **LMC session** (`LmcBackend`); **GRBL streaming** (`GrblBackend`); `DeviceProvider` (incl. `detect`) and `ByteLink` traits | types, machine, lmc, gcode | crossbeam-channel, serde, thiserror, log |
 | `lmc-sim` | `FakeLmc` (board model, virtual clock, faults, emission recorder), offline `simulate_job`, `SimProvider`, `FakeGrbl` (port of `fake_grbl.py`) | types, machine, lmc, driver | crossbeam-channel, thiserror |
-| `transport` | **The only crate that touches devices**: `UsbLmc` (nusb), `SerialLink`/`TcpLink`, `UsbProvider`, read-only `detect`, board lock, bench session, keep-awake assertion (`keepawake`) | types, machine, lmc, driver | nusb, serialport, keepawake, serde, serde_json, thiserror |
+| `transport` | **The only crate that touches devices**: `UsbLmc` (nusb), `SerialLink`/`TcpLink`, `UsbProvider`, read-only `detect`, board lock, bench session, keep-awake assertion (`keepawake`) | types, machine, lmc, driver | nusb, serialport, keepawake, craft-settings (app dirs), serde, serde_json, thiserror |
 | `engine` | `Session`, command registry and `command!` macro, origin policy, snapshot undo, job pipeline (plan → validate → encode → disassemble → summary), device hub, pending ARM, frame requests and submissions, inspect JSON | types, geom, doc, machine, format, import, plan, safety, lmc, gcode, driver | serde, serde_json, schemars, thiserror, log |
 | `control` | Control-protocol leaf (std only): token, discovery file, bounded line reader, envelope, method table, budgets, `AuthorizedWorkspace` (cap-std), loopback `ControlServer` with the stop fast path | types | serde, serde_json, cap-std, getrandom, craft-atomic, thiserror |
 | `automation` | MCP server (rmcp, stdio), headless backend, bridge client, `serve` (JSON lines), tool table and strict schemas | types, doc, machine, plan, engine, control, render, lmc, lmc-sim | rmcp, tokio, schemars, serde, serde_json, base64, thiserror |
-| `ui-egui` | The LightBurn-layout shell: `OpenLaserApp`, panels, canvas, menus catalogue and parity, shortcuts, dock, control dispatcher, STOP chrome, `HumanSurfaces` trait | types, geom, doc, machine, plan, engine, control, render | egui, egui_extras, craft-ui, craft-settings, craft-atomic, serde, serde_json, log |
+| `ui-egui` | The LightBurn-layout shell: `OpenLaserApp`, panels, canvas, menus catalogue and parity, shortcuts, dock, control dispatcher, STOP chrome, `HumanSurfaces` trait | types, geom, doc, machine, plan, engine, control, render | egui (`default_fonts`), eframe (`wgpu`, `accesskit`: `OpenLaserApp` implements `eframe::App`), egui_extras (`svg`), craft-ui, craft-settings, craft-atomic, serde, serde_json, log |
 | `human` | Human-only surfaces and the input-provenance gate: ARM dialog, frame approval, connect, device-profile save; the synthetic-input injector; implements `HumanSurfaces` | types, ui-egui, arm | egui |
 | `testkit` | Dev-only: golden loaders (T0–T4), sha256, adversarial params | types | serde, serde_json, sha2 |
-| `apps/openlaser` | GUI binary: eframe, macOS menu (muda), file dialogs (rfd), control server start, sim + (feature `hw`) USB provider | types, engine, control, ui-egui, human, lmc-sim, [transport if `hw`] | eframe, egui, muda (macOS), rfd, craft-quit, craft-settings, log |
-| `apps/openlaser-cli` | Agent CLI: `mcp`, `serve`, `ui`, `commands`, `info`, `convert`, `run`, `plan`, `preview`, `simulate`, `estimate`, `gcode`, `job-export` | types, engine, control, automation, render, lmc-sim | serde_json |
-| `apps/openlaser-hw` | Human hardware CLI: `detect`, `status`, `frame`, `run`, `bench`; TTY ARM; signal and key stop | types, machine, engine, driver, arm, lmc-sim, [transport if `hw`] | crossterm, signal-hook (unix), ctrlc (windows), serde_json |
+| `apps/openlaser` | GUI binary: eframe, macOS menu (muda), file dialogs (rfd), control server start, sim + (feature `hw`) USB provider, `DirProfileStore`, panic hook and signal stop (§5.4) | types, engine, control, ui-egui, human, lmc-sim, format, [transport if `hw`] | eframe, egui, muda (macOS), rfd, craft-quit, craft-settings, signal-hook (unix), ctrlc (windows), log |
+| `apps/openlaser-cli` | Agent CLI: `mcp`, `serve`, `ui`, `commands`, `info`, `convert`, `run`, `plan`, `preview`, `simulate`, `estimate`, `gcode`, `job-export`. Every subcommand runs with `Origin::Headless` and no `ProfileStore` | types, engine, control, automation, render, lmc-sim | serde_json |
+| `apps/openlaser-hw` | Human hardware CLI: `detect`, `status`, `frame`, `run`, `bench`, `profile`; TTY ARM; signal and key stop; `--trace`, `--builtin` patterns | types, machine, engine, driver, arm, lmc-sim, format, [transport if `hw`] | crossterm, signal-hook (unix), ctrlc (windows), serde_json |
 | `xtask` | `deps`, `parity`, `golden-verify`, `ci` | — | serde_json, sha2 |
 
 ```
-types ─┬─ geom ─ doc ─ machine ─┬─ format                          arm ─(types)        control ─(types)
+types ─┬─ geom ─ doc ─ machine ─┬─ format (+ machines store)      arm ─(types)        control ─(types)
        │                        ├─ import                         testkit ─(types, dev only)
        │                        └─ plan ─┬─ safety ─┬─ gcode ─┐
        │                                 │          └─ lmc ───┴─ driver ─┬─ lmc-sim
@@ -171,9 +183,9 @@ types ─┬─ geom ─ doc ─ machine ─┬─ format                       
 engine      = doc machine format import plan safety lmc gcode driver (+ types geom)
 automation  = engine control render lmc-sim         ui-egui = engine control render
 human       = ui-egui arm
-openlaser   = ui-egui human engine control lmc-sim [transport: feature hw]
-openlaser-cli = automation engine control render lmc-sim
-openlaser-hw  = engine driver arm lmc-sim machine [transport: feature hw]
+openlaser   = ui-egui human engine control lmc-sim format [transport: feature hw]
+openlaser-cli = automation engine control render lmc-sim          (no format edge: cannot name DirProfileStore)
+openlaser-hw  = engine driver arm lmc-sim machine format [transport: feature hw]
 ```
 
 ### 2.3 Dependency rules (`cargo xtask deps`, plus clippy)
@@ -191,14 +203,32 @@ openlaser-hw  = engine driver arm lmc-sim machine [transport: feature hw]
 7. `ui-egui`'s closure contains neither `arm` nor `human`.
 8. `safety` depends on no encoder or driver crate (`lmc`, `gcode`, `driver`, `lmc-sim`, `transport`).
 9. `std::process::Command` appears only in `xtask` and `apps/*` (xtask greps the source).
-10. Dev-dependencies: `testkit` anywhere; `lmc-sim` in any crate above it; `safety` with feature
-    `unchecked-for-tests`, `lmc` with `py-compat`, `arm` with `test-witness` only as dev-dependencies (xtask checks
-    every edge that enables them). Each of those features `compile_error!`s without `debug_assertions`.
+10. Dev-dependencies: `testkit` anywhere; `lmc-sim` in `driver` and in any crate that depends on `driver`;
+    `safety` with feature `unchecked-for-tests`, `lmc` with `py-compat`, `arm` with `test-witness` only as
+    dev-dependencies (xtask checks every edge that enables them). Each of those features `compile_error!`s without
+    `debug_assertions`. **Dev-dependency cycles** (`types`/`geom` ← `testkit`, `driver` ← `lmc-sim`): a crate uses
+    such a dev-dependency only from integration tests in `tests/`, never from `#[cfg(test)]` unit tests, where the
+    crate under test and the copy the dev-dependency links are two crates whose types do not unify.
 11. Clippy `disallowed-methods` (in `clippy.toml`): `openlaser_types::arm::ArmToken::issue` (allowed only in
     `crates/arm/src/mint.rs`), `openlaser_arm::HumanConfirm::from_gui_gesture` and `GuiGestureWitness::new`
     (only `crates/human/src/gesture.rs`), `openlaser_arm::HumanConfirm::from_tty` and `TtyWitness::new` (only
     `apps/openlaser-hw/src/tty_arm.rs`). xtask fails if any other file contains `allow(clippy::disallowed_methods)`.
-12. No crate uses `--all-features`-only code paths; nobody runs `--all-features` (it would enable `hw`).
+12. No crate uses `--all-features`-only code paths; nobody **builds** with `--all-features` or `hw`. xtask's
+    `cargo metadata` queries with `--features openlaser/hw,openlaser-hw/hw` are allowed (metadata resolves, never
+    compiles) so rules 1, 5 and 6 are checked with `hw` on as well as off.
+13. `Origin::Human` is constructed only in `crates/ui-egui`, `crates/human`, `apps/openlaser` and
+    `apps/openlaser-hw` (xtask grep): `automation` and `openlaser-cli` always use `Origin::Headless`, so even a
+    `run --cmd` subcommand can never pass the human-only policy.
+14. `safety::testing`, `arm::testing` and `lmc::py_compat` are referenced only from `tests/` directories and
+    `#[cfg(test)]` modules (xtask grep). Feature unification can compile them into a binary built by
+    `cargo test --workspace`; this rule keeps any non-test call from compiling in a normal build.
+15. `crates/transport` never calls `transfer_blocking`, `reset`, `clear_halt` or `detach_and_claim_interface`
+    (xtask grep; PLAN §3.5: no USB reset, no unbounded blocking transfer).
+16. In `crates/ui-egui`, `egui::Event` values (`PointerButton`, `PointerMoved`, `Key`, `Text`, `Paste`,
+    `AccessKitActionRequest`) are constructed only in `src/control/input.rs`, which builds the `Vec<Event>` handed to
+    `HumanSurfaces::inject`, and in tests (xtask grep). No other path pushes synthetic input into egui.
+17. `format::machines::DirProfileStore` is named only in `apps/openlaser` and `apps/openlaser-hw` (xtask grep);
+    `engine` does not re-export it (S24).
 
 ### 2.4 External crates (pinned; versions verified on crates.io 2026-10-23)
 
@@ -208,7 +238,7 @@ dependency that is not already in `[workspace.dependencies]` (ask the integrator
 
 | Crate | Pin | Licence | Used by | Note |
 |---|---|---|---|---|
-| egui, eframe, egui_extras, egui_kittest | `=0.36.2` | MIT/Apache | ui-egui, human, apps/openlaser | craft-ui requires 0.36; 0.37 waits for craft-libs |
+| egui, eframe, egui_extras, egui_kittest | `=0.36.2` | MIT/Apache | ui-egui, human, apps/openlaser | craft-ui requires 0.36; 0.37 waits for craft-libs. Features (PhotoCraft's): egui `default-features = false` + `default_fonts`; eframe `default-features = false` + `wgpu`, `accesskit` (the app adds `persistence`); egui_extras `default-features = false` + `svg`; egui_kittest dev-only with `eframe` (no `wgpu`/`snapshot` this build, §6.4). eframe 0.36's `App` has `logic`, `ui` and `raw_input_hook` (checked in `epi.rs`) |
 | craft-ui | git `storytold/craft-libs` rev `5c874d51eeb3de70e735c8ce87a59a7dedd47675`, feature `serde` | MIT/Apache | ui-egui | PhotoCraft's exact pin; repo reachable from this Mac |
 | craft-atomic, craft-settings, craft-quit | same repo, rev `3d37da389a3618ab9b76109da11416e9ca4ea719` | MIT/Apache | format, control, ui-egui, apps/openlaser | craft-quit with feature `egui` only (its `menu` feature needs muda 0.21.2) |
 | muda | `=0.21.1` | MIT/Apache | apps/openlaser (macOS) | PhotoCraft's pin |
@@ -218,23 +248,24 @@ dependency that is not already in `[workspace.dependencies]` (ask the integrator
 | tiny-skia | `=0.11.4` | BSD-3 | render | deterministic PNG |
 | rstar | `=0.13.0` | MIT/Apache | geom | hit-testing |
 | image | `=0.25.10`, features png, jpeg, bmp, tiff, webp, gif | MIT/Apache | import | |
-| zip | `=9.0.5`, `default-features = false`, feature `deflate-flate2` | MIT | format | |
+| zip | `=9.0.5`, `default-features = false`, feature `deflate-flate2` | MIT | format | `deflate-flate2` alone selects **no** flate2 backend (zip declares flate2 with `default-features = false`, and flate2 then hits `compile_error!("You need to choose a zlib backend")`); the flate2 row below selects it |
+| flate2 | `=1.1.10`, `default-features = false`, feature `rust_backend` | MIT/Apache | format | backend selection for zip only (pure Rust miniz_oxide, no C toolchain, the same backend PhotoCraft's lock and `png` use) |
 | dxf | `=0.6.2` | MIT | — | declared for P1 DXF export; the P0 importer is the OM-parser port |
 | i_overlay, quick-xml | `=9.1.0`, `=0.42.0` | MIT/Apache, MIT | — | declared for P1 (booleans, `.lbrn2`); unused in this build |
-| nusb | `=0.2.8` | MIT/Apache | transport | no libusb |
+| nusb | `=0.2.8` | MIT/Apache | transport | no libusb. API used (checked on docs.rs and the v0.2.8 source): `list_devices()` (IORegistry on macOS, never opens), `DeviceInfo::open`, `Device::active_configuration`/`set_configuration`, `claim_interface(0)`, `Interface::endpoint` Bulk OUT `0x02` / IN `0x88`, `Endpoint::submit` + `wait_next_complete(≤ 20 ms)`, `cancel_all`, `pending`. On macOS `claim_interface` fails "interface not found" on an unconfigured device (§3.15 `usb_set_configuration`). Never `transfer_blocking`, `reset`, `clear_halt` (§2.3 rule 15) |
 | serialport | `=4.10.1`, `default-features = false` | MPL-2.0 | transport | |
-| rmcp | `=3.5.0`, features server, macros, transport-io | Apache-2.0 | automation | PhotoCraft's lockfile version |
+| rmcp | `=3.5.0`, features server, macros, transport-io | Apache-2.0 | automation | PhotoCraft's lockfile version (3.7.0 is newest; stay on PhotoCraft's until the Craft apps move) |
 | tokio | `1` (lock: 1.53.1) | MIT | automation, apps/openlaser-cli | |
 | schemars | `=1.2.2` | MIT | engine, automation | |
 | cap-std | `=4.0.3` | Apache/MIT | control | |
 | serde, serde_json (`float_roundtrip`), thiserror `2`, log `0.4` | caret | MIT/Apache | all | `float_roundtrip` is needed to read the goldens exactly |
-| blake3 | `=1.8.7`, `default-features = false`, feature `pure` | CC0/Apache | format, plan, import | |
+| blake3 | `=1.8.7`, `default-features = false`, feature `pure` | CC0/Apache | format, plan, import, lmc, gcode | `bytes_hash` (S22) in lmc and gcode |
 | getrandom | `=0.3.4` | MIT/Apache | arm, control | |
 | crossbeam-channel | `=0.5.17` | MIT/Apache | driver, lmc-sim | |
 | base64 | `=0.22.1` | MIT/Apache | automation | |
 | crossterm | `=0.29.0` | MIT | apps/openlaser-hw | raw-mode key thread (Esc/Space/Ctrl-C) |
-| signal-hook | `=0.4.5` (target `cfg(unix)`) | MIT/Apache | apps/openlaser-hw | SIGINT/SIGTERM/SIGHUP trip the latch |
-| ctrlc | `=3.5.2`, feature `termination` (target `cfg(windows)`) | MIT/Apache | apps/openlaser-hw | Ctrl-C/Break/console close trip the latch (§2.6) |
+| signal-hook | `=0.4.5` (target `cfg(unix)`) | MIT/Apache | apps/openlaser-hw, apps/openlaser | SIGINT/SIGTERM/SIGHUP set an `AtomicBool` (`signal_hook::flag::register`, async-signal-safe); a watcher thread then trips the latch and waits for the StopReport before exiting (§5.4) |
+| ctrlc | `=3.5.2`, feature `termination` (target `cfg(windows)`) | MIT/Apache | apps/openlaser-hw, apps/openlaser | Ctrl-C/Break/console close trip the latch (§2.6) |
 | keepawake | `=0.6.1`, `default-features = false` | MIT | transport | keep the machine awake during a session on macOS, Windows, Linux (§2.6) |
 | sha2 | `=0.11.0` | MIT/Apache | testkit, xtask | golden packet file names are sha256 |
 | proptest, insta (feature json), tempfile | `=1.12.0`, `=1.49.0`, `=3.27.0` | MIT/Apache, Apache | dev-dependencies | |
@@ -243,8 +274,14 @@ The board lock uses `std::fs::File::try_lock` (stable since 1.89); no extra crat
 
 ### 2.5 Toolchain, lints, profiles
 
-- `rust-toolchain.toml`: `channel = "1.99.0"`, components rustfmt, clippy. Workspace `rust-version = "1.95"`
-  (craft-libs and egui 0.36 need 1.95). `export PATH="$HOME/.cargo/bin:$PATH"`.
+- `rust-toolchain.toml`: `channel = "stable"`, components rustfmt, clippy. This Mac's only installed toolchain is
+  `stable-aarch64-apple-darwin` = rustc 1.99.0; rustup does not alias `"1.99.0"` to it, so pinning the number would
+  make rustup download a second ~1 GB toolchain into a tight disk. The gate checks `rustc --version` ≥ 1.99.
+  Workspace `rust-version = "1.95"` (craft-libs and egui 0.36 need 1.95; zip 9 and rmcp 3.5 need 1.88, nusb 0.2.8
+  1.85). `export PATH="$HOME/.cargo/bin:$PATH"`.
+- Root `Cargo.toml` is a virtual manifest with **`resolver = "3"`** stated explicitly (a virtual manifest has no
+  edition, and without it Cargo falls back to resolver 1, which would unify dev-only features such as
+  `unchecked-for-tests` and `test-witness` into normal builds of the binaries).
 - `.cargo/config.toml`: `[alias] xtask = "run -p xtask --"`.
 - `rustfmt.toml` and `clippy.toml` exist (Craft style: `max_width = 160`, `use_small_heuristics = "Max"`;
   unwrap/expect/panic/indexing allowed in tests). WP0 adds `disallowed-methods` (§2.3 rule 11).
@@ -269,7 +306,8 @@ disallowed_methods = "deny"
 
   Encoding crates (`types`, `lmc`, `gcode`) add `#![deny(clippy::cast_possible_truncation, clippy::cast_sign_loss,
   clippy::cast_possible_wrap)]`: every narrowing goes through `u16::try_from` or an explicit, commented rule.
-- Profiles (PhotoCraft's, plus explicit unwind):
+- Profiles (PhotoCraft's, plus explicit unwind). There is no `[profile.test] panic` key: Cargo ignores `panic`
+  for the test profile (tests always unwind) and warns about it.
 
 ```toml
 [profile.dev]
@@ -278,8 +316,6 @@ debug = "line-tables-only"
 panic = "unwind"
 [profile.dev.package."*"]
 opt-level = 2
-[profile.test]
-panic = "unwind"
 [profile.release]
 lto = "thin"
 codegen-units = 1
@@ -295,13 +331,20 @@ signing stay later work.
 1. **Every crate builds for Windows.** The gate (§6.1) adds
    `cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings` (check only, from the
    Mac; the targets are installed with rustup). No crate may depend on a C toolchain for the target (blake3 `pure`,
-   zip with `deflate-flate2`, no `ring`/`openssl`). `cargo xtask ci` runs it.
+   zip with `deflate-flate2` plus flate2 `rust_backend`, no `ring`/`openssl`). `cargo xtask ci` runs it. Disk: the
+   target's standard library is a rustup download (a few hundred MB) and its check artifacts live under
+   `<lane>/x86_64-pc-windows-msvc/` (a few GB), so only the integrator runs this check, in the gui lane, once per
+   integration step (§6.7), after `df` shows ≥ 8 GB free.
 2. **Real Windows CI.** WP0 writes `.github/workflows/ci.yml` modelled on PhotoCraft's: `macos-latest`,
    `windows-latest` and `ubuntu-latest` run fmt, clippy, `cargo test --workspace` (default features, never `hw`)
    and `cargo xtask deps`. It runs once Luiz approves a private GitHub repository.
 3. **Platform seams, never `#[cfg(unix)]`-only features:**
    - Paths: per-user app dirs from `craft-settings` (`%APPDATA%\OpenLaser` on Windows,
      `~/Library/Application Support/OpenLaser` on macOS). Never build paths with `/` literals; use `Path::join`.
+     Device state that OM also reads (the board lock), the bench session and machine profiles use
+     `craft_settings::data_dir("OpenLaser")` (`dirs::data_local_dir`: `%LOCALAPPDATA%\OpenLaser` on Windows, which
+     is OM v1's board-lock folder; `~/Library/Application Support/OpenLaser` on macOS). OM v1 locks with `flock`,
+     which is what `File::try_lock` uses on Unix, so the two lock each other out.
    - Secret files (control token, discovery): on Unix `0700` dir + `0600` file; on Windows the per-user AppData
      folder (its default ACL is user-only) plus `FILE_ATTRIBUTE_HIDDEN` is acceptable. Tests are
      `#[cfg(unix)] token_file_mode_0600` and `#[cfg(windows)] token_file_in_user_appdata`.
@@ -331,10 +374,26 @@ signing stay later work.
 ### 3.0 Rules for the contracts
 
 - **WP0 pastes these blocks into the crates.** Data types are written in full (fields, derives, serde attributes).
-  Function bodies are stubs that never panic: a function returning `Result` returns
-  `Err(<CrateError>::NotImplemented("<path>"))` (every crate error enum carries that variant during this build;
-  I3 removes it), and the few functions returning plain values return a neutral value (`Vec::new()`, `None`,
-  `0`). The workspace must `cargo check` and `cargo clippy -D warnings` green with only stubs.
+  Function bodies are stubs that never panic **and fail closed** (§1.3 rule 7):
+  - a function returning `Result<_, E>` returns `Err(E::NotImplemented("<path>"))`. Every error enum in §3 carries
+    that variant during this build, including `UnitError`, `EncodeError`, `XferError`, `LinkError`, `BridgeError`
+    and `EngineError`; I3 removes it. A function whose error type is `Refusal`, `Refused` or `JobRefused` returns a
+    refusal with `RefusalCode::NotImplemented` (also removed at I3);
+  - a function returning `bool` returns the refusing value (`is_human_click` → false, `frame_is_synthetic` → true,
+    `surface_open` → true, `covers_job` → false); `Option` returns `None`; collections are empty; numbers 0;
+  - **implemented in full by WP0, not stubbed**, because other packages' tests need them before WP3 merges:
+    `Refusal` builders, `safety::testing::*`, `arm::testing::*` (including `token_for_tests`, written in
+    `crates/arm/src/mint.rs` so the `ArmToken::issue` allowance stays in one file), and testkit's path/hex/sha256
+    helpers.
+
+  The workspace must pass `cargo clippy --all-targets -- -D warnings` in both lanes (§6.7) with only stubs.
+- `Fingerprint` (and anything else whose JSON form §3 states explicitly) gets **manual** `Debug`, `Display`,
+  `Serialize` and `Deserialize` impls; every struct that contains it may then derive `Debug`/`Serialize` as listed.
+- **Durations in JSON.** A `Duration` field that crosses a process boundary is serialised as f64 seconds under a key
+  ending in `S` (`#[serde(rename = "estimateS", with = "openlaser_types::serde_secs")]`) or as u64 milliseconds
+  under a key ending in `Ms` (`serde_ms`), never as serde's default `{secs, nanos}` (S2: keys carry their unit).
+  This covers every `Duration` field in §3 that derives `Serialize` (`PassRow`, `EmissionSummary`, `StopReport`,
+  `Outcome::Finished`, `FrameOutcome`, budgets echoed in results); `MonoTime` gets manual impls as f64 seconds.
 - Signatures below are normative. A work package may **add** public items freely. Changing or removing a listed
   item is a **contract change**: write it at the top of the PR description under `CONTRACT CHANGE`, and it lands
   only through the integrator.
@@ -363,6 +422,8 @@ pub enum UnitError {
     OutOfRange { what: &'static str, value: f64, min: f64, max: f64 },
     #[error("{what} = {value} is not a whole number of hertz")]
     NotWholeHz { what: &'static str, value: f64 },
+    #[error("not implemented: {0}")]
+    NotImplemented(&'static str), // build-only (§3.0); removed at I3
 }
 // Each f64 newtype has: new(v) -> Result<Self, UnitError>; get(self) -> f64; TryFrom<f64>; From<Self> for f64;
 // #[serde(try_from = "f64", into = "f64")]; derives Debug, Clone, Copy, PartialEq, PartialOrd.
@@ -411,7 +472,8 @@ pub struct MachineId(pub String);
 #[serde(transparent)]
 pub struct SessionId(pub u64);
 
-/// blake3 of a canonical plan encoding. JSON: 64 lowercase hex. Display and `short()`: first 6 hex digits.
+/// blake3 of a canonical encoding (plan fingerprint, S21) or of wire bytes (`bytes_hash`, S22). JSON: 64 lowercase
+/// hex. Display, Debug and `short()`: first 6 hex digits. Debug/Display/Serialize/Deserialize are MANUAL impls (§3.0).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Fingerprint(pub [u8; 32]);
 impl Fingerprint {
@@ -420,9 +482,17 @@ impl Fingerprint {
     pub fn from_hex(s: &str) -> Result<Self, UnitError>;
 }
 
+/// Moved here from `doc` (driver, plan, safety and lmc all name it; driver has no `doc` edge). `doc` re-exports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)] #[serde(rename_all = "snake_case")]
+pub enum DeviceKind { GalvoLmc, Grbl }
+
+// ---- serde_dur.rs: `serde_secs` (f64 seconds) and `serde_ms` (u64 ms) `with` modules for Duration (§3.0) ---------
+pub mod serde_secs { /* serialize(&Duration, S) / deserialize(D) -> Duration; refuses negative and non-finite */ }
+pub mod serde_ms { /* … */ }
+
 // ---- time.rs --------------------------------------------------------------------------------------------
-/// Monotonic time from a `Clock`; virtual in tests. Never wall-clock.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+/// Monotonic time from a `Clock`; virtual in tests. Never wall-clock. Serialize/Deserialize are manual (f64 s, §3.0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct MonoTime(pub std::time::Duration);
 impl MonoTime {
     pub fn saturating_since(self, earlier: MonoTime) -> Duration;
@@ -455,9 +525,16 @@ pub enum RefusalCode {
     // job flow and ARM
     MachineMismatch, Stale, FrameRequired, FrameReceiptExpired, FrameNotHuman, FrameDoesNotCoverJob,
     ArmTextMismatch, ChecklistIncomplete, ArmExpired, ArmNonceUsed, ArmSessionMismatch,
+    BytesMismatch,          // S22: the job handed to the driver is not the bytes the human confirmed
+    StoppedAfterQueue,      // §5.3: a stop tripped after this command was queued cancelled it
     // access and devices
     HumanOnly, NeedsBridge, NoDevice, NotConnected, MachineBusy, HumanConfirmationOpen, HardwareDisabled,
     BenchSessionRequired, BoardLocked, CloneBoard, NotATty, GrblPreflight,
+    BenchPowerCap,          // S23: first emission of a bench session above 10 %
+    EmissionNotAllowed,     // `openlaser-hw run` without --allow-emission (red light only)
+    UsbNotConfigured,       // macOS: device unconfigured and the profile's usb_set_configuration is off (H12)
+    // build-only (§3.0); removed at I3
+    NotImplemented,
 }
 impl RefusalCode { pub fn as_str(self) -> &'static str; } // the snake_case wire string; stable forever
 
@@ -517,17 +594,23 @@ pub struct PassRow {
     pub paths: u32,
     pub mark_mm: f64,
     pub bounds: Bounds,
+    #[serde(rename = "estimateS", with = "crate::serde_secs")]
     pub estimate: Duration,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmissionSummary {
     pub fingerprint: Fingerprint,
+    /// S22: blake3 over, in send order, every single command (12 bytes) and packet (3072 bytes) of one repeat,
+    /// then the repeat count as u16 LE. Computed from the job's bytes, never from the plan.
+    pub bytes_hash: Fingerprint,
     pub machine: MachineId,
     pub rows: Vec<PassRow>,
     pub notices: Vec<Notice>,
     pub repeats: u16,
+    #[serde(rename = "estimateS", with = "crate::serde_secs")]
     pub estimate: Duration,   // all repeats
+    #[serde(rename = "crashBoundS", with = "crate::serde_secs")]
     pub crash_bound: Duration,// emission that can still happen after a host crash (run-ahead bound, PLAN §3.5)
     pub packets: u32,
     pub work_area: Bounds,
@@ -548,7 +631,9 @@ pub enum FrameMode { Once, Loop }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)] #[serde(rename_all = "snake_case")]
 pub enum FrameOrigin { Human, Agent } // Agent is reserved; nothing in this build creates it
 pub const FRAME_RECEIPT_MAX_AGE: Duration = Duration::from_secs(600);
-/// Issued by the driver after each fully acknowledged frame pass.
+/// Issued by the driver only after the board has EXECUTED the pass (S20): a status read shows !BUSY after the list
+/// that carried it. Acknowledged-but-queued packets never count. `fingerprint` is the plan fingerprint (S21, style
+/// and source excluded); `style` and `source` record what was traced.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrameReceipt {
@@ -566,15 +651,18 @@ impl FrameReceipt { pub fn covers_job(&self) -> bool; } // source != ToolLayersO
 // ---- arm.rs (WP3, red zone) -----------------------------------------------------------------------------
 pub const ARM_TOKEN_TTL: Duration = Duration::from_secs(60);
 /// The only key to emission. (no Clone) Private fields. Consumed by value by `DriverHandle::run`.
-pub struct ArmToken { fingerprint: Fingerprint, machine: MachineId, session: SessionId, expires: MonoTime, nonce: u64 }
+/// `bytes` = `EmissionSummary.bytes_hash` of the summary the human confirmed (S22). `nonce` is a fresh 64-bit
+/// getrandom value for single use, independent of the 6-digit TTY challenge.
+pub struct ArmToken { fingerprint: Fingerprint, bytes: Fingerprint, machine: MachineId, session: SessionId, expires: MonoTime, nonce: u64 }
 impl ArmToken {
     /// clippy `disallowed-methods` everywhere except crates/arm/src/mint.rs.
     #[doc(hidden)]
-    pub fn issue(fingerprint: Fingerprint, machine: MachineId, session: SessionId, expires: MonoTime, nonce: u64) -> Self;
-    /// Refusals: Stale (fingerprint), MachineMismatch, ArmSessionMismatch, ArmExpired.
-    pub fn check(&self, fp: &Fingerprint, machine: &MachineId, session: SessionId, now: MonoTime) -> Result<(), Refusal>;
+    pub fn issue(fingerprint: Fingerprint, bytes: Fingerprint, machine: MachineId, session: SessionId, expires: MonoTime, nonce: u64) -> Self;
+    /// Refusals: Stale (fingerprint), BytesMismatch, MachineMismatch, ArmSessionMismatch, ArmExpired.
+    pub fn check(&self, fp: &Fingerprint, bytes: &Fingerprint, machine: &MachineId, session: SessionId, now: MonoTime) -> Result<(), Refusal>;
     pub fn nonce(&self) -> u64;
     pub fn fingerprint(&self) -> &Fingerprint;
+    pub fn bytes(&self) -> &Fingerprint;
     pub fn machine(&self) -> &MachineId;
 }
 // impl Debug for ArmToken: fingerprint short + expiry only, never the nonce.
@@ -590,6 +678,8 @@ pub enum EncodeError {
     NonFinite { what: &'static str },
     #[error("{what} = {value} does not fit a 16-bit word")]
     OutOfRange { what: &'static str, value: f64 },
+    #[error("not implemented: {0}")]
+    NotImplemented(&'static str), // build-only (§3.0); removed at I3
 }
 /// `(32768.0 + v * (65535.0 / f)).round_ties_even()`, then `u16::try_from`. Never clamps: +F/2 gives 65536 → Err.
 pub fn mm_to_galvo(v_mm: f64, field_mm: f64) -> Result<u16, EncodeError>;
@@ -779,8 +869,7 @@ pub enum ImageMode { Threshold, Jarvis } // P0 subset (S16); others P1
 pub struct Workspace { pub kind: DeviceKind, pub size_mm: [f64; 2], pub origin: WorkspaceOrigin }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "snake_case")]
 pub enum WorkspaceOrigin { Center, BottomLeft, TopLeft }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)] #[serde(rename_all = "snake_case")]
-pub enum DeviceKind { GalvoLmc, Grbl }
+pub use openlaser_types::DeviceKind; // defined in types (§3.1) so driver can name it without a doc edge
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
 pub struct DeviceHint { pub kind: DeviceKind, pub profile: MachineId }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
@@ -834,7 +923,10 @@ pub struct GalvoMachine {
     pub max_speed: MmPerS,           // 6000; above it is refused
     pub mo_settle: Us,               // 8000 µs → DelayTime(800)
     pub ports: PortMap,              // laser bit 0 (0x0001), red light bit 8 (0x0100)
-    pub run_ahead: RunAhead,         // ≤ 3 packets and ≤ 2 s estimated emission, never < 1 packet
+    pub run_ahead: RunAhead,         // ≤ 3 packets and ≤ 2 s estimated emission, never < 1 packet; watchdog factors
+    pub transfer_timeout_ms: u32,    // 250: total budget of one USB transfer (sliced ≤ 20 ms); then Fault + stop (H13)
+    pub usb_set_configuration: bool, // false until H12: if the device is unconfigured, refuse (UsbNotConfigured)
+                                     // instead of calling set_configuration(1); Luiz flips it at a TTY if H12 says so
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
 pub struct LmcBoardFilter { pub vid: u16, pub pid: u16, pub serial: Option<String> }
@@ -863,7 +955,12 @@ pub struct FirstJump { pub delay_us: f64, pub settle_10us: u16 } // 200 µs, 100
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
 pub struct PortMap { pub laser_bit: u8, pub red_bit: u8 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
-pub struct RunAhead { pub max_packets: u8, pub max_emission_s: f64 }
+pub struct RunAhead {
+    pub max_packets: u8,       // 3
+    pub max_emission_s: f64,   // 2.0
+    pub watchdog_factor: f64,  // 1.5 (OM v1 5f7aa63); refined after H1/H9
+    pub watchdog_slack_s: f64, // 2.0
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(rename_all = "camelCase")]
 pub struct GantryMachine {
@@ -886,7 +983,18 @@ impl GalvoMachine {
 pub fn jpt_m7_200() -> MachineProfile;      // id "jpt-m7-200": OM profile + calibration 1.1834, link Usb
 pub fn jpt_m7_200_sim() -> MachineProfile;  // id "jpt-m7-200-sim": identical, link Sim (default in non-hw builds)
 pub fn om_gantries() -> Vec<MachineProfile>;// co2-grbl-600x400, diode-grbl-400x400, plotter-grbl-a4 (OM machines.py, T2)
+/// Collects every problem. Galvo: scale in 0.5..=2.0; work_area ⊆ h27_cleared, or ⊆ ±encoding_field/2 when
+/// h27_cleared is None (the rated field); effective_work_area non-empty; freq range within 1..=4000 kHz and lo < hi;
+/// pulse table non-empty and ascending; max_power_pct in (0, 100]; run_ahead.max_packets ≥ 1, max_emission_s > 0,
+/// watchdog_factor ≥ 1; transfer_timeout_ms in 20..=2000; checklist non-empty (mint needs ≥ 1 tick, §3.9).
+/// Gantry: bed and speeds positive, s_max ≥ 1. Every save and every load runs it; a failing profile is not used.
 pub fn validate_profile(p: &MachineProfile) -> Result<(), Vec<String>>;
+
+/// S24. Writes are human-only by construction: only the GUI and openlaser-hw construct an implementation.
+pub trait ProfileStore: Send + Sync {
+    fn save(&self, p: &MachineProfile) -> Result<(), String>;   // validate_profile first; atomic
+    fn delete(&self, id: &MachineId) -> Result<(), String>;
+}
 
 pub mod markcfg {
     pub struct MarkCfg { pub values: BTreeMap<String, String> }
@@ -921,6 +1029,17 @@ pub fn save(project: &Project) -> Result<Vec<u8>, Error>;
 pub fn load(bytes: &[u8]) -> Result<Project, Error>;
 pub fn save_to(path: &Path, project: &Project) -> Result<(), Error>; // craft-atomic
 pub fn load_from(path: &Path) -> Result<Project, Error>;
+
+/// Machine profile files (S24): `<craft_settings::data_dir("OpenLaser")>/machines/<id>.json`.
+pub mod machines {
+    pub fn profiles_dir() -> Option<PathBuf>;
+    /// Built-ins (`jpt_m7_200`, `jpt_m7_200_sim`, `om_gantries`) shadowed by saved files with the same id. A file
+    /// that fails to parse or fails `validate_profile` is skipped with a message (never half-applied).
+    pub fn load_all(dir: Option<&Path>) -> (Vec<MachineProfile>, Vec<String>);
+    pub struct DirProfileStore { /* dir */ }
+    impl DirProfileStore { pub fn new(dir: PathBuf) -> Self; }
+    impl ProfileStore for DirProfileStore {} // craft-atomic; ids restricted to [a-z0-9-]{1,64}
+}
 ```
 
 ### 3.6 `openlaser-import` (WP2)
@@ -1002,9 +1121,11 @@ pub struct JobPlan {
     pub facts: PlanFacts,           // what safety must judge; the planner never drops anything silently
     pub repeats: u16,
     pub estimate: Duration,         // all repeats
-    pub fingerprint: Fingerprint,   // blake3 over the canonical encoding of machine, device, sections (layer, pass,
-                                    // quantised words, path f64 bit patterns), frame, tool_frame, repeats, the
-                                    // machine's calibration and transform, frame style/source
+    pub fingerprint: Fingerprint,   // S21: blake3 over the canonical encoding of machine, device, sections (layer,
+                                    // pass, quantised words, path f64 bit patterns), repeats, the machine's
+                                    // calibration, transform, red-dot calibration and first-jump/timing settings.
+                                    // NOT frame, tool_frame, frame style or source: those are framing choices, and
+                                    // the receipt records them (covers_job decides)
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct Section {
@@ -1084,7 +1205,9 @@ impl FramePlan { pub fn paths(&self) -> &[Polyline]; pub fn fingerprint(&self) -
 /// Pure; runs live in the UI, again before ARM, and inside the engine before every encode. Collects ALL refusals.
 pub fn validate(plan: &JobPlan, machine: &MachineProfile) -> Result<Validated, Refused>;
 /// Framing a job that cannot burn (e.g. tool layers only, or to look at placement while a power refusal is open)
-/// needs only the geometry rules. A receipt from it never covers a refused job (the fingerprint differs).
+/// needs only the geometry rules. Its receipt carries the plan fingerprint, but a refused job never yields an
+/// `EmissionSummary`, so nothing can be minted from it; fixing the refusal edits the document and changes the
+/// fingerprint, so the job must be framed again.
 pub fn validate_frame(plan: &JobPlan, machine: &MachineProfile, source: FrameSource) -> Result<FramePlan, Refused>;
 /// The rule table, for docs and the `rules_table_complete` test.
 pub fn rules() -> &'static [(RefusalCode, &'static str)];
@@ -1092,8 +1215,8 @@ pub fn rules() -> &'static [(RefusalCode, &'static str)];
 #[cfg(feature = "unchecked-for-tests")] // dev-dependency only; compile_error! without debug_assertions
 pub mod testing {
     pub fn emit_plan_unchecked(sections: Vec<Section>, fp: Fingerprint, machine: MachineId, device: DeviceKind, repeats: u16) -> EmitPlan;
-    pub fn frame_plan_unchecked(paths: Vec<Polyline>, fp: Fingerprint, machine: MachineId) -> FramePlan;
-}
+    pub fn frame_plan_unchecked(paths: Vec<Polyline>, fp: Fingerprint, machine: MachineId, style: FrameStyle, source: FrameSource) -> FramePlan;
+} // implemented in full by WP0 (§3.0); referenced only from tests (§2.3 rule 14)
 ```
 
 **Rules `validate` enforces** (each is a test named `safety_<code>`; PLAN §3.6 layer 1, GOLD divergences):
@@ -1131,17 +1254,24 @@ impl HumanConfirm {
     pub fn from_gui_gesture(w: GuiGestureWitness, typed: &str, ticked: Vec<bool>, at: MonoTime) -> Self; // only crates/human/src/gesture.rs
     pub fn from_tty(w: TtyWitness, typed: &str, nonce: u64, at: MonoTime) -> Self;                       // only apps/openlaser-hw/src/tty_arm.rs
 }
-/// Mints a single-use token valid 60 s. Refuses unless ALL hold:
+/// Mints a single-use token valid 60 s whose `bytes` = `summary.bytes_hash` (S22). Refuses unless ALL hold:
 /// summary.fingerprint == receipt.fingerprint (Stale); receipt.machine == summary.machine (MachineMismatch);
 /// receipt.session == session (ArmSessionMismatch); receipt.full_passes >= 1 and age <= 10 min
 /// (FrameRequired / FrameReceiptExpired); receipt.origin == Human (FrameNotHuman); receipt.covers_job()
 /// (FrameDoesNotCoverJob); typed text == "ARM" (GUI, trimmed, case-insensitive) or "ARM <nonce>" (TTY)
-/// (ArmTextMismatch); ticked.len() == checklist_len and all true (ChecklistIncomplete).
+/// (ArmTextMismatch). GuiGesture: checklist_len >= 1, ticked.len() == checklist_len and all true
+/// (ChecklistIncomplete; an empty checklist is refused, never vacuously true). Tty: the caller printed the checklist
+/// before the challenge, and the typed `ARM <nonce>` line is the acknowledgement; `ticked` is ignored. The token's
+/// nonce is a fresh getrandom u64, not the TTY challenge.
 pub fn mint(summary: &EmissionSummary, receipt: &FrameReceipt, confirm: HumanConfirm, checklist_len: usize, session: SessionId, now: MonoTime) -> Result<ArmToken, Refusal>;
-pub fn tty_nonce() -> Result<u64, Refusal>; // getrandom; 6 decimal digits shown to the operator
+pub fn tty_nonce() -> Result<u64, Refusal>; // getrandom; 6 decimal digits shown to the operator (the challenge only)
 
 #[cfg(feature = "test-witness")] // dev-dependency only; compile_error! without debug_assertions
-pub mod testing { pub fn confirm_for_tests(typed: &str, ticked: Vec<bool>, at: MonoTime) -> HumanConfirm; }
+pub mod testing { // implemented in full by WP0, in crates/arm/src/mint.rs (§3.0); referenced only from tests
+    pub fn confirm_for_tests(typed: &str, ticked: Vec<bool>, at: MonoTime) -> HumanConfirm;
+    /// Lets driver/engine tests (WP5, WP6) run before WP3's `mint` lands.
+    pub fn token_for_tests(fingerprint: Fingerprint, bytes: Fingerprint, machine: MachineId, session: SessionId, expires: MonoTime, nonce: u64) -> ArmToken;
+}
 ```
 
 ### 3.10 `openlaser-render` (WP2)
@@ -1177,11 +1307,17 @@ pub fn render_png(list: &DisplayList, view: &RenderView) -> Result<Vec<u8>, Erro
 ```rust
 #[derive(Debug, Clone, PartialEq)]
 pub struct GcodeProgram { pub text: String, pub lines: u32, pub fingerprint: Fingerprint, pub machine: MachineId, pub distance_mm: f64, pub estimate: Duration }
+impl GcodeProgram { pub fn bytes_hash(&self) -> Fingerprint; } // blake3 of `text` (S22)
+/// (sealed) A laser-off frame program: built only by `frame_program`, so GRBL's `Backend::Frame` cannot be handed a
+/// burning program (the LMC side gets the same guarantee from `LightingList`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GcodeFrame { program: GcodeProgram }
+impl GcodeFrame { pub fn program(&self) -> &GcodeProgram; }
 #[derive(Debug, Clone, PartialEq)] pub struct Header { pub machine_name: String, pub generated: String } // tests pass "<MASKED>"
 /// Shipping encoder (B11: only the gantry block is read). Overspeed never reaches here: safety refuses it.
 pub fn compile(emit: &EmitPlan, m: &GantryMachine, h: &Header) -> Result<GcodeProgram, Error>;
-/// Laser-off frame around the job (G0 only, no M3/M4).
-pub fn frame_program(frame: &FramePlan, m: &GantryMachine, h: &Header) -> Result<GcodeProgram, Error>;
+/// Laser-off frame around the job (G0 only, no M3/M4/S>0; a test greps the text).
+pub fn frame_program(frame: &FramePlan, m: &GantryMachine, h: &Header) -> Result<GcodeFrame, Error>;
 /// OM `_number`: format!("{:.3}") then trim zeros and dot; "-0" → "0". T2 number_format (100,019 rows).
 pub fn number(v: f64) -> String;
 pub mod om {
@@ -1213,7 +1349,9 @@ pub fn status_from_reply(reply: [u16; 4]) -> StatusWord; // word 3; unknown bits
 pub fn init_sequence() -> Vec<Single>;
 
 /// A burn, ready for the driver. One list per layer-pass (PLAN §3.3), each list packetised into 3072-byte packets
-/// padded with 0x8002.
+/// padded with 0x8002. Every byte is fixed at encode time: nothing in a packet depends on session state (the first
+/// JumpTo's `dist` of every list is computed from (0x8000, 0x8000), §5.2 rule 6), so the bytes the summary was
+/// decoded from are the bytes sent, and `bytes_hash` is stable.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LmcJob {
     pub prelude: Vec<Single>,     // sent before EACH list: ResetList, WritePort(0x0001), Fiber_SetMo(1), GetVersion
@@ -1223,12 +1361,15 @@ pub struct LmcJob {
     pub fingerprint: Fingerprint,
     pub machine: MachineId,
 }
+impl LmcJob { pub fn bytes_hash(&self) -> Fingerprint; } // S22: the EmissionSummary.bytes_hash definition
 #[derive(Debug, Clone, PartialEq)]
 pub struct LmcList { pub layer: LayerKey, pub pass: u16, pub packets: Vec<Packet>, pub packet_est: Vec<Duration> }
-/// A red-light frame. `once`: the OM Frame Once pass count baked in (≥ 2 s of tracing); `pass`: exactly one
-/// pass, which the driver resubmits for Loop. Neither can contain MarkTo, LaserOnPoint or MO open (type-level).
+/// A red-light frame. `once`: ONE list with the OM Frame Once pass count baked in (≥ 2 s of tracing); `pass`: ONE
+/// complete list (ReadyMark … EndOfList) holding exactly one pass, which the driver submits as a fresh list per Loop
+/// pass (S20). Neither can contain MarkTo, LaserOnPoint or MO open (type-level). `once_passes` is the baked count
+/// the receipt reports.
 #[derive(Debug, Clone, PartialEq)]
-pub struct LmcFrameJob { pub once: Vec<Packet>, pub pass: Vec<Packet>, pub pass_est: Duration, pub fingerprint: Fingerprint, pub machine: MachineId, pub style: FrameStyle, pub source: FrameSource }
+pub struct LmcFrameJob { pub once: Vec<Packet>, pub once_passes: u32, pub once_est: Duration, pub pass: Vec<Packet>, pub pass_est: Duration, pub fingerprint: Fingerprint, pub machine: MachineId, pub style: FrameStyle, pub source: FrameSource }
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -1275,6 +1416,7 @@ pub enum XferError {
     #[error("endpoint stalled")] Stall,
     #[error("hardware access is disabled in this build or environment")] HardwareDisabled,
     #[error("usb: {0}")] Io(String),
+    #[error("not implemented: {0}")] NotImplemented(&'static str), // build-only (§3.0)
 }
 
 #[cfg(feature = "py-compat")] // dev-dependency only (self dev-dep); compile_error! without debug_assertions
@@ -1293,9 +1435,12 @@ pub mod py_compat {
 ### 3.13 `openlaser-driver` (WP5, red zone)
 
 ```rust
-/// Tripped by anyone, from any thread or signal handler; read by the driver between every transfer.
-pub struct StopLatch { /* AtomicBool tripped; AtomicU64 tripped_at_ns; wake: crossbeam Sender<()> */ }
-impl StopLatch { pub fn trip(&self); pub fn is_tripped(&self) -> bool; pub fn signal_flag(&self) -> Arc<AtomicBool>; }
+/// Tripped by anyone, from any thread; read by the driver between every transfer. Signal handlers never call
+/// `trip()` (a channel send is not async-signal-safe): they only store `true` into `signal_flag()` (signal-hook's
+/// `flag::register`), which `is_tripped()` also reads, and the app's watcher thread then calls `trip()`.
+/// `generation()` counts trips; every queued command records it at submission (§5.3 "queued-then-stopped").
+pub struct StopLatch { /* AtomicBool tripped; Arc<AtomicBool> signal; AtomicU64 generation; AtomicU64 tripped_at_ns; wake: crossbeam Sender<()> */ }
+impl StopLatch { pub fn trip(&self); pub fn is_tripped(&self) -> bool; pub fn generation(&self) -> u64; pub fn signal_flag(&self) -> Arc<AtomicBool>; }
 /// Cheap, cloneable, Send + Sync handle for the control server's fast path, Esc, signals and the CLI key thread.
 #[derive(Clone)]
 pub struct Stopper { /* Arc<StopLatch>, Arc<StopMailbox> */ }
@@ -1306,7 +1451,7 @@ impl Stopper {
 #[derive(Debug, Clone, PartialEq, Serialize)] #[serde(rename_all = "camelCase")]
 pub struct StopAck { pub latched: bool, pub report: Option<StopReport>, pub elapsed_ms: u64 }
 #[derive(Debug, Clone, PartialEq, Serialize)] #[serde(rename_all = "camelCase")]
-pub struct StopReport { pub confirmed: bool, pub elapsed: Duration, pub possible_desync: bool, pub mo_closed: bool, pub ports_zero: bool, pub notes: Vec<String> }
+pub struct StopReport { pub confirmed: bool, #[serde(rename = "elapsedMs", with = "openlaser_types::serde_ms")] pub elapsed: Duration, pub possible_desync: bool, pub mo_closed: bool, pub ports_zero: bool, pub notes: Vec<String> }
 
 /// What the driver thread gets each call: stop checks, events and the clock.
 pub struct Cx<'a> { /* latch, events, clock */ }
@@ -1314,11 +1459,19 @@ impl Cx<'_> {
     pub fn check(&self) -> Result<(), Stopped>;     // Err as soon as the latch is tripped
     pub fn slice(&self, d: Duration) -> Result<(), Stopped>; // sleep ≤ min(d, 20 ms), then check
     pub fn now(&self) -> MonoTime;
+    /// Never blocks: events go through an UNBOUNDED crossbeam channel, so a UI that stops polling (window hidden,
+    /// UI thread stalled) can never stall the driver thread or its stop checks. Trace lines beyond 100 000 per
+    /// operation are dropped and counted (`TraceLine` "N trace lines dropped").
     pub fn emit(&self, ev: DriverEvent);
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub struct Stopped;
 
-pub trait EncodedJob: Send + 'static { fn fingerprint(&self) -> &Fingerprint; fn machine(&self) -> &MachineId; fn emits(&self) -> bool; }
+pub trait EncodedJob: Send + 'static {
+    fn fingerprint(&self) -> &Fingerprint;
+    fn machine(&self) -> &MachineId;
+    fn emits(&self) -> bool;
+    fn bytes_hash(&self) -> Fingerprint; // S22; recomputed by the runtime from the object it was handed
+}
 #[derive(Debug, Clone, PartialEq, Serialize)] #[serde(rename_all = "camelCase")]
 pub struct Capabilities { pub kind: DeviceKind, pub frame: bool, pub run: bool, pub pause: bool, pub jog: bool, pub home: bool, pub inputs: bool }
 pub trait Backend: Send + 'static {
@@ -1326,7 +1479,9 @@ pub trait Backend: Send + 'static {
     type Frame: EncodedJob;
     fn capabilities(&self) -> Capabilities;
     fn connect(&mut self, cx: &mut Cx) -> Result<DeviceInfo, DriverError>;
-    /// Emits FrameCompleted(receipt) after each fully acknowledged pass; Once ends after its passes, Loop on stop.
+    /// S20: emits FrameCompleted(receipt) only after the board has EXECUTED the traced list (status !BUSY after it).
+    /// Once: one list, one receipt with `full_passes = once_passes`. Loop: one list per pass, a receipt after each
+    /// (`full_passes` counts executed passes), until stopped. A stop before !BUSY gives no receipt for that list.
     fn frame(&mut self, f: &Self::Frame, mode: FrameMode, origin: FrameOrigin, session: SessionId, cx: &mut Cx) -> Result<FrameOutcome, DriverError>;
     /// The runtime has already checked the token, the nonce and its own receipt record.
     fn run(&mut self, job: &Self::Job, cx: &mut Cx) -> Result<Outcome, DriverError>;
@@ -1338,10 +1493,17 @@ pub trait Backend: Send + 'static {
 pub fn spawn<B: Backend>(backend: B, machine: MachineId, session: SessionId, clock: Arc<dyn Clock>) -> DriverHandle<B>;
 pub struct DriverHandle<B: Backend> { /* ctl: Sender<Control<B>>, stopper: Stopper, events: Receiver<DriverEvent>, caps */ }
 impl<B: Backend> DriverHandle<B> {
+    /// Every command records `latch.generation()` when queued; the driver thread refuses to start it
+    /// (`Refused(StoppedAfterQueue)`) if a trip happened after that, and only then clears the latch for it. A stop
+    /// pressed between "Confirm" and the driver dequeuing the run therefore cancels the run instead of being cleared.
     pub fn connect(&self);
+    /// Refused with `MachineBusy` by the driver thread itself while another frame or run is active (defence in
+    /// depth behind the engine's pipeline step 7).
     pub fn frame(&self, f: B::Frame, mode: FrameMode, origin: FrameOrigin);
-    /// Queues the job. The driver thread re-checks: token.check(fp, machine, session, now); nonce unused (then
-    /// spent); its OWN last FrameReceipt has the same fingerprint, ≥ 1 full pass, ≤ 10 min, origin Human, covers job.
+    /// Queues the job. The driver thread re-checks: `token.check(job.fingerprint(), &job.bytes_hash(), machine,
+    /// session, now)` with the hash RECOMPUTED from the job object (S22); nonce unused (then spent); its OWN last
+    /// FrameReceipt has the same fingerprint, ≥ 1 full (executed) pass, ≤ 10 min, origin Human, covers job; no
+    /// frame or run active (`MachineBusy`).
     pub fn run(&self, job: B::Job, token: ArmToken);
     pub fn stop(&self);
     pub fn stopper(&self) -> Stopper;
@@ -1349,7 +1511,10 @@ impl<B: Backend> DriverHandle<B> {
     pub fn capabilities(&self) -> &Capabilities;
     pub fn disconnect(&self);
 }
-// Drop of the last DriverHandle = dead-man: the thread runs emergency_stop and exits.
+// Drop of the last DriverHandle = dead-man: it trips the latch, then JOINS the driver thread for ≤ 500 ms so the
+// abort reaches the wire before a panicking or exiting UI thread can end the process (process exit kills other
+// threads mid-sequence). Apps also install a panic hook and signal watchers that stop every machine first (§5.4),
+// because on macOS `eframe::run_native` may exit the process without running destructors.
 
 #[derive(Debug, Clone, PartialEq, Serialize)] #[serde(rename_all = "snake_case", tag = "state")]
 pub enum MachineState { Disconnected, Connecting, Idle, Framing, Running { packets_acked: u32, total: u32 }, Stopping, Stopped, Fault, StopNotConfirmed }
@@ -1382,7 +1547,8 @@ pub struct TraceLine { pub at: MonoTime, pub out: bool, pub text: String } // di
 pub struct LmcBackend<T: LmcTransport> { /* transport, machine: GalvoMachine, assumed position, used nonces… */ }
 impl<T: LmcTransport> LmcBackend<T> { pub fn new(transport: T, machine: GalvoMachine) -> Self; }
 impl<T: LmcTransport + 'static> Backend for LmcBackend<T> { type Job = LmcJob; type Frame = LmcFrameJob; /* … */ }
-impl EncodedJob for LmcJob {} impl EncodedJob for LmcFrameJob {} // emits(): true / false
+impl EncodedJob for LmcJob { /* emits() = true; bytes_hash() = LmcJob::bytes_hash */ }
+impl EncodedJob for LmcFrameJob { /* emits() = false */ }
 
 /// GRBL streaming (§5.7). Tested on FakeGrbl only in this build.
 pub trait ByteLink: Send {
@@ -1390,16 +1556,30 @@ pub trait ByteLink: Send {
     fn write_realtime(&mut self, byte: u8) -> Result<(), LinkError>;      // ! ~ ? 0x18 0x85: bypass the queue
     fn read_available(&mut self, buf: &mut Vec<u8>, slice: Duration) -> Result<usize, LinkError>;
 }
-#[derive(Debug, Clone, PartialEq, thiserror::Error)] pub enum LinkError { #[error("timeout")] Timeout, #[error("closed")] Closed, #[error("io: {0}")] Io(String), #[error("hardware access is disabled")] HardwareDisabled }
+#[derive(Debug, Clone, PartialEq, thiserror::Error)] pub enum LinkError { #[error("timeout")] Timeout, #[error("closed")] Closed, #[error("io: {0}")] Io(String), #[error("hardware access is disabled")] HardwareDisabled, #[error("not implemented: {0}")] NotImplemented(&'static str) }
 pub struct GrblBackend<L: ByteLink> { /* … */ }
 impl<L: ByteLink> GrblBackend<L> { pub fn new(link: L, machine: GantryMachine) -> Self; }
-impl<L: ByteLink + 'static> Backend for GrblBackend<L> { type Job = GcodeProgram; type Frame = GcodeProgram; /* frame program: laser off */ }
+/// `Frame = GcodeFrame` (sealed, built only by `gcode::frame_program`), so a burning program cannot be framed.
+impl<L: ByteLink + 'static> Backend for GrblBackend<L> { type Job = GcodeProgram; type Frame = GcodeFrame; /* … */ }
+impl EncodedJob for GcodeProgram { /* emits() = true */ }
+impl EncodedJob for GcodeFrame { /* emits() = false */ }
 
+/// What `detect` reports (transport maps its `DetectedBoard` into this).
+#[derive(Debug, Clone, PartialEq, Serialize)] #[serde(rename_all = "camelCase")]
+pub struct DetectedDevice { pub vid: u16, pub pid: u16, pub serial: Option<String>, pub location: String, pub supported: bool, pub note: String }
 /// Injected by the apps; the engine never names a concrete transport.
 pub trait DeviceProvider: Send + Sync {
     fn name(&self) -> &'static str; // "sim", "usb"
+    /// Read-only enumeration for `device.detect` (Find My Laser). Never opens a device.
+    fn detect(&self) -> Result<Vec<DetectedDevice>, DriverError>;
     fn open_lmc(&self, m: &GalvoMachine) -> Result<Box<dyn LmcTransport>, DriverError>;
     fn open_link(&self, m: &GantryMachine) -> Result<Box<dyn ByteLink>, DriverError>;
+    /// S23 first-emission cap, consulted by `Session::run_armed` and the ARM dialog (the engine cannot link
+    /// `transport`). UsbProvider: `bench::emission_cap_pct`; SimProvider: `SimConfig.emission_cap_pct` (None by
+    /// default; tests set it).
+    fn emission_cap_pct(&self) -> Result<Option<f64>, DriverError>;
+    /// After a run finishes (not after a stop or fault). UsbProvider: `bench::record_emission`.
+    fn record_emission(&self) -> Result<(), DriverError>;
 }
 impl<L: ByteLink + ?Sized> ByteLink for Box<L> { /* forwards */ }
 pub enum AnyDriver { Lmc(DriverHandle<LmcBackend<Box<dyn LmcTransport>>>), Grbl(DriverHandle<GrblBackend<Box<dyn ByteLink>>>) }
@@ -1415,6 +1595,7 @@ pub struct SimConfig {
     pub status_extra_bits: u16,    // e.g. 0x0200 (an idle 0x0220 board)
     pub pid: u16,                  // 0x9899; 0x9980 = clone board (refused by detect/open)
     pub faults: Vec<Fault>,
+    pub emission_cap_pct: Option<f64>, // S23 stand-in for tests of the bench cap; None by default
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum Fault {
@@ -1427,8 +1608,13 @@ pub enum Fault {
 /// `lmc::decode_packet`, so it is a second opinion on the encoder).
 pub struct FakeLmc { /* … */ }
 impl FakeLmc {
-    pub fn new(cfg: SimConfig, clock: Arc<VirtualClock>) -> Self;
+    /// `Arc<dyn Clock>`: `VirtualClock` in T6, `SystemClock` behind `SimProvider` (the GUI's Simulator machine).
+    pub fn new(cfg: SimConfig, clock: Arc<dyn Clock>) -> Self;
     pub fn recorder(&self) -> Arc<Recorder>; // shared; readable while the driver owns the FakeLmc
+    /// Called on the driver thread for every wire event, before the board model reacts. T6 uses it to trip a
+    /// `Stopper` at an exact wire event or virtual tick, so "stop at a random tick" is seeded and deterministic
+    /// (a stop from another thread would land at a scheduler-dependent virtual time).
+    pub fn set_hook(&self, hook: Box<dyn FnMut(&SimWire, MonoTime) + Send>);
 }
 impl LmcTransport for FakeLmc {}
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -1452,7 +1638,7 @@ pub mod grbl {
     /// Rust port of openlaser-rust-plan/rayforge-test/fake_grbl.py: GRBL 1.1 banner, $$, $I, $G, $#, $H, $X, $J=,
     /// 15-block planner, 128-byte RX buffer, realtime ? ! ~ 0x18 0x85, alarms, status reports, motion time scaled.
     pub struct FakeGrbl { /* … */ }
-    impl FakeGrbl { pub fn new(clock: Arc<VirtualClock>) -> Self; pub fn log(&self) -> Vec<String>; }
+    impl FakeGrbl { pub fn new(clock: Arc<dyn Clock>) -> Self; pub fn log(&self) -> Vec<String>; }
     impl ByteLink for FakeGrbl {}
 }
 ```
@@ -1460,28 +1646,37 @@ pub mod grbl {
 ### 3.15 `openlaser-transport` (WP5; compiled, never run by agents)
 
 ```rust
-pub const ENV_NO_HW: &str = "OPENLASER_NO_HW"; // set → every open/detect returns HardwareDisabled
-/// The real-device provider. open_lmc requires, in order: OPENLASER_NO_HW unset; a valid bench session (S17);
-/// the board lock; vid/pid match (0x9980 → CloneBoard refusal, never firmware); then claims interface 0,
-/// bulk OUT 0x02, bulk IN 0x88. Holds a `keepawake` assertion for the session (§2.6).
+pub const ENV_NO_HW: &str = "OPENLASER_NO_HW";           // set → every open/detect returns HardwareDisabled
+pub const ENV_HW_PRESENT: &str = "OPENLASER_HW_PRESENT"; // must equal "1", else HardwareDisabled (S23, default deny)
+/// The real-device provider. open_lmc requires, in order: OPENLASER_NO_HW unset and OPENLASER_HW_PRESENT=1; a valid
+/// bench session (S17); the board lock; vid/pid match (0x9980 → CloneBoard refusal, never firmware); the device
+/// configured (macOS `claim_interface` cannot find interface 0 on an unconfigured device: call
+/// `set_configuration(1)` only if the profile's `usb_set_configuration` is true, else refuse `UsbNotConfigured`);
+/// then claims interface 0, bulk OUT 0x02, bulk IN 0x88. Holds a `keepawake` assertion for the session (§2.6).
 pub struct UsbProvider { /* … */ }
 impl UsbProvider { pub fn new() -> Self; }
-impl DeviceProvider for UsbProvider {}
-/// nusb 0.2.8. Writes are exactly 12 or 3072 bytes; reads 8 bytes; ≤ 20 ms slices; NO reset, NO retry: every
-/// error is mapped to XferError and surfaces as a sticky fault.
+impl DeviceProvider for UsbProvider {} // detect() also needs OPENLASER_NO_HW unset and OPENLASER_HW_PRESENT=1
+/// nusb 0.2.8. Writes are exactly 12 or 3072 bytes; reads 8 bytes; `submit` + `wait_next_complete(≤ 20 ms)` slices;
+/// each transfer has a total budget of `transfer_timeout_ms` (250), after which it is `XferError::Timeout`. NO
+/// reset, NO retry, NO `transfer_blocking` (§2.3 rule 15): every error is mapped to XferError and surfaces as a sticky
+/// fault plus an emergency stop.
 pub struct UsbLmc { /* … */ }
 impl LmcTransport for UsbLmc {}
 /// Read-only enumeration (descriptors only; never opens a device).
 pub fn detect() -> Result<Vec<DetectedBoard>, XferError>;
 #[derive(Debug, Clone, PartialEq, Serialize)] #[serde(rename_all = "camelCase")]
 pub struct DetectedBoard { pub vid: u16, pub pid: u16, pub serial: Option<String>, pub location: String, pub supported: bool, pub note: String }
-/// `~/Library/Application Support/OpenLaser/board.lock`, shared with the prototype (OM patch 12); File::try_lock.
+/// `<data_dir>/OpenLaser/board.lock` (§2.6 paths), shared with the prototype (OM v1 patch 12, `flock`); File::try_lock.
 pub struct BoardLock { /* File */ }
 impl BoardLock { pub fn acquire() -> Result<Self, Refusal>; }
 pub mod bench {
-    /// `~/Library/Application Support/OpenLaser/bench-session.json` {created, tty, pid}; valid ≤ 2 h.
+    /// `<data_dir>/OpenLaser/bench-session.json` {createdUnix, pid, emissions}; valid ≤ 2 h (wall clock; the file
+    /// crosses processes). No tty name is stored: reading it needs `ttyname(3)` (unsafe); `IsTerminal` is enough.
     pub fn valid() -> Result<(), Refusal>;
     pub fn start_from_tty() -> Result<(), Refusal>; // only openlaser-hw calls it; stdin and stdout must be TTYs
+    /// S23: `Some(10.0)` until one emission has completed in this bench session, then `None`.
+    pub fn emission_cap_pct() -> Result<Option<f64>, Refusal>;
+    pub fn record_emission() -> Result<(), Refusal>; // after a run finishes (not after a stop or fault)
 }
 pub struct SerialLink { /* serialport */ } impl ByteLink for SerialLink {}
 pub struct TcpLink { /* std::net */ } impl ByteLink for TcpLink {}
@@ -1571,10 +1766,13 @@ pub trait FileAccess: Send + Sync {                   // automation adapts contr
 pub enum FsAuthority { Denied, Scoped(Box<dyn FileAccess>), TrustedLocal }
 pub enum DeviceAccess { None, Provider(Arc<dyn DeviceProvider>) }
 pub struct SessionConfig {
-    pub origin: Origin,                 // default origin of execute(): Human (GUI), Headless (CLI/MCP)
+    pub origin: Origin,                 // default origin of execute(): Human (GUI, openlaser-hw), Headless (CLI/MCP)
     pub window: bool,                   // a GUI hosts this session (bridge requests possible)
     pub devices: DeviceAccess,          // None in openlaser-cli; Sim (+ Usb with `hw`) in the GUI and openlaser-hw
-    pub machines: Vec<MachineProfile>,  // built-ins + the user's profiles
+    pub machines: Vec<MachineProfile>,  // format::machines::load_all (built-ins shadowed by saved profiles)
+    /// S24: Some only in the GUI and openlaser-hw. `device.settings.set`/`create`/`importEzcad`/`calibrateAxis`
+    /// write through it and fail with NoDevice-style "profiles are read-only in this session" when None.
+    pub profiles: Option<Arc<dyn ProfileStore>>,
     pub files: FsAuthority,
     pub clock: Arc<dyn Clock>,
 }
@@ -1612,19 +1810,25 @@ impl Session {
     // devices: the human path (Access::Human / Stop commands call these)
     pub fn connect(&mut self, origin: Origin, machine: &MachineId) -> Result<(), EngineError>;
     pub fn disconnect(&mut self, origin: Origin, machine: &MachineId) -> Result<(), EngineError>;
-    pub fn start_frame(&mut self, origin: Origin, mode: FrameMode) -> Result<Fingerprint, EngineError>;
-    /// laser.start: cold-builds the job, requires a matching FrameReceipt, stores PendingArm, raises ArmRequested.
-    /// Never emits.
+    /// `style`/`source` None = the project's JobSettings. Neither changes the fingerprint (S21), so no edit is made.
+    pub fn start_frame(&mut self, origin: Origin, mode: FrameMode, style: Option<FrameStyle>, source: Option<FrameSource>) -> Result<Fingerprint, EngineError>;
+    /// laser.start: cold-builds the job, requires a matching FrameReceipt, stores PendingArm (with the exact encoded
+    /// job), raises ArmRequested. Never emits. The ARM dialog shows only `PendingArm.summary`, never a submission's.
     pub fn request_arm(&mut self, origin: Origin) -> Result<&PendingArm, EngineError>;
     pub fn pending_arm(&self) -> Option<&PendingArm>;
     pub fn cancel_arm(&mut self);
     /// Typed Rust API only (no command, no JSON, no control method takes a token). Checks PendingArm is current
-    /// (same revision and fingerprint), token.check, then DriverHandle::run.
+    /// (same revision, fingerprint and bytes_hash), token.check, the provider's `emission_cap_pct` (S23),
+    /// then moves `PendingArm.job` (the object whose bytes the summary was decoded from) into DriverHandle::run.
+    /// It never re-encodes.
     pub fn run_armed(&mut self, token: ArmToken) -> Result<(), EngineError>;
-    pub fn stop_all(&self) -> Vec<(MachineId, StopAck)>;
+    /// Also voids PendingArm (closes the ARM dialog) and marks running submissions stopped.
+    pub fn stop_all(&mut self) -> Vec<(MachineId, StopAck)>;
     pub fn stop_registry(&self) -> Arc<StopRegistry>;
     pub fn status(&self, machine: &MachineId) -> Option<&CachedStatus>;
     /// Folds driver events into CachedStatus, receipts, requests; expires requests. Call every frame / tool call.
+    /// A `Stopped` event or a tripped latch seen here also voids PendingArm (stops that came through the control
+    /// fast path or a signal never touched the Session).
     pub fn poll(&mut self) -> Vec<Event>;
     // agent requests (bridge mode; NeedsBridge when !window)
     pub fn submit_job(&mut self, client: &str, note: &str) -> Result<SubmissionView, EngineError>;
@@ -1647,14 +1851,17 @@ pub struct HistoryState { pub label: Label, pub project: Arc<Project>, pub selec
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct JobOptions { pub machine: Option<MachineId>, pub selected_only: Option<bool> /* None = project setting */ }
-pub enum Encoded { Lmc { job: Arc<LmcJob>, frame: Arc<LmcFrameJob> }, Gcode { job: Arc<GcodeProgram>, frame: Arc<GcodeProgram> } }
+pub enum Encoded { Lmc { job: Arc<LmcJob>, frame: Arc<LmcFrameJob> }, Gcode { job: Arc<GcodeProgram>, frame: Arc<GcodeFrame> } }
 pub struct BuiltJob { pub plan: Arc<JobPlan>, pub validated: Validated, pub encoded: Encoded, pub summary: EmissionSummary, pub listing: Listing, pub burned: Vec<EmittedSegment> }
 #[derive(Debug, Clone, PartialEq, Serialize)] #[serde(rename_all = "camelCase")]
 pub struct JobRefused { pub fingerprint: Option<Fingerprint>, pub refusals: Vec<Refusal>, pub notices: Vec<Notice>, pub error: Option<String> }
-pub struct LiveCheck { pub revision: u64, pub fingerprint: Option<Fingerprint>, pub refusals: Vec<Refusal>, pub notices: Vec<Notice>, pub estimate: Option<Duration>, pub summary: Option<EmissionSummary> }
+pub struct LiveCheck { pub revision: u64, pub fingerprint: Option<Fingerprint>, pub refusals: Vec<Refusal>, pub notices: Vec<Notice>, pub estimate: Option<Duration>, pub summary: Option<EmissionSummary> } // display only: never armed from
 pub struct PendingArm {
     pub fingerprint: Fingerprint, pub machine: MachineId, pub summary: EmissionSummary, pub receipt: FrameReceipt,
     pub checklist: Vec<String>, pub burned: Vec<EmittedSegment>, pub revision: u64, pub expires: MonoTime,
+    /// S22: the encoded job `summary` was decoded from; `run_armed` sends exactly this (Arc → owned clone of the
+    /// same value, re-checked by bytes_hash in the driver).
+    pub job: Encoded,
 }
 pub struct CachedStatus {
     pub connected: bool, pub provider: Option<String>, pub state: MachineState, pub status_bits: Option<u16>,
@@ -1703,6 +1910,11 @@ impl Requests { pub fn submissions(&self) -> Vec<SubmissionView>; pub fn frame_r
 | Ui | ✓ | ✓ | Disabled (needs window) | per its origin |
 | Human | ✓ | **Refused(HumanOnly)** | **Refused(HumanOnly)** | **Refused(HumanOnly)** |
 | Stop | ✓ | ✓ | ✓ (`NoDevice` error if no device, never a refusal) | ✓ |
+
+`Origin::Human` comes only from the GUI's own untainted input and from `openlaser-hw` (§2.3 rule 13); every
+`openlaser-cli` subcommand, `run --cmd` included, is `Headless`. Anything that changes what `build_job` would
+produce bumps the revision (so it voids PendingArm and stales requests): document edits, undo/redo,
+`device.select`, `laser.repeat`, `laser.cutSelected`, and `prefs.set` of keys the planner reads (`output.*`).
 
 ### 3.17 `openlaser-control` (WP7)
 
@@ -1768,7 +1980,11 @@ pub mod server {
     pub type FastStop = Arc<dyn Fn(Option<&str>) -> serde_json::Value + Send + Sync>;
     pub struct ServerConfig { pub port: u16 /* 0 = free port */, pub token: token::Token, pub fast_stop: FastStop, pub wake: Arc<dyn Fn() + Send + Sync> }
     /// std::net on 127.0.0.1 only; ≤ 16 connections; 30 s idle; first frame must be
-    /// {"method":"auth","params":{"token","client":{"name","version"}}}.
+    /// {"method":"auth","params":{"token","client":{"name","version"}}}. A connection serves one request at a time
+    /// (it waits for the UI's reply before reading the next line), so `machine.stop` sent on a busy connection would
+    /// wait behind it: clients send stop on a connection of its own (`BridgeClient::stop_handle`). When the 16
+    /// slots are full, a 17th connection is still accepted for exactly one `auth` + `machine.stop` exchange and
+    /// then closed; any other method on it gets "connection limit reached".
     pub struct ControlServer { /* … */ }
     impl ControlServer {
         pub fn start(cfg: ServerConfig) -> Result<(Self, std::sync::mpsc::Receiver<ControlRequest>), Error>;
@@ -1811,11 +2027,18 @@ pub fn tools() -> &'static [ToolDef];           // §4.1, in that order
 pub fn strict_schema(s: schemars::Schema) -> serde_json::Value;
 pub struct ClientInfo { pub name: String, pub version: String }
 pub enum ToolOutput { Json(serde_json::Value), Png { png: Vec<u8>, note: serde_json::Value }, Error { message: String, data: Option<serde_json::Value> } }
-/// The MCP layer is identical over both backends.
+/// The MCP layer is identical over both backends. Tool calls run one at a time behind a mutex (PhotoCraft), EXCEPT
+/// `stop`, which the server routes to `stop_handle()` without taking that mutex, so a long `job_simulate` or a
+/// 55 s bridge timeout can never delay a stop.
 pub trait ToolBackend: Send {
     fn mode(&self) -> Mode;
     fn call(&mut self, tool: &str, args: serde_json::Value, client: &ClientInfo) -> ToolOutput;
+    /// Bridge: a handle with its own authenticated connection, used only for `machine.stop`. Headless: None (the
+    /// `stop` tool then returns the `needs_bridge:` error).
+    fn stop_handle(&self) -> Option<StopHandle>;
 }
+#[derive(Clone)] pub struct StopHandle { /* Arc<Mutex<dedicated BridgeClient connection>> */ }
+impl StopHandle { pub fn stop(&self, machine: Option<&str>) -> ToolOutput; } // waits ≤ STOP_WAIT for the StopAck
 /// engine::Session with origin Headless, window false, DeviceAccess::None; files through AuthorizedWorkspace.
 pub struct Headless { /* … */ }
 impl Headless { pub fn new(read_root: Option<&Path>, write_root: Option<&Path>) -> Result<Self, Error>; }
@@ -1827,10 +2050,12 @@ impl BridgeClient {
     pub fn connect(target: &BridgeTarget, client: &ClientInfo) -> Result<Self, BridgeError>;
     pub fn call(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, BridgeError>;      // never resent
     pub fn call_read(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, BridgeError>; // one retry
+    /// Opens a SECOND authenticated connection reserved for `machine.stop` (reconnects on use if idle-dropped).
+    pub fn stop_handle(&self) -> Result<StopHandle, BridgeError>;
 }
 /// Wording per AUT A8: NotSent "the request was not sent"; Transport "operation may have completed; inspect state
 /// before retrying"; TimedOut read "may be retried safely" / write "may have completed"; Definite = the app's error.
-pub enum BridgeError { NotSent(String), Transport(String), TimedOut { read: bool }, Definite(String) }
+pub enum BridgeError { NotSent(String), Transport(String), TimedOut { read: bool }, Definite(String), NotImplemented(&'static str) }
 ```
 
 ### 3.19 `openlaser-ui-egui` (WP8)
@@ -1844,13 +2069,15 @@ impl OpenLaserApp {
     pub fn ui_state(&self) -> &UiState;
 }
 impl eframe::App for OpenLaserApp {
-    /// (1) Esc while a machine is framing, armed or marking → session.stop_registry().stop_all(0) and remove the
-    /// event before any widget sees it; (2) native-menu key equivalents; (3) queued synthetic events go in only
-    /// through services.human.inject().
+    /// (1) Esc while a machine is framing, armed or marking, or while the ARM dialog is open → session.stop_all()
+    /// (latch first, then PendingArm voided) and remove the event before any widget sees it; (2) native-menu key
+    /// equivalents; (3) queued synthetic events go in only through services.human.inject() (§2.3 rule 16).
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput);
-    /// Every frame, even minimised: session.poll(); drain the control channel (control::handle); native menu
-    /// clicks; shortcuts (Origin::Synthetic if services.human.frame_is_synthetic()); file drops; close guard
-    /// (machine active → CancelClose + stop first; craft_quit last).
+    /// Every frame, and while hidden whenever a repaint was requested (eframe 0.36 calls `logic` for a hidden window
+    /// only then: the control server's `wake` and a 250 ms `request_repaint_after` while a machine is active keep it
+    /// running): session.poll(); drain the control channel (control::handle); native menu clicks; shortcuts
+    /// (Origin::Synthetic if services.human.frame_is_synthetic()); file drops; close guard (machine active →
+    /// CancelClose + stop first; craft_quit last).
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame);
     /// The LightBurn layout (UI §4.1), STOP overlay last at Order::Tooltip.
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame);
@@ -1872,7 +2099,9 @@ pub struct ControlInfo { pub port: u16, pub clients: Vec<String> }
 
 /// Implemented by openlaser-human (the app injects it). ui-egui never links openlaser-arm.
 pub trait HumanSurfaces: Send {
-    /// The only way control-channel input enters egui. Taints this frame and the next two.
+    /// The only way control-channel input enters egui. Taints this frame, the next two, and everything until 1 s
+    /// after the last injected event (UI §7.3), so a click whose press and release span frames, or whose press was
+    /// synthetic, never counts. While a human-only surface is open, queued synthetic events are dropped.
     fn inject(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput, events: Vec<egui::Event>);
     /// True if this frame carries automation input.
     fn frame_is_synthetic(&self, ctx: &egui::Context) -> bool;
@@ -1885,7 +2114,7 @@ pub trait HumanSurfaces: Send {
     /// Any human-only surface open: the dispatcher refuses mutating control methods (human_confirmation_open).
     fn surface_open(&self) -> bool;
 }
-pub struct ArmModel { pub summary: EmissionSummary, pub receipt: FrameReceipt, pub checklist: Vec<String>, pub session: SessionId, pub now: MonoTime, pub thumbnail: DisplayList }
+pub struct ArmModel { pub summary: EmissionSummary, pub receipt: FrameReceipt, pub checklist: Vec<String>, pub session: SessionId, pub now: MonoTime, pub thumbnail: DisplayList, pub emission_cap_pct: Option<f64> /* S23, from the provider */ }
 pub enum ArmOutcome { Open, Cancelled, Armed(ArmToken) }
 /// Test double: nothing is ever human, nothing ever arms. ui-egui's own kittests use it.
 pub struct NoHuman;
@@ -1914,7 +2143,10 @@ pub mod canvas {
 ### 3.20 `openlaser-human` (WP9, red zone)
 
 ```rust
-pub struct Human { /* taint record keyed by a PRIVATE type in egui context data; surface-visible timers; ARM dialog state */ }
+/// The taint record lives in this struct (keyed by `ctx.cumulative_pass_nr()` plus the time of the last injected
+/// event), NOT in egui context data: any code holding the `Context` can clear `ctx.data_mut(..)`, while `Human` is
+/// reachable only through `&mut dyn HumanSurfaces`.
+pub struct Human { /* taint record; surface-visible timers; ARM dialog state */ }
 impl Human { pub fn new(clock: Arc<dyn Clock>) -> Self; }
 impl openlaser_ui_egui::HumanSurfaces for Human {}
 /// (no Clone) The witness for one real click.
@@ -1931,7 +2163,8 @@ bound, machine name, fingerprint short. The checklist comes from the profile. Th
 untainted frames; any tainted frame while the dialog is open clears the field and every tick and shows "Automation
 input reached this dialog and was ignored." Confirm is a human-only widget; on a human click it calls
 `HumanConfirm::from_gui_gesture` then `openlaser_arm::mint`, and returns `Armed(token)` once. Typed text never
-persists between openings. Any revision bump closes it (engine voids `PendingArm`).
+persists between openings. Any revision bump or any stop closes it (engine voids `PendingArm`). Over a bench
+session's first emission (S23) the dialog shows the 10 % cap and refuses rows above it before minting.
 
 ### 3.21 Apps (WP8, WP7, WP9)
 
@@ -1941,6 +2174,9 @@ openlaser [--control <port>] [--control-token-file <path>] [--automation-read-ro
   Machines: "JPT M7 · Simulator" (always) and, only in `--features hw` builds, "JPT M7 · USB".
   A bad --control port is a usage error (exit 2). No --mcp-bridge flag: Window › Assistant gives
   `openlaser-cli mcp --bridge auto`.
+  Before `run_native`: a panic hook that calls StopRegistry::stop_all(500 ms) before the default hook, and a
+  signal watcher (signal-hook flags on unix, ctrlc on windows) that trips every latch, waits ≤ 500 ms for the
+  StopReports, then exits 143. Profiles load from `format::machines`; `DirProfileStore` is injected (S24).
 
 openlaser-cli mcp   [--bridge auto|<127.0.0.1:port> | --bridge-file <control.json>]
                     [--control-token <hex> | --control-token-file <path>]
@@ -1963,16 +2199,37 @@ openlaser-cli frame|mark|run-hw …                         → "hardware comman
   Without roots, file access in mcp/serve fails closed; the other subcommands are trusted-local.
 
 openlaser-hw detect                                       read-only enumeration (needs `hw`)
-openlaser-hw status  [--machine <id>] [--sim]             GetSerialNo + GetVersion only, no init (H12)
+openlaser-hw status  [--machine <id>] [--sim] [--trace <f>]   GetSerialNo + GetVersion only, no init (H12)
 openlaser-hw bench   start|status|end                     TTY only; start writes the bench-session file
-openlaser-hw frame   <project> [--loop] [--style bounds|contour] [--source job|tools|both] [--machine <id>] [--sim]
-openlaser-hw run     <project> [--layers <layer_settings.json>] [--repeats N] [--machine <id>] [--sim]
+openlaser-hw profile show|set <key> <value>|import-om <calibration.json>|import-ezcad <markcfg>  [--machine <id>]
+                                                          TTY only; the only CLI path that writes a profile (S24):
+                                                          prints old → new values and asks `SAVE <id>`; keys are
+                                                          cal.negate.x/y, cal.swapXy, cal.offsetMm, cal.scale,
+                                                          runAhead.*, transferTimeoutMs, usbSetConfiguration,
+                                                          redDot.*, workArea (within h27Cleared), h27Cleared
+openlaser-hw frame   (<project> | --builtin <pattern>) [--loop] [--style bounds|contour] [--source job|tools|both]
+                     [--extent <mm>] [--machine <id>] [--sim] [--trace <f>]
+openlaser-hw run     (<project> | --builtin <pattern>) [--layers <layer_settings.json>] [--repeats N] [--power-pct P]
+                     [--allow-emission] [--machine <id>] [--sim] [--trace <f>]
+  --builtin: dot | line | box10 | square50 | f-shape | corners. dot, line and box10 are exactly the T1
+  dot_test, line_test and mark_box10 inputs, so a hardware trace diffs against the rust-v1 candidate; square50 is
+  HIL-2's 50 mm square, f-shape the asymmetric H4 frame, corners the H27 corner frames. `--power-pct` (built-ins only)
+  overrides power for every row. `--extent <mm>` (frame only, corners only) traces up to ±extent, allowed past the
+  work area but still inside the strictly encodable square: red light only, for H27; `run` never accepts it.
+  --trace <f>: writes every wire event as JSON lines in the T1 event format (kind, op, hex, status, packet sha256)
+  plus timestamps; HIL sessions commit it (§8.2) and it becomes a FakeLmc fixture.
   run: connect (board lock) → print the decoded summary → frame in a loop → Enter is accepted only after ≥ 1
-  fully acknowledged pass → stop framing → print the summary and a 6-digit nonce → type `ARM <nonce>` → mark.
-  Esc, Space, Ctrl-C (key thread, crossterm raw mode) and SIGINT/SIGTERM/SIGHUP (signal-hook) trip the latch.
-  Refused unless stdin and stdout are TTYs (NotATty). Real USB needs `hw`, a bench session and the board lock;
-  `--sim` drives FakeLmc. The binary's logic lives in `src/lib.rs` behind a `Terminal` trait so tests run it
-  with a scripted terminal; `src/tty_arm.rs` is the only file that builds a TtyWitness.
+  fully EXECUTED pass (S20) → stop framing → without --allow-emission stop here (EmissionNotAllowed) → print the
+  summary, the profile checklist and a 6-digit challenge → type `ARM <challenge>` → mark. The first emission of a
+  bench session refuses any row above 10 % power (BenchPowerCap, S23); after a finished run the engine calls the
+  provider's `record_emission` (`poll` on `Finished`).
+  Esc, Space, Ctrl-C (key thread, crossterm raw mode) and SIGINT/SIGTERM/SIGHUP (signal-hook flags; ctrlc on
+  windows) trip the latch; on a signal the main thread waits ≤ 500 ms for the StopReport, prints it, then exits.
+  Refused unless stdin and stdout are TTYs (NotATty). Real USB needs `hw`, OPENLASER_HW_PRESENT=1, a bench session
+  and the board lock; `--sim` drives FakeLmc. The binary's logic lives in `src/lib.rs` behind a `Terminal` trait so
+  tests run it with a scripted terminal. `Terminal::confirm_arm(...) -> Option<HumanConfirm>` is implemented by
+  the real terminal in `src/tty_arm.rs`, the only file that builds a TtyWitness (after `IsTerminal` on stdin and
+  stdout); the scripted terminal lives in `tests/` and gets its HumanConfirm from `arm::testing` (dev-dependency).
 ```
 
 ### 3.22 `openlaser-testkit` (WP0 skeleton; each loader module is owned by the WP that uses it)
@@ -2024,7 +2281,7 @@ property named `force`, `proceed`, `arm`, `confirm`, `skip_frame`, `override` or
 | `command_list` | `filter?, enabled_only?, agent?, schema?` | bare array of rows (§4.3) | H B | read |
 | `command_schema` | **`id`** | `{id, schema}` | H B | read |
 | `command_run` | **`id`**, `params?`, `wait?` | the command's JSON | H B | agent |
-| `command_batch` | **`steps:[{id, params?}]`** (≤ 256), `stop_on_error?=true`, `atomic?=false`, `label?` | `{completed, failed, rolledBack, results:[{ok, result\|error}]}` | H B | agent |
+| `command_batch` | **`steps:[{id, params?, wait?}]`** (≤ 256; `wait` per step as PhotoCraft), `stop_on_error?=true`, `atomic?=false`, `label?` | `{completed, failed, rolledBack, results:[{ok, result\|error}]}` | H B | agent |
 | `jobs_list` / `jobs_cancel` | — / `job?` | background tasks | H B | read / agent |
 | `machine_list` | — | `[{id, name, kind, workArea, source:{maxPowerPct, freqKhz:[lo,hi], pulsesNs}, link, connected}]` | H B | read |
 | `machine_status` | `machine?` | §4.3 (headless: `{connected:false, backend:"headless"}`) | H B | read |
@@ -2038,7 +2295,7 @@ property named `force`, `proceed`, `arm`, `confirm`, `skip_frame`, `override` or
 | `job_submit` | `machine?, index?, note?` (≤ 280 chars, plain text) | `{submission, state:"awaiting_human", fingerprint, summary, expiresInS}`; with refusals: tool error, nothing created | B | approval |
 | `job_status` | `submission?` | `{submission, state, fingerprint, outcome?, stopReport?, fault?}` | B | read |
 | `job_withdraw` | **`submission`** | `{submission, state:"withdrawn"}` | B | agent |
-| `stop` | `machine?` | `{latched:true, confirmed, report?, elapsedMs}` (waits ≤ 500 ms) | B (H: tool error naming bridge) | **always** |
+| `stop` | `machine?` | `{latched:true, confirmed, report?, elapsedMs}` (waits ≤ 500 ms) | B (H: tool error naming bridge) | **always**; served through `StopHandle` on its own connection, never queued behind another tool call (§3.18) |
 | `ui_inspect` | — | UI state incl. read-only `humanSurfaces` | B | read |
 | `ui_elements` | `query?, role?, limit?` | AccessKit widgets `{id, role, label, rect, enabled, humanOnly}` | B | read |
 | `ui_screenshot` | `max_side?` | PNG of the window | B | read |
@@ -2106,10 +2363,10 @@ person in the OpenLaser window"`, so agents learn what they may not do without t
 ```json
 {"fingerprint":"7f2a91…64 hex","short":"7f2a91","machine":"jpt-m7-200-sim","ok":true,"refusals":[],
  "notices":[{"n":1,"code":"open_shape_unhatched","object":7,"layer":"C02","message":"…"}],
- "summary":{"rows":[{"layer":"C00","layerName":"C00","pass":1,"of":1,"mode":"line","powerPct":29.99,"frequencyKhz":29.99,
+ "summary":{"bytesHash":"c41e07…64 hex","rows":[{"layer":"C00","layerName":"C00","pass":1,"of":1,"mode":"line","powerPct":29.99,"frequencyKhz":29.99,
             "pulseNs":200,"speedMmS":996.8,"galvo":{"markCurrent":1228,"qPeriod":667,"pulseNs":200,"speedUnits":276,"jumpSpeedUnits":830},
-            "paths":3,"markMm":120.0,"bounds":{"min":[-20,-10],"max":[20,10]},"estimate":{"secs":3,"nanos":100000000}}],
-            "repeats":1,"estimate":{"secs":41,"nanos":0},"crashBound":{"secs":2,"nanos":0},"packets":4},
+            "paths":3,"markMm":120.0,"bounds":{"min":[-20,-10],"max":[20,10]},"estimateS":3.1}],
+            "repeats":1,"estimateS":41.0,"crashBoundS":2.0,"packets":4},
  "frame":{"style":"contour","source":"job","bounds":{"min":[-20,-10],"max":[20,10]},"paths":3}}
 ```
 
@@ -2132,14 +2389,15 @@ frame_request ─► awaiting_human ─(human Approve)─► framing ─► done
                    └─(2 min)─► expired
 job_submit ─(refusals)─► tool error, nothing created
    ▼
-awaiting_human ─(human Frame)─► framing ─(≥ 1 acked pass)─► awaiting_arm ─(human ARM)─► running ─► finished | stopped | fault
+awaiting_human ─(human Frame)─► framing ─(≥ 1 executed pass, S20)─► awaiting_arm ─(human ARM)─► running ─► finished | stopped | fault
    ├─(human Reject)─► rejected   ├─(job_withdraw)─► withdrawn   ├─(newer submit)─► superseded
    ├─(any edit/undo)─► stale     └─(15 min)─► expired           awaiting_arm ─(receipt > 10 min)─► awaiting_human
 ```
 
 The submission card shows fingerprint, the decoded summary, client name and the agent's note (plain text,
-labelled "Note from agent", ≤ 280 chars, **outside** the confirmation block). The ARM dialog recomputes
-plan → validate → encode → summary itself and never shows the agent's summary.
+labelled "Note from agent", ≤ 280 chars, **outside** the confirmation block). The ARM dialog never shows the
+agent's summary: Start makes the engine cold-build plan → validate → encode → summary again (`request_arm`), and
+the dialog renders that `PendingArm.summary`, whose job object is the one that will be sent (S22).
 
 ### 4.5 Control methods (GUI bridge; exact table, pinned by `control_methods_table_is_exact`)
 
@@ -2186,20 +2444,44 @@ Mechanisms, each independent, so no single bug opens a path:
    taints the frame; human-only widgets act only on `clicked_by(Primary)` in untainted frames, with no AccessKit
    action, focused window, widget visible ≥ 300 ms. Human-only surfaces have no `ui.dialog.*` kind and are
    reported read-only in `ui.inspect`.
-4. **Confirmation from bytes**: the ARM dialog renders only `EmissionSummary` decoded from the packets.
-5. **Frame ⊇ burn**: `mint` needs a human-originated `FrameReceipt` of the same fingerprint, ≥ 1 full pass,
-   ≤ 10 min old, covering the job; the driver re-checks against its **own** receipt record and spends the nonce.
+4. **Confirmation from bytes, bound to the bytes** (S22): the ARM dialog renders only `EmissionSummary` decoded
+   from the packets; the token carries their `bytes_hash`; `run_armed` sends the very job object the summary came
+   from; the driver recomputes the hash from what it was handed and refuses a mismatch (`BytesMismatch`).
+5. **Frame ⊇ burn**: `mint` needs a human-originated `FrameReceipt` of the same fingerprint, ≥ 1 pass the board
+   has **executed** (S20), ≤ 10 min old, covering the job; the driver re-checks against its **own** receipt record
+   and spends the nonce.
 6. **Stop fast path**: the control server holds the engine's `StopRegistry` and answers `machine.stop` on its
-   transport thread, so `stop` works while the window is occluded or the UI thread is stalled.
-7. **Configuration that bounds safety is human-only** (S9): profiles, calibration, work area, source limits.
-8. **Procedural layers** (PLAN §3.6, AUT C3.9): `AGENTS.md` rule 1; USB unplugged while agents work (D19); the
-   bench session; the PreToolUse hook (Luiz decides) matching `(^|[;&|[:space:]])openlaser-hw[[:space:]]`,
-   `--features[ =]hw`, `OPENLASER_HW_PRESENT`, `computer-use … OpenLaser` — the regex must not match
-   `cargo … -p openlaser-hw`, so agents can build and test the crate; the foot-switch ARM in M3.
+   transport thread, so `stop` works while the window is occluded or the UI thread is stalled; the MCP server sends
+   it on a dedicated connection outside the tool-call mutex (§3.18); a stop after a queued run cancels it (§5.3).
+7. **Configuration that bounds safety is human-only** (S9, S24): profiles, calibration, work area, source limits,
+   written only through a `ProfileStore` that `openlaser-cli` never constructs.
+8. **Hardware is default-deny** (S23): `hw` feature + `OPENLASER_HW_PRESENT=1` + bench session + board lock; the
+   first emission of a bench session is capped at 10 %.
+9. **Procedural layers** (PLAN §3.6, AUT C3.9): `AGENTS.md` rule 1; USB unplugged while agents work (D19); the
+   bench session; Luiz's `hw` builds live in `~/AI/OpenLaser/.target/hw`, never in an agent lane, so no agent ever
+   finds a hardware-enabled binary; the PreToolUse hook (Luiz decides) on Bash **and**
+   `mcp__terminal__run_in_terminal` commands, blocking:
+   - `openlaser-hw` in **command position**, with optional `env`/`sudo`/`exec`/`nohup`/`time`/`command` and
+     `VAR=…` prefixes and a path:
+     `` (^|[;&|(`]|\$\()[[:space:]]*(((env|exec|nohup|time|sudo|command)|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*)[[:space:]]+)*([^[:space:];&|]*/)?openlaser-hw([[:space:]]|$) ``;
+   - `cargo … run … openlaser-hw` (`cargo[^;&|]*[[:space:]]run[[:space:]][^;&|]*openlaser-hw`);
+   - any `hw` feature: `(--features|-F)[= ]+[^[:space:];&|]*hw`; and `OPENLASER_HW_PRESENT`;
+   - `mcp__computer-use__request_access` / `open_application` naming OpenLaser;
+   - Write/Edit of files under `…/OpenLaser/machines/` and `…/OpenLaser/bench-session.json`.
+
+   It must match `openlaser-hw run x.olp`, `./target/debug/openlaser-hw status`, `cd a && openlaser-hw frame`,
+   `env A=1 openlaser-hw detect`, `$(openlaser-hw status)`, `cargo run -p openlaser-hw -- detect`,
+   `cargo build --features openlaser-hw/hw`; it must not match `cargo test -p openlaser-hw --lib`,
+   `cargo clippy -p openlaser-hw --all-targets` or `rg openlaser-hw docs/`, so agents can build and test the crate
+   (all checked with `grep -E` during this review; revision 1's
+   `(^|[;&|[:space:]])openlaser-hw[[:space:]]` matched `-p openlaser-hw --lib` and missed `cargo run`). The
+   foot-switch ARM arrives in M3.
 
 **Not covered** (AUT C5): a process posting OS-level mouse/keyboard events to the window before the foot switch
-exists; an agent typing into a real terminal running `openlaser-hw`; hostile code in the GUI process; a human who
-arms without looking.
+exists; an agent typing into a real terminal running `openlaser-hw`; an agent with a shell that edits files under
+the app data folder (profiles, bench session) when the hook is not installed: the human still sees the decoded
+values and the work area at ARM, and the first-emission cap still applies, but the limits themselves would have
+moved; hostile code in the GUI process; a human who arms without looking.
 
 ---
 
@@ -2208,12 +2490,16 @@ arms without looking.
 ### 5.1 Device and transport
 
 USB `0x9588:0x9899` (USBLMCV4). Claim interface 0, bulk OUT `0x02`, bulk IN `0x88`; `set_configuration(1)` only
-if H12 shows it is needed. Writes are exactly 12 bytes (one single command, six LE u16 words, then an 8-byte read
+if H12 shows it is needed, and then only through the human-only profile flag `usb_set_configuration` (macOS cannot
+claim an interface of an unconfigured device; without the flag the open is refused `UsbNotConfigured`, so HIL-0
+needs no code change). Writes are exactly 12 bytes (one single command, six LE u16 words, then an 8-byte read
 except `WriteCorLine`) or 3072 bytes (one list packet = 256 × 12-byte slots, unused slots `0x8002`, no read).
-Status = word 3 of the `GetVersion` reply: BUSY `0x04`, READY `0x20`, AXIS `0x40`; unknown bits kept. A failed read
-is `Err`, never status bits. PID `0x9980` (clone board) is detected and refused with an explanation; firmware is
-never loaded. **No USB reset, no retry, no auto-reconnect**: any transfer error stops the job and raises a sticky
-fault. The board lock (`~/Library/Application Support/OpenLaser/board.lock`, shared with OM) is taken at connect.
+Each transfer is sliced (≤ 20 ms) with a total budget of `transfer_timeout_ms` (250 ms, PLAN §3.5; H13 tunes it);
+past it the transfer is `Timeout`, never retried. Status = word 3 of the `GetVersion` reply: BUSY `0x04`, READY
+`0x20`, AXIS `0x40`; unknown bits kept. A failed read is `Err`, never status bits. PID `0x9980` (clone board) is
+detected and refused with an explanation; firmware is never loaded. **No USB reset, no retry, no
+auto-reconnect**: any transfer error stops the job and raises a sticky fault. The board lock (`board.lock` in the
+app data folder, §2.6; shared with OM, which locks it with `flock`) is taken at connect.
 
 ### 5.2 Encoder rules (byte-exact; goldens enforce them)
 
@@ -2231,9 +2517,13 @@ fault. The board lock (`~/Library/Application Support/OpenLaser/board.lock`, sha
 5. **Parameter block per list**: every list carries the full block in GP order — JumpSpeed, PulseWidth,
    MarkCurrent, QSwitchPeriod, MarkSpeed, LaserOnDelay, LaserOffDelay, PolygonDelay — then the first jump.
 6. **First jump** (rust-v1, B3 + PLAN §3.3): every list starts its motion with `JumpDelay(long = 200)`,
-   `JumpTo(x0, y0, 0, dist, 0)`, `DelayTime(100)` (1 ms settle). `dist` is computed as GP does, from the last
-   commanded point in this session (`0x8000, 0x8000` after connect). Before the next `JumpTo` the short delay is
-   set again (`JumpDelay(8)`).
+   `JumpTo(x0, y0, 0, dist, 0)`, `DelayTime(100)` (1 ms settle). `dist` uses GP's formula, from
+   **(0x8000, 0x8000) for the first jump of every list**: each OM layer-pass ran on a fresh GP controller, so this
+   reproduces the v1 packets (`mark_box10` 1957, `dot_test` 0), and it keeps packet bytes independent of session
+   state. (Revision 1 said "from the last commanded point in this session", which the encoder cannot know at
+   encode time: the driver would have had to patch bytes after the human confirmed them.) The true mirror position
+   after an earlier job or a stop is unknown anyway (H3); the long delay and settle cover it. Within a list, `dist`
+   follows the previous point as GP does. Before the next `JumpTo` the short delay is set again (`JumpDelay(8)`).
 7. **Zero delays** keep the `0x8000` sign word (`delay_word(0) = (0, 0x8000)`) until H9.
 8. **One list per layer-pass** (no single-list merge until H21 and H2); an explicit `EndOfList` ends each list;
    packets are padded with `0x8002`; one list transfer in flight; no early packet close until H28.
@@ -2249,39 +2539,69 @@ ReadyMark · DelayTime(800) · WritePort(0x0001) · JumpSpeed(830) · PulseWidth
 · JumpDelay(200,0) · JumpTo(31384,31384,0,1957,0) · DelayTime(100) · MarkTo(34152,31384,0,2768,0) · … · EndOfList · 0x8002…
 ```
 
-Lighting list (rust-v1; compare GOLD `frame_box10`): `ReadyMark · WritePort(0x0100) · WritePort(0) ·
-JumpDelay(200) · JumpTo(start) · DelayTime(100) · WritePort(0x0100) · JumpSpeed(light) · JumpTo… · EndOfList`.
-Red-dot offset/scale (identity until H26) apply to lighting lists only. Frame Once retraces
-`clamp(ceil(2.0 s / (path_len / light_speed)), 1, min(20000 / points, 500))` passes (OM); Loop resubmits one pass.
+Lighting list (rust-v1; compare GOLD `frame_box10`, whose v1 packet was decoded for this review: `ReadyMark ·
+WritePort(256) · WritePort(0) · JumpDelay(8) · JumpTo(31384,31384,0,1957) · WritePort(256) · JumpSpeed(830) ·
+JumpTo…`): `ReadyMark · WritePort(0x0100) · WritePort(0) · JumpSpeed(light) · JumpDelay(200) · JumpTo(start) ·
+DelayTime(100) · WritePort(0x0100) · JumpSpeed(light) · JumpTo… · EndOfList`. The **first** `JumpSpeed(light)` is a
+proposed rust-v1 divergence (§5.6): GP's first dark jump runs at whatever jump speed the board last had (power-on
+default, or the previous marking list's), which makes its duration, and so the time model, unknowable.
+Red-dot offset/scale (identity until H26) apply to lighting lists only. Frame Once is one list that retraces
+`clamp(ceil(2.0 s / (path_len / light_speed)), 1, min(20000 / points, 500))` passes (OM); Loop sends `pass`, a
+complete one-pass list, again for every pass (S20).
 
 ### 5.3 Session model (`driver::LmcBackend`; red zone)
 
 ```
+every command: refused (StoppedAfterQueue) if the latch was tripped after the command was queued; only then is
+        the latch cleared for it. frame/run while another frame or run is active → Refused(MachineBusy).
 connect (once per connection): board lock → init_sequence() verbatim (R05 §1.4, incl. Reset and WriteCorTable(0))
-        → 50 ms pause → assumed position (0x8000, 0x8000)
-frame(job, mode, origin): ResetList · GetVersion · packets (same flow control as run) · wait !BUSY;
-        Once sends `once`; Loop keeps appending `pass` packets while not stopped, as GP's FrameLoop does
-        (OM live.py:542-610; WP5 records the exact stream in the rust-v1 candidate)
-        → FrameCompleted(receipt) after each fully acknowledged pass; at the end or on stop: WritePort(0)
-run(job): runtime checks first: token.check(fp, machine, session, now); nonce unused, then spent; the driver's
-        OWN last receipt: same fp, ≥ 1 full pass, ≤ 10 min, origin Human, covers job
+        → 50 ms pause
+frame(job, mode, origin): per list: ResetList · GetVersion · packets (same flow control as run) · SetEndOfList
+        after each · ExecuteList (same trigger as run) · wait !BUSY (same watchdog) → FrameCompleted(receipt)
+        Once: one list (`once`), one receipt with full_passes = once_passes.
+        Loop: the one-pass list `pass` again and again, a receipt after each !BUSY, until stopped (S20). GP's
+        FrameLoop instead appended to one endless list, so a pass could only be counted when its packets were
+        ACCEPTED, up to the run-ahead window before the light traced them; FrameLoop is not in the goldens.
+        At the end or on stop: Fiber_SetMo(0) · WritePort(0) (v1: the light bit off; v0 left it on).
+run(job): runtime checks first: token.check(job.fingerprint, bytes_hash RECOMPUTED from job, machine, session,
+        now); nonce unused, then spent; the driver's OWN last receipt: same fp, ≥ 1 executed pass, ≤ 10 min,
+        origin Human, covers job
   for each repeat, for each list (layer-pass), stop checked between lists:
         ResetList · WritePort(0x0001) · Fiber_SetMo(1) · GetVersion
         per packet: wait READY (poll ≤ 10 ms, stop-aware; NEVER proceed on a deadline)
-                    respect run-ahead (≤ 3 packets and ≤ 2 s estimated queued emission; never < 1 packet)
-                    submit (one transfer in flight) · SetEndOfList · ExecuteList after the 3rd packet of the
-                    list, or after its last packet if it has fewer
+                    respect the run-ahead window (below; never < 1 packet)
+                    submit (one transfer in flight) · SetEndOfList
+                    ExecuteList once per list, after the FIRST of: the 3rd packet (GP parity), the packet that
+                    fills the run-ahead window, a status read after a submit that shows !READY (the board's
+                    buffer is full), or the list's last packet
         wait !BUSY (same watchdog) · only then Fiber_SetMo(0) · WritePort(0) · GetMarkTime(3)
   no abort, Reset or USB reset after success
-watchdog: no progress (status word change, packet acked) for est(queued) × 1.5 + 2 s → Fault → emergency_stop.
-        Before ExecuteList est(queued) = 0, so a board that never raises READY is stopped within 2 s.
+run-ahead window: before ExecuteList, queued = Σ est of packets sent; after it, queued = Σ est of packets sent −
+        (now − t_ExecuteList), floored at the estimate of the newest packet. Submit the next packet only if
+        packets_unexecuted < max_packets (3) and queued + est(next) ≤ max_emission_s (2 s), or if queued ≤ 0
+        (never < 1 packet). Revision 1 executed only after the 3rd packet while capping the queue at 2 s: a list
+        whose packets each estimate > 1 s (the business-card raster: ~9 packets, ~65 s) could never reach a 2nd
+        packet, never ExecuteList, and the watchdog would fault every such job (also every job on a FakeLmc with
+        buffer_depth < 3).
+watchdog: progress = a VALID status read whose READY or BUSY bit changed, or a packet transfer completing; failed
+        reads are errors (fault), never progress (OM v1 5f7aa63 found flaky reads keeping MO open). No progress for
+        est(packets that may still be queued) × watchdog_factor (1.5) + watchdog_slack_s (2 s) → Fault →
+        emergency_stop. Before ExecuteList est = 0, so a board that never raises READY is stopped within 2 s.
+transfer error or timeout (transfer_timeout_ms) anywhere: Fault (sticky) → emergency_stop.
 emergency_stop: stop submitting → let the in-flight packet complete (≤ 20 ms), else cancel_all + possible_desync
         → StopExecute → Fiber_SetMo(0) → ResetList → ONLY IF READY within 50 ms: dummy EOL packet + SetEndOfList
-        + ExecuteList → Fiber_SetMo(0) → WritePort(0) → drain stale replies → GetVersion !BUSY → StopReport
+        + ExecuteList ONLY IF no list was executing (no ExecuteList sent for the current list, or its !BUSY already
+        seen: OM v1 `_safe_abort` and GP send it only `if not _list_executing`; revision 1 sent it
+        unconditionally, which after a mid-list stop could restart whatever the board still held if ResetList
+        did not clear it, H14) → Fiber_SetMo(0) → WritePort(0) → drain stale replies → GetVersion !BUSY →
+        StopReport
 ```
 
 Each list is bracketed exactly as one GP marking session (prelude and postlude), minus GP's per-job init, abort
-and USB reset; this is the shipping sequence that becomes the `rust-v1` goldens after review.
+and USB reset; this is the shipping sequence that becomes the `rust-v1` goldens after review. Every byte inside
+the packets is fixed at encode time (§5.2 rule 6), so the packets the summary was decoded from and the packets
+on the wire are the same objects; only the timing of single commands (ExecuteList position, status polls)
+depends on the board.
 
 ### 5.4 Stop path and latency budget
 
@@ -2295,9 +2615,22 @@ and USB reset; this is the shipping sequence that becomes the `rust-v1` goldens 
 | **Total** | **FakeLmc: p99 ≤ 100 ms, any run > 250 ms fails. Hardware: ≤ 250 ms in 20/20 traced trials and key-to-dark (H24)** | |
 | Watchdog | 500 ms | no report → red banner "STOP NOT CONFIRMED: use the key switch / E-stop" + sticky fault |
 
-Crash containment: a drop guard runs `emergency_stop` if the driver thread panics; dropping the last
-`DriverHandle` (UI died) stops the job (dead-man rule); SIGINT/SIGTERM/SIGHUP trip the latch; a job holds a
-`keepawake` assertion (transport, §2.6). Faults are sticky until acknowledged; user stops are not.
+Crash containment, each layer independent:
+- a drop guard runs `emergency_stop` if the driver thread panics;
+- dropping the last `DriverHandle` trips the latch and **joins the driver thread for ≤ 500 ms** (dead-man rule);
+  without the join, a process that ends right after (a panic unwinding out of `main`) kills the driver thread
+  mid-abort;
+- the GUI and `openlaser-hw` install a **panic hook** that calls `StopRegistry::stop_all(500 ms)` before the
+  default hook: it runs on the panicking thread whatever happens next, including macOS, where `eframe::run_native`
+  may terminate the process without running destructors (UI §7.5: "code after `run_native` does not run");
+- SIGINT/SIGTERM/SIGHUP (unix, signal-hook flags) and Ctrl-C/Break/close (windows, ctrlc) are handled in **both**
+  the GUI and `openlaser-hw`: a watcher thread trips every latch, waits ≤ 500 ms for the StopReports, then exits;
+  the driver never runs inside a signal handler;
+- a job holds a `keepawake` assertion (transport, §2.6);
+- not covered: SIGKILL, Force Quit, OOM, a GPU driver crash, a cable pull (PLAN §3.5); the run-ahead window and
+  the E-stop bound those, and H25 measures them.
+
+Faults are sticky until acknowledged; user stops are not.
 
 ### 5.5 `py-compat` (test-only)
 
@@ -2316,6 +2649,16 @@ NaN/inf parameters refused (OM snaps a NaN pulse to 2 ns); frequencies that woul
 layers, orphan objects, empty Fill layers and gantry overspeed refused; open Fill shapes become numbered notices;
 SVG imported at true scale, unitless SVG refused; no STL; DXF SPLINE evaluated; mirror flags live in the machine
 profile (`cal.negate`); repeat count shown at confirmation.
+
+Added by the revision 2 review (all need Luiz's signature at D13 like the rest):
+- every list's first-jump `dist` is computed from (0x8000, 0x8000) (§5.2 rule 6; matches v1's packets, which each
+  started on a fresh controller);
+- lighting lists set `JumpSpeed(light)` before their first (dark) jump (§5.2; GP leaves the board's previous speed);
+- Frame Loop sends one complete list per pass and counts a pass only after the board reports !BUSY (S20; GP's
+  FrameLoop appended to one endless list and was never captured);
+- `ExecuteList` may come before the 3rd packet when the run-ahead window fills or READY drops (§5.3; GP waits for
+  the 3rd packet); the packet bytes are unchanged, only the single-command order differs;
+- the abort's `ExecuteList` after the dummy packet follows OM v1 (`only if no list is executing`), not revision 1.
 
 ### 5.7 GRBL (`driver::GrblBackend`; fake-tested only in this build)
 
@@ -2337,19 +2680,26 @@ Every work package runs this before handing in; the integrator runs the workspac
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
-export CARGO_TARGET_DIR="$HOME/AI/OpenLaser/.target/core"   # or .target/gui (§6.8)
+rustc --version                                               # must be ≥ 1.99 (the `stable` toolchain, §2.5)
+export CARGO_TARGET_DIR="$HOME/AI/OpenLaser/.target/core"   # or .target/gui (§6.7)
 export OPENLASER_NO_HW=1                                      # belt and braces: transport refuses everything
+unset OPENLASER_HW_PRESENT                                    # S23: hardware is default-deny
 cargo fmt --all -- --check
-cargo clippy -p <your crates> --all-targets -- -D warnings     # integrator: --workspace
-cargo test -p <your crates>                                     # integrator: --workspace
+cargo clippy -p <your crates> --all-targets -- -D warnings     # integrator: the lane's package set (§6.7)
+cargo test -p <your crates>                                     # integrator: --workspace in the gui lane
 cargo xtask deps                                                # dependency rules §2.3 (cargo metadata + greps)
 cargo xtask golden-verify                                       # sha256 of every fixture in tests/golden/manifest.json
+# integrator only, gui lane, once per integration step, df ≥ 8 GB (§2.6 item 1):
+cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 ```
 
 **Never run** (AGENTS.md §1): `--features hw`, `--all-features`, `--release` (unless the integrator asks), the
 `openlaser` or `openlaser-hw` binaries against hardware, galvoplotter's `site-packages/test/*.py`, the prototype's
 live mode, `cargo update`, `cargo clean` in a shared target directory, or Python inside tests. Running the
-`openlaser-cli` binary and `openlaser-hw --sim` from tests is allowed (no device can be opened by them).
+`openlaser-cli` binary and `openlaser-hw --sim` from tests is allowed (no device can be opened by them), but
+binaries are tested **in process** (`src/lib.rs` entry points with injected stdio and terminal); at most one smoke
+test per binary spawns `CARGO_BIN_EXE_*`, because the uplifted `target/debug/<bin>` is shared by every worktree in
+a lane and another worktree's build can replace it between build and spawn.
 
 ### 6.2 Golden tiers and where each is consumed
 
@@ -2357,8 +2707,8 @@ live mode, `cargo update`, `cargo clean` in a shared target directory, or Python
 |---|---|---|---|
 | T0 | `t0_numeric/*.json`: 7 tables, 155,054 rows | `crates/types/tests/t0_numeric.rs` (WP4) | exactly; recompute `inputs_f64_sha256` after parsing; `errors` rows → `Err`; `specials` through the `_om` variants |
 | T1 (v0) | `t1_lmc/v0/*.json` + `packets/*.hex` | `crates/lmc/tests/t1_py_compat.rs` (WP4) | `py-compat` event lists exactly (kinds, hex, statuses, packet sha256) |
-| T1 (v1) | `t1_lmc/v1/*.json` | `crates/lmc/tests/t1_shipping_vs_v1.rs` (WP4) | shipping list commands equal v1's except the §5.2 rule-6 lines (divergence-aware comparator over decoded commands) |
-| rust-v1 | `tests/golden/rust-v1-candidate/` (new; written with `UPDATE_RUST_V1=1`) | `crates/lmc/tests/rust_v1.rs` (WP4), `crates/driver/tests/rust_v1_session.rs` (WP5) | candidate until Luiz signs D13, then frozen as `tests/golden/rust-v1/` |
+| T1 (v1) | `t1_lmc/v1/*.json` | `crates/lmc/tests/t1_shipping_vs_v1.rs` (WP4) | shipping list commands equal v1's except the §5.2 rule-6 lines and the lighting lists' first `JumpSpeed` (divergence-aware comparator over decoded commands; every other command, including every `dist` word, equal) |
+| rust-v1 | `tests/golden/rust-v1-candidate/lmc/` (WP4: packets and list listings) and `…/session/` (WP5: wire event streams), written with `UPDATE_RUST_V1=1` | `crates/lmc/tests/rust_v1.rs` (WP4), `crates/driver/tests/rust_v1_session.rs` (WP5) | candidate until Luiz signs D13, then frozen as `tests/golden/rust-v1/` |
 | T2 | `t2_gcode/index.json`, `*.gcode`, `number_format.json` | `crates/gcode/tests/t2.rs` (WP2) | 100,019 number rows exact; 44 cases byte-exact after masking line 3, via `gcode::om`; shipping refuses the capped cases |
 | T3 | `t3_hatch/hatch.json`: 46 cases | `crates/geom/tests/t3_hatch.rs` (WP1) | segment count and order exact; coordinates within 1e-9 |
 | T4 | `t4_import/*.json`: 30 cases | `crates/import/tests/t4.rs` (WP2) | DXF counts exact, coordinates within 1e-9; SVG/STL rows informational |
@@ -2372,7 +2722,9 @@ Floats in fixtures are parsed with `serde_json`'s `float_roundtrip`. Fixture pat
 ### 6.3 Simulator suites (T6; FakeLmc, FakeGrbl)
 
 All seeded and deterministic on `VirtualClock`, plus a real-time variant (`SystemClock`, 2 ms transfer latency)
-for the stop budget. 200 randomised runs per gate run (`T6_RUNS` env to raise it).
+for the stop budget. 200 randomised runs per gate run (`T6_RUNS` env to raise it). Randomised stops are tripped
+from `FakeLmc::set_hook` at a seeded wire event or virtual tick, never from another thread (determinism). Driver
+T6 tests are integration tests in `crates/driver/tests/` (the `lmc-sim` dev-dependency cycle, §2.3 rule 10).
 
 | Test | Asserts |
 |---|---|
@@ -2384,9 +2736,17 @@ for the stop budget. 200 randomised runs per gate run (`T6_RUNS` env to raise it
 | `t6_watchdog_only_without_progress` | a slow but progressing board is never stopped by the watchdog |
 | `t6_framing_records_zero_emission` | every frame: `burned` empty, MO never opened |
 | `t6_run_ahead_cap_packets_and_seconds` | queued ≤ 3 packets and ≤ 2 s estimated, never < 1 |
+| `t6_slow_packets_execute_without_deadlock` | every packet estimated > 2 s (business-card raster at 300 mm/s): ExecuteList after packet 1, the job finishes, no watchdog fault |
+| `t6_buffer_depth_1_and_2_complete` | FakeLmc `buffer_depth` 1 and 2: READY drops before packet 3, ExecuteList is sent, the job finishes |
 | `t6_inflight_packet_completed_before_stop_execute` | wire order on a stop with a packet in flight |
-| `t6_dead_man_handle_drop_stops`, `t6_panic_guard_stops` | MO closed, ports 0 |
-| `t6_frame_receipt_only_after_full_pass` | no receipt before one fully acknowledged pass |
+| `t6_abort_mid_list_sends_no_execute_list` | stop after ExecuteList: the abort's dummy packet (if READY) is not followed by ExecuteList; after a finished list it is (OM v1 parity) |
+| `t6_dead_man_handle_drop_stops`, `t6_panic_guard_stops`, `t6_handle_drop_waits_for_stop_report` | MO closed, ports 0; the dropping thread returns only after the StopReport (≤ 500 ms) |
+| `t6_driver_never_blocks_on_unpolled_events` | nobody reads `events()` during a 100 000-transfer job; stop latency is unchanged |
+| `t6_frame_receipt_only_after_executed_pass` | Once: no receipt until !BUSY after the list; a stop before it gives none. Loop: receipt k only after pass k's !BUSY |
+| `t6_stop_after_queue_cancels_queued_run` | trip the latch after `run()` is queued but before the driver dequeues it: the run is refused `StoppedAfterQueue`, nothing is written |
+| `t6_run_refused_when_bytes_differ_from_token` | a job whose packets differ by one byte from the token's `bytes`: `BytesMismatch`, nothing written |
+| `t6_run_refused_while_framing` | `run()` during a Loop frame: `MachineBusy` from the driver itself |
+| `t6_transfer_timeout_faults_and_stops` | a reply that never comes (`Fault::ReplyTimeouts`): Fault after `transfer_timeout_ms`, emergency stop, no retry, no reset |
 | `t6_run_refused_without_own_receipt`, `t6_run_refused_tool_layers_receipt`, `arm_token_single_use`, `arm_token_expired_refused` | the driver's own re-checks |
 | `t6_business_card_emission_matches_design` | FakeLmc `burned` equals the plan's sections within 1 galvo unit |
 | `t6_mo_closed_ports_zero_after_every_stop`, `t6_session_init_once` | |
@@ -2408,7 +2768,11 @@ for the stop budget. 200 randomised runs per gate run (`T6_RUNS` env to raise it
 `prop_points_inside_work_area_encode` (types/safety), `prop_speed_units_stable_over_field` (F ∈ [100, 300]),
 `prop_packets_3072_padded`, `prop_lighting_never_marks` (no `0x8005`, `0x8003`, MO open), `prop_encode_disassemble_roundtrip`,
 `prop_summary_matches_plan`, `prop_frame_covers_burn`, `prop_hatch_inside_even_odd`, `prop_flatten_within_tolerance`,
-`prop_plan_deterministic`, `prop_undo_redo_roundtrip`, `olp_roundtrip_equal`, `prop_stop_at_random_tick_leaves_mo_closed`.
+`prop_plan_deterministic`, `prop_undo_redo_roundtrip`, `olp_roundtrip_equal`, `prop_stop_at_random_tick_leaves_mo_closed`,
+`prop_encode_is_session_independent` (same EmitPlan → same packet bytes and `bytes_hash`, whatever ran before),
+`prop_fingerprint_ignores_frame_style` (S21), and, standing in for cargo-fuzz this build,
+`prop_importers_never_panic` (random bytes into SVG, DXF, OM workspace, `.olp`) and
+`prop_control_reader_never_panics` (random bytes into the bounded line reader and the discovery-file reader).
 
 ### 6.6 Named regression tests for the prototype's bugs
 
@@ -2436,8 +2800,20 @@ fit. Rules:
 - **Two shared target lanes**: `~/AI/OpenLaser/.target/core` for WP1–WP7 (no egui in their closures) and
   `~/AI/OpenLaser/.target/gui` for WP8, WP9 and the integrator. Cargo's build-directory lock serialises builds
   within a lane; keep test invocations to your own crates (`-p`), which take seconds once dependencies are built.
-- WP0 warms both lanes (`cargo build --workspace --tests` in each) after committing `Cargo.lock`. Work packages
-  never change `Cargo.lock`, so every worktree reuses the same dependency artifacts.
+  Registry and git dependencies are shared across worktrees; workspace crates are compiled once per worktree
+  (their path is part of the build hash), which is small.
+- **The core lane never builds the GUI stack.** Its package set is every workspace member except
+  `openlaser-ui-egui`, `openlaser-human` and `openlaser` (the app); WP0 warms it with
+  `cargo build --tests -p <each of those>` and checks it with `cargo clippy -p … --all-targets`, never
+  `--workspace` (that would put a second egui/wgpu build, several GB, in the core lane). The gui lane is warmed with
+  `cargo build --workspace --tests`. Prefer `cargo clippy` + `cargo test` and skip a separate `cargo check`:
+  check-mode and build-mode artifacts are stored separately.
+- **Luiz's lane**: `hw` builds go to `~/AI/OpenLaser/.target/hw` (S23), outside every agent lane, so no agent ever
+  finds or runs a hardware-enabled binary, and agents never build there.
+- The Windows cross-check (§2.6) adds the target's standard library (rustup) and `x86_64-pc-windows-msvc/` check
+  artifacts inside the gui lane; only the integrator runs it.
+- WP0 warms both lanes after committing `Cargo.lock`. Work packages never change `Cargo.lock`, so every worktree
+  reuses the same dependency artifacts.
 - Worktrees live in `~/AI/OpenLaser/wt/<wp>` (git shares objects; `tests/golden` is 12 MB per checkout).
 - Debug only (`debug = "line-tables-only"`); no release builds; no `cargo clean` in a shared lane; no `cargo doc`.
 - Check `df -h /` before a large build; if less than 8 GB is free, stop and report instead of building.
@@ -2472,6 +2848,15 @@ text) before any hardware session.
    `CONTRACT CHANGE` items, `REQUESTS` for shared files, known gaps.
 6. Tests that need another package's behaviour are written now and marked `#[ignore = "needs I1"]` or
    `#[ignore = "needs I2"]`; the integrator un-ignores them at that step.
+6a. **Early merges, so parallelism is real.** Stubs alone leave WP3's planner with nothing to plan
+   (`world_polylines` returns nothing) and WP7/WP8 with no commands to dispatch. So the integrator merges two
+   partial deliveries into `main` mid-session and the waiting packages rebase onto them:
+   **I0** = WP1's `doc` model behaviour (`Project::new`, `world_polylines`, `normalize`), `geom::flatten` and
+   `geom::hatch`/`hatch_om` (WP1 does these first and tags the commit `wp1-core`);
+   **I1.5** = WP6's registry, `command!`, `decode`, the policy table and the core commands (`file.new`,
+   `file.open`, `file.import`, `file.save`, `edit.undo`/`redo`, `layer.cutSettings.set`, `layer.assign`,
+   `job.plan`) tagged `wp6-core-b`. WP6 also tags its Phase A end (`wp6-phase-a`) and WP9 keeps `apps/openlaser-hw`
+   and `crates/human` in separate commits, so I1 can merge Phase A and the `openlaser-hw` part alone.
 7. Provenance: ported code carries a header naming the source file, commit and licence — galvoplotter
    (`// Ported from meerk40t/galvoplotter@fc35136 galvo/controller.py, MIT`), the OM prototype (MIT), PhotoCraft
    and craft-libs (MIT OR Apache-2.0). Never GPL sources (balor, LaserGRBL, K40 Whisperer), never LightBurn code,
@@ -2486,21 +2871,29 @@ text) before any hardware session.
      pins, lints, profiles §2.5), `rust-toolchain.toml`, `.cargo/config.toml`, `clippy.toml` additions
      (`disallowed-methods`), `deny.toml` (PLAN §8 licence policy), root `ATTRIBUTION.md`, `docs/DIVERGENCES.md`
      draft from §5.6.
-  2. All 21 crates, 3 apps and `xtask`, each `Cargo.toml` with exactly the §2.2 dependencies, and the §3 contracts
-     as compiling, non-panicking stubs, with module files split along the ownership lines (`types/src/arm.rs`,
-     `types/src/galvo.rs`, `testkit/src/t0.rs` …).
+  2. All 21 crates, 3 apps and `xtask`, each `Cargo.toml` with exactly the §2.2 dependencies **plus the
+     dev-dependencies every owner's tests will need** (testkit, proptest, insta, tempfile, serde_json, sha2,
+     `safety`/`arm`/`lmc` test features, `lmc-sim` per §2.3 rule 10), so no package edits another's manifest; and
+     the §3 contracts as compiling, non-panicking, fail-closed stubs (§3.0), with module files split along the
+     ownership lines (`types/src/arm.rs`, `types/src/galvo.rs`, `types/tests/`, `testkit/src/t0.rs` …). The
+     §3.0 "implemented in full" items (`safety::testing`, `arm::testing` incl. `token_for_tests`, refusal builders)
+     are real code.
   3. `testkit`: `repo_root`, `golden_dir`, `fixture`, `sha256_hex`, `hex_decode` implemented; loaders stubbed.
-  4. `xtask`: `deps` (rules §2.3 1–12 from `cargo metadata`, plus the source greps for rules 9 and 11),
-     `golden-verify`, `parity` (reads `ui-egui`'s catalogue once WP8 fills it), `ci`.
+  4. `xtask`: `deps` (rules §2.3 1–17 from `cargo metadata`, with `hw` off and on, plus the source greps for rules 9,
+     11 and 13–17), `golden-verify`, `parity` (reads `ui-egui`'s catalogue once WP8 fills it), `ci`.
   5. `tests/fixtures/`: `square10mm.svg` (mm units), `unitless.svg`, `circle.dxf`, `gray64.png`,
      `om_small/workspace.json` + `layer_settings.json`.
   6. `AGENTS.md`: replace "`openlaser-cli` frame, mark or run against a real device" with "`openlaser-hw`, or any
-     binary built with `--features hw`"; add the lanes and the gate (§6.1, §6.7).
-  7. `cargo fetch`; `cargo check --workspace --all-targets` and `cargo clippy --workspace --all-targets -- -D
-     warnings` green in both lanes; commit; warm both lanes.
+     binary built with `--features hw`"; add the lanes, the gate (§6.1, §6.7), S23 (`OPENLASER_HW_PRESENT` is
+     never set by an agent) and the in-process binary-test rule.
+  7. `cargo fetch` (the craft-libs revisions are already in the local git cache); `cargo clippy --all-targets -- -D
+     warnings` green for each lane's package set (§6.7: the core lane never builds egui); commit; warm both lanes.
 - **Acceptance**: the gate is green on stubs; `cargo xtask deps` green; `cargo tree -d -e normal` shows one egui,
-  one kurbo, one usvg; `cargo tree -i nusb -e normal` shows only `openlaser-transport` (and the apps with `hw`);
-  `cargo tree -p openlaser-cli -e normal | grep -E 'openlaser-(arm|human|transport)'` is empty.
+  one kurbo, one usvg, one craft-ui; `cargo tree -i nusb -e normal` shows only `openlaser-transport` (and the apps
+  with `hw`); `cargo tree -p openlaser-cli -e normal | grep -E 'openlaser-(arm|human|transport)'` is empty
+  (`openlaser-format` is in its closure through `engine`; rule 17's grep, not the graph, keeps `DirProfileStore` out);
+  `cargo test -p openlaser-format` builds in the core lane (proves the flate2 backend is selected); no
+  `[profile.test]` warning in the build output.
 - **Depends on**: nothing. **Blocks**: everything.
 
 ### 7.2 WP1 — Model and geometry
@@ -2517,15 +2910,20 @@ text) before any hardware session.
   `jpt_m7_200`/`_sim` (FIELDSIZE 200, scale 1.1834, 1–4000 kHz, JPT table, max 6000 mm/s, jump and light 3000 mm/s,
   MO settle 8 ms, GP timings, first jump 200 µs + 1 ms, run-ahead 3 packets / 2 s, checklist), `om_gantries`
   (from GOLD T2 machines), `validate_profile`, `effective_work_area`, `markcfg::{parse, apply}`,
-  `om::parse_calibration`. format: `.olp` save/load with the separate manifest model, `TooNew`, `NonFinite`,
-  `LimitExceeded` (zip-slip, > 64 MiB decompressed, > 1 M points, group depth > 32), atomic save.
+  `om::parse_calibration`, the `ProfileStore` trait. format: `.olp` save/load with the separate manifest model,
+  `TooNew`, `NonFinite`, `LimitExceeded` (zip-slip, > 64 MiB decompressed, > 1 M points, group depth > 32), atomic
+  save; `machines::{profiles_dir, load_all, DirProfileStore}` (S24); `types::{serde_secs, serde_ms}`, `DeviceKind`.
+  **First, for I0** (§7.0 6a): `Project::new`, `world_polylines`, `normalize`, `flatten`, `hatch_om`, `hatch`,
+  tagged `wp1-core`.
 - **Acceptance**: `cargo test -p openlaser-types -p openlaser-geom -p openlaser-doc -p openlaser-machine -p
   openlaser-format`, including `t3_hatch` (46 cases; business card 969 segments, 32 closed, 67 open; cross-hatch
   1637), `prop_flatten_within_tolerance`, `prop_hatch_inside_even_odd`, `prop_hatch_bidirectional_equals_om`,
   `jpt_m7_matches_om_profile`, `markcfg_parses_om_profile`, `calibration_out_of_range_refused`,
   `effective_work_area_is_rated_field`, `olp_roundtrip_equal` (proptest), `olp_too_new`, `olp_nonfinite_refused`,
-  `olp_zip_slip_refused`.
-- **Depends on**: WP0. **Merge**: first at I1.
+  `olp_zip_slip_refused`, `validate_profile_rejects_empty_checklist`, `work_area_cannot_grow_past_h27_cleared`,
+  `saved_profile_shadows_builtin`, `invalid_profile_file_skipped_with_message`, `fingerprint_json_is_64_hex`,
+  `durations_serialise_as_seconds`.
+- **Depends on**: WP0. **Merge**: `wp1-core` at I0, the rest first at I1.
 
 ### 7.3 WP2 — Import, G-code, render
 
@@ -2538,14 +2936,15 @@ text) before any hardware session.
   with a notice); DXF: `dxf_om` (T4 exact) and the shipping importer (the same parser, SPLINE evaluated); raster
   images → `Geom::Bitmap` (8-bit grey; size from the file's DPI, else 254 DPI with a notice); OM workspace +
   layer settings → `Imported` (Appendix B; B9 refusal). gcode: `number`, `om::compile_gcode_om` (T2, capping
-  included), shipping `compile` from `EmitPlan` (gantry block only), `frame_program`. render: the three list
-  builders, `fit`, deterministic `render_png` with the size caps.
+  included), shipping `compile` from `EmitPlan` (gantry block only), `frame_program` → sealed `GcodeFrame`,
+  `GcodeProgram::bytes_hash`. render: the three list builders, `fit`, deterministic `render_png` with the size caps.
 - **Acceptance**: `t4` (30 cases), `import_malformed_points_refused` (B9), `svg_true_scale_mm`,
   `svg_unitless_refused`, `svg_colour_to_palette_layer`, `om_workspace_business_card_imports` (403 objects, 3057
   points, layers per Appendix B), `t2` (number rows + 44 cases), `gcode_diode_job_uses_gantry_defaults` (B11),
-  `gcode_compile_never_caps` (defence in depth: a section above max speed is an error), `render_png_deterministic`,
-  `render_png_size_capped`, `render_business_card_snapshot` (insta binary snapshot, reviewed once).
-- **Depends on**: WP0; WP1 behaviour for doc helpers (merge after WP1).
+  `gcode_compile_never_caps` (defence in depth: a section above max speed is an error),
+  `gcode_frame_program_has_no_laser_on` (no M3/M4, no S>0), `render_png_deterministic`, `render_png_size_capped`,
+  `render_business_card_snapshot` (insta binary snapshot, reviewed once), `prop_importers_never_panic`.
+- **Depends on**: WP0; WP1 behaviour for doc helpers (rebase on I0; merge after WP1).
 
 ### 7.4 WP3 — Plan, safety, ARM minting (red zone)
 
@@ -2555,9 +2954,10 @@ text) before any hardware session.
 - **Deliverables**: plan (section order, sub-layers, passes, global passes, repeats; machine transform; Line
   flattening; Fill through `geom::hatch`; Image runs as a stretch; `GalvoCutQ` through `types::galvo`; gantry
   quantisation; frame Bounds/Contour (Fill layers frame their closed outlines, never the hatch) and tool frame;
-  `PlanFacts`; galvo and gantry estimates; canonical fingerprint). safety: `validate` with every §3.8 rule,
-  collecting all refusals; `validate_frame`; `rules()`; `testing`. arm: `mint`, `tty_nonce`, `testing`;
-  `ArmToken::check`.
+  `PlanFacts`; galvo and gantry estimates; canonical fingerprint per S21, frame style and source excluded).
+  safety: `validate` with every §3.8 rule, collecting all refusals; `validate_frame`; `rules()` (`testing` is
+  WP0's). arm: `mint` (binds `bytes_hash`, GUI checklist ≥ 1, TTY rules of §3.9), `tty_nonce`;
+  `ArmToken::check` (incl. `BytesMismatch`).
 - **Acceptance**: one `safety_<code>` test per rule including `safety_outside_work_area_refused` (B10),
   `safety_plus_half_field_refused`, `safety_speed_zero_units_refused` (B7), `safety_hidden_output_refused` (B6),
   `safety_orphan_object_refused` (B8), `safety_empty_fill_layer_refused`, `safety_nan_pulse_refused`,
@@ -2565,27 +2965,32 @@ text) before any hardware session.
   `safety_gantry_overspeed_refused`, `safety_collects_all_refusals`, `rules_table_complete`;
   `prop_frame_covers_burn`, `prop_speed_units_stable_over_field`, `prop_plan_deterministic`,
   `notice_open_fill_shape_numbered`, `plan_business_card_matches_om` (raster pass = T3 business-card segments;
-  vector layer 304 paths / 1750 points); `mint_refuses_<code>` for each mint refusal, `mint_ok_issues_60s_token`,
-  `arm_token_check_<case>`. Second-model review before merge.
-- **Depends on**: WP0; WP1 (hatch, doc) for Fill tests.
+  vector layer 304 paths / 1750 points); `prop_fingerprint_ignores_frame_style`, `fingerprint_changes_with_power`;
+  `mint_refuses_<code>` for each mint refusal, `mint_refuses_empty_gui_checklist`, `mint_token_carries_bytes_hash`,
+  `mint_ok_issues_60s_token`, `arm_token_check_<case>` incl. `bytes_mismatch`. Second-model review before merge.
+- **Depends on**: WP0; WP1 (hatch, doc) for Fill tests: rebase on I0 (`wp1-core`) as soon as it lands.
 
 ### 7.5 WP4 — LMC protocol and simulator
 
-- **Scope**: `crates/types/src/galvo.rs`, `crates/lmc`, `crates/lmc-sim`, `crates/testkit/src/{t0.rs,t1.rs}`,
-  `tests/golden/rust-v1-candidate/` (new directory).
+- **Scope**: `crates/types/src/galvo.rs`, `crates/types/tests/t0_numeric.rs`, `crates/lmc`, `crates/lmc-sim`,
+  `crates/testkit/src/{t0.rs,t1.rs}`, `tests/golden/rust-v1-candidate/lmc/` (new directory).
 - **Inputs**: §3.1 (galvo), §3.12, §3.14, §5.1–§5.6; R05 §1 and Appendix B; GOLD; galvoplotter 0.2.0 in
   `~/AI/OpenLaser/OpenMopa/.venv/lib/python3.10/site-packages/galvo/` (read; port with the MIT header; never run
   its tests); `tests/golden/generator/{decode_t1.py,fake_board.py}` (event model); `rayforge-test/fake_grbl.py`.
 - **Deliverables**: the T0 encoders; the opcode table; `Single`, `Packet`, status; `init_sequence`; `encode_job` and
-  `encode_frame` per §5.2; `decode_packet`, `disassemble`, `emission_summary` from bytes, `emitted_segments`;
-  `LmcTransport` + the `Box` impl; `py_compat`; FakeLmc (buffer depth, galvo-time-model timing, faults, the
-  independent emission recorder); `simulate_job`; `SimProvider`; `grbl::FakeGrbl`.
+  `encode_frame` per §5.2 (session-independent bytes, first-jump `dist` from the centre, the lighting list's
+  leading `JumpSpeed`, `once` + `once_passes` and a complete one-pass `pass` list); `LmcJob::bytes_hash`;
+  `decode_packet`, `disassemble`, `emission_summary` from bytes (incl. `bytes_hash`), `emitted_segments`;
+  `LmcTransport` + the `Box` impl; `py_compat`; FakeLmc (`Arc<dyn Clock>`, buffer depth, galvo-time-model timing,
+  faults, `set_hook`, the independent emission recorder); `simulate_job`; `SimProvider` (incl. `detect`);
+  `grbl::FakeGrbl`.
 - **Acceptance**: `t0_numeric` (all 7 tables); `t1_py_compat` (every v0 scenario and the init/abort slices);
   `t1_shipping_vs_v1` (mark_box10, dot_test, line_test, long_job, both business-card passes, frame_box10, bc_frame);
   `t1_dot_test_has_explicit_jump_and_settle` (B3); `prop_packets_3072_padded`, `prop_lighting_never_marks`,
-  `prop_encode_disassemble_roundtrip`, `prop_summary_matches_plan`; `fake_records_mark_box10_emission` (four 10 mm
-  segments), `fake_frame_records_zero_emission`, `fake_counts_writes_while_not_ready`, `fake_grbl_streams_square`;
-  the candidate rust-v1 streams written by `UPDATE_RUST_V1=1 cargo test -p openlaser-lmc rust_v1`.
+  `prop_encode_disassemble_roundtrip`, `prop_summary_matches_plan`, `prop_encode_is_session_independent`;
+  `bytes_hash_changes_with_any_byte`; `fake_records_mark_box10_emission` (four 10 mm segments),
+  `fake_frame_records_zero_emission`, `fake_counts_writes_while_not_ready`, `fake_grbl_streams_square`; the
+  candidate rust-v1 lists written by `UPDATE_RUST_V1=1 cargo test -p openlaser-lmc rust_v1`.
 - **Depends on**: WP0 (it uses `safety::testing` for `EmitPlan`s; real plans at I1).
 
 ### 7.6 WP5 — Driver and transport (red zone)
@@ -2593,16 +2998,20 @@ text) before any hardware session.
 - **Scope**: `crates/driver`, `crates/transport`.
 - **Inputs**: §3.13, §3.15, §5; PLAN §3.4, §3.5, §5.3; R05 §1.9–§1.11, §3.3; nusb 0.2.8 API docs; GP
   `usb_connection.py` (to know what not to port: resets and retries).
+- **Scope** addition: `tests/golden/rust-v1-candidate/session/`.
 - **Deliverables**: the runtime (one OS thread per machine, crossbeam control channel, `StopLatch`/`Stopper`
-  with `stop_and_wait`, `Cx` slices, dead-man on handle drop, panic guard), `LmcBackend` (§5.3: connect, frame with
-  receipts, run with the token/nonce/receipt re-check, watchdog, run-ahead, `emergency_stop`, `status`),
-  `GrblBackend` (§5.7), `DeviceProvider`/`ByteLink`; transport: `UsbProvider`/`UsbLmc` (nusb; compiled, never
-  run by agents), `detect`, `BoardLock`, `bench`, `SerialLink`/`TcpLink`, the keepawake assertion, and
-  `OPENLASER_NO_HW` checked before anything else.
+  with `stop_and_wait` and trip generations, `Cx` slices, non-blocking unbounded events, dead-man with the ≤ 500 ms
+  join, panic guard), `LmcBackend` (§5.3: connect, frame with executed-pass receipts and per-pass Loop lists, run
+  with the token/bytes-hash/nonce/receipt re-check, the run-ahead window and ExecuteList trigger, watchdog,
+  transfer timeout, `emergency_stop` with OM v1's ExecuteList rule, `status`, MachineBusy), `GrblBackend` (§5.7,
+  `Frame = GcodeFrame`), `DeviceProvider` (incl. `detect`)/`ByteLink`; transport: `UsbProvider`/`UsbLmc` (nusb;
+  compiled, never run by agents; `usb_set_configuration` rule; `transfer_timeout_ms`), `detect`, `BoardLock`,
+  `bench` (incl. the S23 emission cap), `SerialLink`/`TcpLink`, the keepawake assertion, and the
+  `OPENLASER_NO_HW` / `OPENLASER_HW_PRESENT` checks before anything else.
 - **Acceptance**: the §6.3 table, `rust_v1_session` (connect + mark_box10 + frame_box10 on a READY board equals
-  the candidate stream), transport's pure tests (`no_hw_env_refuses`, `bench_session_expiry` in a temp dir,
-  `board_lock_second_holder_refused`) — **no test enumerates or opens USB**. Second-model review; Luiz reviews the
-  T6 summary (worst stop, p99) before merge.
+  the candidate stream), transport's pure tests (`no_hw_env_refuses`, `hw_present_unset_refuses`,
+  `bench_session_expiry` and `bench_first_emission_cap` in a temp dir, `board_lock_second_holder_refused`) — **no
+  test enumerates or opens USB**. Second-model review; Luiz reviews the T6 summary (worst stop, p99) before merge.
 - **Depends on**: WP0; WP4's FakeLmc for the full suite (until then a scripted transport inside driver tests).
 
 ### 7.7 WP6 — Engine
@@ -2610,11 +3019,14 @@ text) before any hardware session.
 - **Scope**: `crates/engine`, `crates/testkit/src/adversarial.rs`.
 - **Inputs**: §3.16, §4.3, §4.4, Appendix A; ENG Part 2; AUT B6–B9, C3.4–C3.5; PhotoCraft `crates/engine`
   (`commands.rs`, `lib.rs` `Session::edit`, `jobs.rs` dispatch) for patterns.
-- **Phase A (needed by I1)**: `Session` skeleton, machines, `DocState`/`edit`/`undo`/`redo`, `build_job`,
-  `live_check`, the device hub over `DeviceProvider`, `connect`/`start_frame`/`request_arm`/`run_armed`/
-  `stop_all`/`StopRegistry`/`poll`/`CachedStatus`, `requests`.
+- **Phase A (needed by I1, tagged `wp6-phase-a`)**: `Session` skeleton, machines and `profiles: ProfileStore`,
+  `DocState`/`edit`/`undo`/`redo`, `build_job`, `live_check`, the device hub over `DeviceProvider`,
+  `connect`/`start_frame` (style/source without an edit)/`request_arm` (PendingArm holds the encoded job)/
+  `run_armed` (sends that job, bench cap)/`stop_all` (voids PendingArm)/`StopRegistry`/`poll`/`CachedStatus`,
+  `requests`.
 - **Phase B (needed by I2)**: registry, `command!`, `decode` (snake normalisation, strict), the policy table, every
-  Appendix A command, `batch` (atomic), `command_list`/`command_schema`, `inspect`, prefs.
+  Appendix A command, `batch` (atomic), `command_list`/`command_schema`, `inspect`, prefs. The core subset listed
+  in §7.0 6a lands first, tagged `wp6-core-b`, for I1.5.
 - **Acceptance**: `e2e_mopa_business_card_sim` (`needs I1`: import the OM workspace → build_job ok with 67
   open-shape notices → connect sim → frame Once → receipt → request_arm → mint with `arm::testing` → run_armed →
   FakeLmc burned segments match the plan; a stop mid-run gives a confirmed StopReport); `pending_arm_voided_by_edit`,
@@ -2625,7 +3037,11 @@ text) before any hardware session.
   `device_commands_never_journaled`; `prop_undo_redo_roundtrip`, `atomic_batch_rolls_back`,
   `coalesce_merges_drags`, an undo round-trip test for every Edit command; `commands_snapshot` (insta);
   `panic_hunt` (`#[ignore]`, run at I2); `prefs_set_refuses_machine_and_automation_keys`,
-  `submit_with_refusals_creates_nothing`, `job_submit_never_reaches_driver_run`, `edit_after_submit_marks_stale`.
+  `submit_with_refusals_creates_nothing`, `job_submit_never_reaches_driver_run`, `edit_after_submit_marks_stale`,
+  `run_armed_sends_the_pending_job_object` (the driver receives the same `bytes_hash` the summary showed),
+  `stop_voids_pending_arm`, `frame_with_bounds_style_satisfies_start_for_contour_job` (S21),
+  `device_select_bumps_revision`, `profiles_read_only_without_store` (`device.settings.set` with `profiles: None`
+  fails even for `Origin::Human`).
 - **Depends on**: WP0; WP1–WP5 behaviour for the E2E (runs at I1).
 
 ### 7.8 WP7 — Control, automation, `openlaser-cli`
@@ -2645,9 +3061,13 @@ text) before any hardware session.
   `workspace_path_grammar`, `roots_fail_closed`; `headless_device_tools_need_bridge`,
   `job_plan_refusal_is_ok_false`, `job_simulate_business_card` (`needs I1`), `render_preview_is_document`;
   `fast_stop_answers_without_ui_thread` (nobody drains the request channel; `machine.stop` still returns within
-  500 ms); `cli_unknown_flag_exit_2`, `cli_hw_subcommands_redirect`, `cli_plan_exit_1_on_refusal`,
-  `cli_simulate_writes_png`, `cli_mcp_initialize_lists_tools` (spawns `openlaser-cli mcp` with tempdir roots).
-- **Depends on**: WP0; WP6 for real commands (tests marked `needs I2` where they need them).
+  500 ms); `mcp_stop_not_blocked_by_inflight_call` (a bridge call parked for 50 s on a fake app; `stop` still
+  answers within 500 ms through `StopHandle`), `stop_accepted_on_17th_connection`,
+  `prop_control_reader_never_panics`; `cli_unknown_flag_exit_2`, `cli_hw_subcommands_redirect`,
+  `cli_plan_exit_1_on_refusal`, `cli_simulate_writes_png`, `cli_run_is_headless_origin` (`run --cmd laser.start`
+  and `--cmd device.settings.set` are refused human-only) — all in process through `src/lib.rs` — and one spawned
+  smoke test, `cli_mcp_initialize_lists_tools` (`openlaser-cli mcp` with tempdir roots; §6.1).
+- **Depends on**: WP0; WP6 for real commands (tests marked `needs I2` where they need them; rebase on I1.5).
 
 ### 7.9 WP8 — GUI shell in LightBurn's layout
 
@@ -2672,7 +3092,9 @@ text) before any hardware session.
     while active, close guard); the control dispatcher (§4.5) with human-only refusals; Settings › Automation ›
     Allow agent connections (a human-only switch) starting `ControlServer`, writing the discovery file, showing the indicator;
   - `apps/openlaser`: arguments, native options (1440×900, min 760×480), `Services` (rfd async, craft-settings,
-    craft-quit last in `logic`), the Simulator machine; feature `hw` adds `UsbProvider` and "JPT M7 · USB".
+    craft-quit last in `logic`), the Simulator machine, `DirProfileStore`, the panic hook and signal watcher
+    (§5.4); feature `hw` adds `UsbProvider` and "JPT M7 · USB". `src/control/input.rs` is the only builder of
+    synthetic `egui::Event`s (§2.3 rule 16).
 - **Acceptance** (kittest, `NoHuman` unless stated): `kittest_lightburn_regions_present`,
   `kittest_palette_has_30_plus_tools`, `kittest_cuts_columns_and_actual_speed`, `kittest_air_hidden_for_galvo`,
   `kittest_double_click_opens_cut_settings`, `kittest_cut_settings_ok_is_one_undo_step`,
@@ -2682,38 +3104,54 @@ text) before any hardware session.
   `kittest_stop_always_visible_and_enabled` (every state × default layout, Laser closed, Laser floated, modal open,
   1024 pt wide, 2× ppp), `kittest_esc_trips_latch_before_widgets`, `control_refuses_human_only` (via
   `engine.execute`, `ui.menu.invoke`, batch), `synthetic_click_on_frame_button_does_not_frame`,
-  `kittest_quit_while_marking_stops_first`, `dock_layout_roundtrip_and_fallback`, `menu_catalog_matches_cat`,
-  `parity_floor`, `kittest_accessibility_labels`, `canvas_view_xform_roundtrip`, `hit_test_and_marquee`. S1/S2
-  perf harnesses exist (`#[ignore]`; Luiz runs them in release later).
-- **Depends on**: WP0; WP6 for command behaviour (`needs I2` where required).
+  `kittest_quit_while_marking_stops_first`, `kittest_esc_closes_arm_dialog`, `dock_layout_roundtrip_and_fallback`,
+  `menu_catalog_matches_cat`, `menu_catalog_has_no_human_only_ids` (no catalogue row or shortcut resolves to an
+  `Access::Human` command), `catalog_shortcuts_match_registry`, `every_control_method_has_a_handler` (every
+  `control::methods::METHODS` entry is handled, none falls through to "unknown method"), `parity_floor`,
+  `kittest_accessibility_labels`, `canvas_view_xform_roundtrip`, `hit_test_and_marquee`,
+  `hidden_window_still_polls_while_active` (with the window hidden and a machine active, `logic` keeps running on
+  the 250 ms repaint and `poll` drains driver events). S1/S2 perf harnesses exist (`#[ignore]`; Luiz runs them in
+  release later).
+- **Depends on**: WP0; WP6 for command behaviour (`needs I2` where required; rebase on I1.5).
 
 ### 7.10 WP9 — Human surfaces and `openlaser-hw` (red zone)
 
 - **Scope**: `crates/human`, `apps/openlaser-hw`.
 - **Inputs**: §3.9, §3.20, §3.21, §4.6, §5.4; AUT C3; UI §7; PLAN §3.6 layer 5 and the M1.2 flow.
-- **Deliverables**: `Human` (taint record keyed by a private type, `inject`, `frame_is_synthetic`,
-  `is_human_click`/`gesture`, visibility timers, the freeze while a surface is open), the ARM dialog (§3.20),
-  approval-card helpers; `openlaser-hw` as a library + thin `main` behind a `Terminal` trait, every subcommand,
-  bench, TTY ARM (`tty_arm.rs`), crossterm key thread, signal-hook (unix) / ctrlc (windows) signals, `--sim`, the `hw` feature wiring.
+- **Deliverables**: `Human` (taint record held in the struct, 3 frames + 1 s, `inject`, `frame_is_synthetic`,
+  `is_human_click`/`gesture`, visibility timers, the freeze while a surface is open), the ARM dialog (§3.20, closed
+  by any stop, bench-cap display), approval-card helpers; `openlaser-hw` as a library + thin `main` behind a
+  `Terminal` trait, every subcommand of §3.21 (incl. `profile`, `--builtin`, `--trace`, `--allow-emission`,
+  `--extent`), bench and the S23 cap, TTY ARM (`tty_arm.rs`), crossterm key thread, signal-hook (unix) / ctrlc
+  (windows) watcher that waits for the StopReport, the panic hook, `--sim`, `DirProfileStore`, the `hw` feature
+  wiring. `apps/openlaser-hw` and `crates/human` go in separate commits (§7.0 6a).
 - **Acceptance**: `synthetic_click_on_arm_confirm_mints_nothing`, `synthetic_type_arm_clears_field_and_checklist`,
   `accesskit_click_on_arm_confirm_mints_nothing`, `human_click_after_300ms_mints_token`,
   `instant_click_before_300ms_ignored`, `unfocused_window_click_ignored`,
   `kittest_confirm_shows_decoded_layer_params` (B4: the layer is changed after the plan; the dialog still shows the
   decoded values), `arm_dialog_text_does_not_persist`, `arm_dialog_closed_by_revision_bump`;
-  `cli_arm_refused_without_tty`, `cli_enter_before_full_frame_pass_refused`, `cli_wrong_nonce_refused`,
-  `cli_run_sim_marks_business_card` (`needs I1`), `cli_sigint_trips_latch`, `cli_space_and_esc_stop`,
-  `cli_usb_requires_hw_feature`, `cli_bench_start_requires_tty`; `cargo xtask deps` rules 4, 6, 11.
-  Second-model review.
+  `arm_dialog_closed_by_stop`, `press_synthetic_release_human_ignored` (taint window);
+  `cli_arm_refused_without_tty`, `cli_enter_before_full_frame_pass_refused` (a pass counts only after its
+  !BUSY), `cli_wrong_nonce_refused`, `cli_run_sim_marks_business_card` (`needs I1`), `cli_sigint_trips_latch`,
+  `cli_signal_waits_for_stop_report`, `cli_space_and_esc_stop`, `cli_usb_requires_hw_feature`,
+  `cli_bench_start_requires_tty`, `cli_run_without_allow_emission_stops_after_frame`,
+  `cli_first_emission_power_cap_refused` (`SimConfig.emission_cap_pct = Some(10.0)`),
+  `cli_builtin_box10_matches_t1_inputs`, `cli_trace_file_matches_t1_event_format`, `cli_profile_set_requires_tty`,
+  `cli_extent_refused_for_run`; `cargo xtask deps` rules 4, 6, 11, 13. Second-model review.
 - **Depends on**: WP0 (the `HumanSurfaces` trait is in the WP0 contract); WP6 for the CLI run flow (I1).
 
 ### 7.11 Integration (integrator; sequential)
 
-**I1 — MOPA core first.** Merge WP1 → WP2 → WP3 → WP4 → WP5 → WP6 (Phase A) → WP9 (`openlaser-hw` part; the
-`human` crate may come with it if ready). Resolve contract changes. Un-ignore `needs I1`. Gates: the workspace gate
+**I0 — model core (early).** As soon as WP1 tags `wp1-core`: merge it; WP2, WP3 and WP4 rebase (§7.0 6a).
+
+**I1 — MOPA core first.** Merge WP1 → WP2 → WP3 → WP4 → WP5 → WP6 (`wp6-phase-a`) → WP9 (`openlaser-hw` commits;
+the `human` crate may come with it if ready). Resolve contract changes. Un-ignore `needs I1`. Gates: the workspace gate
 (§6.1) plus T0, T1 v0, T1 v1, T3, T4, T5, the full T6 table, `e2e_mopa_business_card_sim`,
 `cli_run_sim_marks_business_card`, `job_simulate_business_card`, and the B1–B10 mutation checks. Then write
 `docs/DIVERGENCES.md` for Luiz with the rust-v1 candidate listings (D13). **At this point the MOPA path
 doc → plan → lmc → driver → safety → CLI frame + mark is complete against the simulator.**
+
+**I1.5 — command core (early).** As soon as WP6 tags `wp6-core-b`: merge it; WP7 and WP8 rebase.
 
 **I2 — Agents and GUI.** Merge WP6 (Phase B) → WP7 → WP8 → WP9 (`human`). Un-ignore `needs I2`. Gates: the
 workspace gate, `panic_hunt --ignored`, the parity floor, and the whole-app tests in `apps/openlaser/tests/`:
@@ -2722,7 +3160,9 @@ ARM dialog → tick + type ARM → mark on FakeLmc → emission matches; Esc mid
 `mcp_bridge_end_to_end` (the app under kittest with its control server on a free port; a `BridgeClient`:
 doc_import, command_run, job_plan, job_submit → card appears → human Frame + ARM in the harness → job_status
 finished), `frame_request_without_approval_sends_no_lighting_packets`,
-`mcp_stop_latches_while_ui_thread_blocked`, `stop_served_while_human_surface_open`.
+`mcp_stop_latches_while_ui_thread_blocked`, `stop_served_while_human_surface_open`,
+`app_panic_hook_stops_machine` (a panic in a test-only command stops a running sim job before the harness
+unwinds), and the Windows cross-check (§6.1, integrator only).
 
 **I3 — Close-out.** Remove the `NotImplemented` variants (the compiler finds leftovers); `cargo xtask ci`;
 `HARDWARE.md` from §8; README quickstart (build, run with the Simulator, register the MCP server); final
@@ -2733,11 +3173,11 @@ finished), `frame_request_without_approval_sends_no_lighting_packets`,
 | Path | Owner |
 |---|---|
 | repository root files, `.cargo/`, `xtask/`, `docs/`, `tests/golden/` (except `rust-v1-candidate/`), `tests/fixtures/*.{svg,dxf,png}` and `om_small/` | integrator (WP0, I1–I3) |
-| `crates/types/**` except `src/arm.rs`, `src/galvo.rs`; `crates/geom`, `crates/doc`, `crates/machine`, `crates/format`; `crates/testkit/src/t3.rs`; `tests/fixtures/model/` | WP1 |
+| `crates/types/**` except `src/arm.rs`, `src/galvo.rs`, `tests/t0_*.rs`, `tests/arm_*.rs` (and except `Cargo.toml`, `src/lib.rs`: WP0's, fixed); `crates/geom`, `crates/doc`, `crates/machine`, `crates/format`; `crates/testkit/src/t3.rs`; `tests/fixtures/model/` | WP1 |
 | `crates/import`, `crates/gcode`, `crates/render`; `crates/testkit/src/{t2.rs,t4.rs}`; `tests/fixtures/import/` | WP2 |
-| `crates/plan`, `crates/safety`, `crates/arm`; `crates/types/src/arm.rs` | WP3 |
-| `crates/types/src/galvo.rs`, `crates/lmc`, `crates/lmc-sim`; `crates/testkit/src/{t0.rs,t1.rs}`; `tests/golden/rust-v1-candidate/` | WP4 |
-| `crates/driver`, `crates/transport` | WP5 |
+| `crates/plan`, `crates/safety` (except `src/testing.rs`, WP0's), `crates/arm` (WP0 writes `testing` inside `src/mint.rs`; WP3 must keep it); `crates/types/src/arm.rs`, `crates/types/tests/arm_*.rs` | WP3 |
+| `crates/types/src/galvo.rs`, `crates/types/tests/t0_*.rs`, `crates/lmc`, `crates/lmc-sim`; `crates/testkit/src/{t0.rs,t1.rs}`; `tests/golden/rust-v1-candidate/lmc/` | WP4 |
+| `crates/driver`, `crates/transport`; `tests/golden/rust-v1-candidate/session/` | WP5 |
 | `crates/engine`; `crates/testkit/src/adversarial.rs` | WP6 |
 | `crates/control`, `crates/automation`, `apps/openlaser-cli` | WP7 |
 | `crates/ui-egui`, `apps/openlaser` | WP8 |
@@ -2757,8 +3197,10 @@ WP0 ──► WP1 model ───────────┐
     └─► WP9 human + openlaser-hw ── (hw part at I1, human at I2) ─────────┘
 ```
 
-All nine packages start together after WP0. The critical path is WP1 → WP3 → WP4 → WP5 → WP6 Phase A → I1; those
-agents should finish their I1-blocking deliverables before polishing.
+All nine packages start together after WP0. Two early merges keep that parallelism real (§7.0 6a): **I0**
+(`wp1-core`, which WP2–WP4 rebase on) and **I1.5** (`wp6-core-b`, which WP7 and WP8 rebase on). The critical path
+is `wp1-core` → WP3 (plan/safety) and WP4 (lmc/sim) in parallel → WP5 (needs FakeLmc for its full T6 suite) → WP6
+Phase A → I1; those agents should finish their I1-blocking deliverables before polishing.
 
 ---
 
@@ -2776,26 +3218,30 @@ driver and what must hold before the first real burn. **Luiz runs every step at 
       of every red-zone package done.
 - [ ] The prototype's HIL-P is done (PLAN §11): **H0 answered** (E-stop and key switch cut the source), oracle-v1
       tagged.
-- [ ] Bench rules agreed (D19), the PreToolUse hook installed or the decision recorded (§4.6 item 8).
-- [ ] Luiz builds the hardware binaries himself: `cargo build -p openlaser-hw --features hw` (and the GUI with
-      `-p openlaser --features hw` for HIL-3). No agent session is running; the agent terminal is closed.
+- [ ] Bench rules agreed (D19), the PreToolUse hook installed or the decision recorded (§4.6 item 9).
+- [ ] Luiz builds the hardware binaries himself, into his own lane:
+      `CARGO_TARGET_DIR=~/AI/OpenLaser/.target/hw cargo build -p openlaser-hw --features hw` (and the GUI with
+      `-p openlaser --features hw` for HIL-3). No agent session is running; the agent terminal is closed. Hardware
+      runs need `OPENLASER_HW_PRESENT=1` in that terminal only (S23).
 
 ### 8.2 Every session (PLAN §5.2 rules)
 
 USB unplugged whenever agents are working; E-stop and key switch within reach of where you stand; eyewear on;
 MacBook lid open, OpenLaser window or the terminal focused; `openlaser-hw bench start` at the TTY first; red light
 before any emission, and with the source key off if the red pointer works without it (UNVERIFIED on the M7);
-**first emission of every session ≤ 10 % power on scrap**; every session commits a USB trace (the Console/trace
-export) and a result line in `HARDWARE.md`; stop at 2 h.
+**first emission of every session ≤ 10 % power on scrap** (enforced in software too: `BenchPowerCap`, S23); every
+session commits a USB trace (`openlaser-hw … --trace <file>`, or the GUI Console's trace export) and a result line
+in `HARDWARE.md`; profile changes found by a session (`cal.negate`, `swap_xy`, `run_ahead`,
+`usb_set_configuration`, red dot) are made with `openlaser-hw profile set` at the TTY; stop at 2 h.
 
 ### 8.3 Sessions for the Rust driver
 
 | Session | Items (PLAN §5.2) | How (Luiz at a TTY) | Passes when |
 |---|---|---|---|
-| HIL-0 passive | H12 | `openlaser-hw detect`; `openlaser-hw status` | descriptors, GetSerialNo/GetVersion replies and idle status recorded; no init, no `EnableLaser`, no `Reset` sent |
-| HIL-1a red | H2, H14, H28; H13 and H23 need the `ol-hw-raw` bench binary (not in this build) | `openlaser-hw frame <job.olp> --loop`, 10 stops | READY/BUSY semantics and buffer depth measured → `run_ahead` and FakeLmc depth updated; abort variant chosen; 10/10 stops ≤ 250 ms, zero USB resets |
-| HIL-1b red | H1, H22, H3, H4 (red), H25, H27 | long Frame Once (> 8 s), asymmetric "F" frame, SIGKILL during a red frame, corner frames at ±100 / ±110 mm | a long red-light job runs to the end; first-jump settle confirmed; axis orientation known (set `cal.negate`/`swap_xy`); crash behaviour recorded; work area stays ±100 mm unless H27 clears more |
-| **HIL-2 first real burn** | H0 re-check, H4 (mark), H10, H19, H26, H24, H1 with emission, H29 | `openlaser-hw run card.olp`: summary → frame loop → Enter → `ARM <nonce>` | first mark ≤ 10 % on scrap; dot test trace starts with JumpTo + settle and the dot lands at the centre; 10 low-power stops ≤ 250 ms (trace) and key-to-dark ≤ 250 ms (H24); ≥ 30 s hatch completes with MO(0) only after BUSY clears; 50 mm square within ±0.1 mm of the Python one; red-dot calibration recorded (H26); OM refused while `openlaser-hw` holds the board (H29) |
+| HIL-0 passive | H12 | `openlaser-hw detect`; `openlaser-hw status --trace hil0.jsonl` (if macOS refuses `UsbNotConfigured`: `openlaser-hw profile set usbSetConfiguration true`, then `status` again) | descriptors, GetSerialNo/GetVersion replies and idle status recorded; no init, no `EnableLaser`, no `Reset` sent |
+| HIL-1a red | H2, H14, H28; H13 and H23 need the `ol-hw-raw` bench binary (not in this build) | `openlaser-hw frame --builtin box10 --loop --trace …`, 10 stops; a large Loop frame for H2 | READY/BUSY semantics and buffer depth measured → `run_ahead` (`profile set`) and FakeLmc depth updated; abort variant chosen; 10/10 stops ≤ 250 ms, zero USB resets |
+| HIL-1b red | H1, H22, H3, H4 (red), H25, H27 | long Frame Once (> 8 s), `--builtin f-shape` frame, SIGKILL during a red frame, `frame --builtin corners --extent 100` then `--extent 110` | a long red-light job runs to the end; first-jump settle confirmed; axis orientation known (`profile set cal.negate.x/y`, `cal.swapXy`); crash behaviour recorded; work area stays ±100 mm unless H27 clears more (`profile set h27Cleared`) |
+| **HIL-2 first real burn** | H0 re-check, H4 (mark), H10, H19, H26, H24, H1 with emission, H29 | `openlaser-hw run --builtin dot --power-pct 1 --allow-emission --trace …` first; then `--builtin line`, `box10`, `square50`; then `openlaser-hw run card.olp --allow-emission`: summary → frame loop → Enter → `ARM <challenge>` | first mark ≤ 10 % on scrap (the software cap refuses more); dot test trace starts with JumpTo + settle, diffs clean against the rust-v1 candidate, and the dot lands at the centre; 10 low-power stops ≤ 250 ms (trace) and key-to-dark ≤ 250 ms (H24); ≥ 30 s hatch completes with MO(0) only after BUSY clears; 50 mm square within ±0.1 mm of the Python one; red-dot calibration recorded (H26); OM refused while `openlaser-hw` holds the board (H29) |
 | HIL-3 GUI | M1.3 exit (PLAN §7) | GUI with `--features hw`: business card + one MOPA colour test end to end; 20 GUI stops; S3 re-run incl. live resize | PLAN M1 exit criteria 3–10 |
 
 ### 8.4 Must be verified before the first real burn (HIL-2)
@@ -2815,8 +3261,9 @@ Defaults in §0 apply until he answers; none blocks this build.
 
 1. **Name.** Keep `openlaser-*` now and run the PLAN D4 rename (Kerfwright or other) as one global change before
    the repo goes public?
-2. **Hooks** (§4.6 item 8): install the PreToolUse rules for `openlaser-hw`, `--features hw` and computer-use on
-   OpenLaser? They also stop computer-use screenshots of the app (agents use `ui_screenshot`).
+2. **Hooks** (§4.6 item 9): install the PreToolUse rules for `openlaser-hw`, `--features hw`, the terminal tool,
+   app-data writes and computer-use on OpenLaser? They also stop computer-use screenshots of the app (agents use
+   `ui_screenshot`).
 3. **Bench session for the GUI** (S17): relax after HIL-3, or keep it for every real-USB connect?
 4. **Images** (S16): is Threshold/Jarvis burning as on/off runs wanted in this build, or vector-only P0?
 5. **⌘W**: Weld (LightBurn) or Close Window (macOS)?
@@ -2828,6 +3275,11 @@ Defaults in §0 apply until he answers; none blocks this build.
 9. **Per-axis speed field**: if calibration ever gives different X/Y scales, which field converts speed (§5.2
    rule 4 proposes galvo 1)?
 10. **Licences of the two `.lbrn2` research samples**, before they become fixtures in the next build.
+11. **The review's new divergences** (§5.6, last list): first-jump `dist` from the centre for every list, a
+    `JumpSpeed` before the lighting list's first jump, per-pass Loop lists, an earlier `ExecuteList` when the
+    run-ahead window fills, OM v1's abort `ExecuteList` rule. Sign them with the rest at D13, or veto any one.
+12. **First-emission cap** (S23): 10 % per bench session, lifted after one finished run. Keep, lower, or make it
+    per job?
 
 ---
 
@@ -2879,17 +3331,17 @@ Ids follow S2; params are camelCase with units; `ids?` defaults to the selection
 | `layer.setMode` / `layer.setOutput` / `layer.setShow` | Mode / Output / Show columns | Cuts / Layers | — | Agent | Edit | `{layer, mode}` / `{layer, on}` / `{layer, on}` |
 | `layer.reorder` | row arrows, drag | Cuts / Layers | — | Agent | Edit | `{layer, toIndex}` |
 | `laser.status` | status readout | Laser panel | — | Agent | Query | `{machine?}` (cached; no I/O) |
-| `laser.frame` | Frame / Live Framing Start | Laser panel, Live Framing | — | **Human** | Device(Light) | `{style?:"bounds"\|"contour", source?:"job"\|"toolLayersOnly"\|"jobAndToolLayers", loop?}` |
+| `laser.frame` | Frame / Live Framing Start | Laser panel, Live Framing | — | **Human** | Device(Light) | `{style?:"bounds"\|"contour", source?:"job"\|"toolLayersOnly"\|"jobAndToolLayers", loop?}` (style/source do not change the fingerprint, S21) |
 | `laser.frameStop` | Live Framing Stop | Live Framing | Esc | Stop | Device(Stop) | `{machine?}` |
 | `laser.start` | Start | Laser panel, Live Framing | — | **Human** | Device(Emit) | `{}` → opens the ARM dialog; never emits by itself |
 | `laser.stop` | Stop | Laser panel, toolbar, overlay | Esc (active) | Stop | Device(Stop) | `{machine?}` |
-| `laser.redLight` | Enable Red Light | Laser panel | — | **Human** | Device(Light) | `{on}` |
+| `laser.redLight` † | Enable Red Light | Laser panel | — | **Human** | Device(Light) | `{on}`. Stretch: `Backend` has no pointer-only operation in this build, so the row renders disabled until one is specified (a lighting list holding one point, ended by the same stop path) |
 | `laser.cutSelected` | Cut Selected Graphics | Laser panel | — | Agent | Edit | `{on}` |
 | `laser.repeat` | Repeat (galvo counter) | Laser panel, Live Framing | — | Agent | Edit | `{count}` (1–999) |
 | `device.list` | Devices | Laser panel | — | Agent | Query | `{}` |
 | `device.select` | device dropdown | Laser panel | — | Agent | View | `{device}` (refused while that machine is busy) |
 | `device.connect` / `device.disconnect` | (connect) | Laser panel | — | **Human** | Device(Connect) | `{device?}` |
-| `device.detect` | Find My Laser | Devices | — | **Human** | Device(Connect) | `{}` |
+| `device.detect` | Find My Laser | Devices | — | **Human** | Device(Connect) | `{}` → `DeviceProvider::detect` (read-only; USB needs S23) |
 | `device.settings.get` | Device Settings | — | — | Agent | Query | `{device?}` |
 | `device.settings.set` | Device Settings (OK) | dialog | — | **Human** | Settings | `{device?, …galvo keys of CAT §7}` |
 | `device.create` / `device.importEzcad` / `device.calibrateAxis` | New device / markcfg import / Calibrate Axis | Devices, Device Settings | — | **Human** | Settings | `{…}` / `{path}` / `{axis, requestedMm, measuredMm}` |
@@ -2928,3 +3380,115 @@ Ids follow S2; params are camelCase with units; `ids?` defaults to the selection
 | `mirrorX` / `mirrorY` (browser localStorage, not in the files) | `cal.negate` in the machine profile (human-only) |
 | `calibration.json` `scale_correction` | `cal.scale` on both axes, through `device.importEzcad` / `machine::om::parse_calibration` (human-only) |
 | `profiles/openmopa-machine.ini` | `machine::markcfg::apply` onto `jpt_m7_200` (human-only) |
+
+---
+
+## Review log
+
+**Revision 2 (2026-10-23), adversarial review.** The review checked this spec against `docs/design/*`, the golden
+README, PLAN.md and research 05. Sources were checked directly: the crates.io API, docs.rs, the cached
+registry/git sources (eframe 0.36.2 `epi.rs`, egui `response.rs`, flate2 1.1.10, craft-libs `5c874d5`/`3d37da3`,
+nusb v0.2.8 source), OM v1 via `git show 5f7aa63` (read only), and the v1 `frame_box10` packets, decoded by a
+script written for the review. Nothing was built, no USB was touched, and no third-party code ran. A concurrent
+edit added S19/§2.6 (Windows); this revision merges with it.
+
+**Safety holes closed**
+
+- **R1 (S20).** A receipt was issued per *acknowledged* pass. Packets are acknowledged as soon as the board buffers
+  them, up to the 2 s run-ahead window before the light traces them, and Frame Once of a small job is acknowledged
+  before it even starts. Fix: a receipt now needs a !BUSY status after the list, and Loop sends one list per pass.
+- **R2 (S21).** The fingerprint included the frame style and source, so framing with Bounds from Live Framing could
+  never satisfy Start for a Contour job. They are now recorded on the receipt and left out of the fingerprint.
+- **R3 (S22).** The token bound only the plan fingerprint. `PendingArm` did not keep the encoded job, so
+  `run_armed` re-encoded. Fix: `bytes_hash` is now carried in the summary and the token. The driver recomputes it,
+  and `run_armed` sends the exact `PendingArm.job`.
+- **First-jump `dist`.** It depended on session state ("last commanded point"), which forced byte patching after
+  confirmation. It is now computed from the centre for every list, which also matches v1.
+- **Abort.** `ExecuteList` after the dummy packet was sent unconditionally; it now follows OM v1 (only when no list
+  is executing).
+- **Run-ahead.** The run-ahead cap (2 s) combined with "ExecuteList after packet 3" deadlocked any list whose
+  packets each estimate more than 1 s (the business-card raster) and every FakeLmc with `buffer_depth < 3`.
+  `ExecuteList` now also fires when the window fills or READY drops.
+- **Watchdog progress.** Progress now means a valid read with a READY/BUSY change (OM v1's lesson). The factors are
+  profile fields, and the 250 ms transfer budget is restored (PLAN §3.5).
+- **Stop path.**
+  - A stop that lands between queueing a run and dequeuing it is no longer cleared: latch generations, refusal
+    `StoppedAfterQueue`.
+  - `Cx::emit` can no longer block the driver: the events channel is unbounded.
+  - Dead-man drop now joins the driver thread for ≤ 500 ms.
+  - Panic hook and signal watcher in the GUI and `openlaser-hw`, because macOS `run_native` may exit without
+    destructors.
+  - Signal handlers only store an atomic.
+  - The MCP `stop` uses its own connection outside the tool mutex, and a 17th connection accepts `machine.stop`.
+  - Esc and any stop void `PendingArm` and close the ARM dialog.
+  - The driver refuses `run` while framing.
+- **R4: default-deny hardware (S23).** `OPENLASER_HW_PRESENT=1` is now required; Luiz builds `hw` into his own target
+  lane; the first emission per bench session is capped at 10 % in software (PLAN §5.2 asked for it); `run` needs
+  `--allow-emission`.
+- **R5: profiles (S24).** Writes go only through an injected `ProfileStore` that `openlaser-cli` never gets.
+  `openlaser-cli` is `Origin::Headless` for every subcommand (xtask rule 13). `validate_profile` rules are now
+  explicit, including a non-empty checklist, and `mint` refuses an empty GUI checklist instead of passing it
+  vacuously.
+- **Synthetic input.** The taint record moves out of egui context data, which any code holding the `Context` could
+  clear, into `Human`. Taint now lasts 3 frames + 1 s, so a click whose press was synthetic never counts.
+  Synthetic events are built in one file (xtask rule 16).
+- **GRBL frames.** GRBL frame programs are now a sealed `GcodeFrame`, so a burning program cannot be framed.
+- **Hook regex.** Revision 1's PreToolUse regex blocked `cargo test -p openlaser-hw --lib` and missed `cargo run`
+  and path invocations. It is replaced, with must and must-not examples, and extended to the terminal tool and
+  app-data writes.
+
+**Contracts that would not compile, and dependency or version fixes**
+
+- `ui-egui` lacked `eframe`, which it needs for `eframe::App` and `CreationContext`.
+- `DeviceKind` lived in `doc` but `driver` names it; it moves to `types`.
+- `Fingerprint` and `MonoTime` need manual impls.
+- `FakeLmc`/`FakeGrbl` took `Arc<VirtualClock>`, which `SimProvider` cannot supply; they now take `Arc<dyn Clock>`.
+- `EncodedJob` was missing impls for the GRBL types.
+- `frame_plan_unchecked` lacked style and source.
+- The stub rule did not cover error types without a `NotImplemented` variant. Stubs now fail closed, and WP0
+  implements `safety::testing` and `arm::testing` (plus `token_for_tests`) so WP5 and WP6 can test before WP3 lands.
+- `DeviceProvider` gains `detect` and the bench-cap hooks, because the engine cannot reach `transport`.
+- zip `deflate-flate2` alone selects no flate2 backend, which is a `compile_error!` in `format`; flate2
+  `rust_backend` is now pinned.
+- `rust-toolchain` `"1.99.0"` would have made rustup download a second toolchain; it is now `stable`.
+- `resolver = "3"` is now stated explicitly.
+- `[profile.test] panic` is dropped (Cargo ignores it and warns).
+- Durations are now serialised as `…S`/`…Ms` (S2), not `{secs, nanos}`.
+- Every other pin was verified to exist: egui 0.36.2 with craft-ui@5c874d51 and craft-quit/settings/atomic@3d37da38
+  (no second craft-ui), usvg/resvg 0.45.1 with kurbo 0.11 and tiny-skia 0.11.4, nusb 0.2.8 (API listed in §2.4),
+  rmcp 3.5.0 (3.7.0 newest), zip 9.0.5, keepawake 0.6.1 and ctrlc 3.5.2.
+
+**Parallelism and ownership**
+
+- `types/tests/t0_*` belonged to WP1 by path but WP4 by tier; ownership is now split.
+- `rust-v1-candidate/` was split into `lmc/` (WP4) and `session/` (WP5).
+- WP0 now pre-populates every dev-dependency, so no package edits another's manifest.
+- Early merges I0 (`wp1-core`) and I1.5 (`wp6-core-b`) are added, because stubbed doc and engine left WP3, WP7 and
+  WP8 nothing real to test.
+- WP6 and WP9 commit their phases separately, so I1 can merge parts.
+- Dev-dependency cycles (`driver` with `lmc-sim`, `types` with `testkit`) may be used from integration tests only;
+  rule 10 previously forbade `driver` from using `lmc-sim` at all.
+
+**Missing P0 items for the MOPA added**
+
+- `openlaser-hw profile` (TTY-only profile edits, needed between HIL sessions before the GUI exists).
+- `--trace` in the T1 event format.
+- `--builtin dot|line|box10|square50|f-shape|corners`, matching the T1 inputs.
+- `frame --extent` for H27, which the ±100 mm work area otherwise made impossible.
+- The `usb_set_configuration` flag (macOS cannot claim an interface of an unconfigured device).
+- `laser.redLight` marked as a stretch item, since the driver contract has no API for it.
+
+**Testing gaps**
+
+- About 20 named tests added across §6.3, §6.5 and §7, one per fix above.
+- Seeded stops via `FakeLmc::set_hook`.
+- `prop_importers_never_panic` and `prop_control_reader_never_panics` stand in for cargo-fuzz in this build.
+- Binaries are tested in process, because uplifted binaries are shared across worktrees in a lane.
+
+**Disk**
+
+- The core lane never builds egui: its warm-up and clippy run per package, not `--workspace`.
+- There is a separate `hw` lane for Luiz.
+- The Windows cross-check runs only for the integrator.
+
+**New open questions:** §9 items 11–12.
