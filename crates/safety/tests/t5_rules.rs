@@ -459,6 +459,12 @@ fn safety_unsupported_mode_refused() {
     s.mode = SectionMode::Image;
     let p = job(&m, vec![s]);
     assert!(codes(&validate(&p, &m)).contains(&RefusalCode::UnsupportedMode));
+    // A section on a tool layer (T1/T2 never burn, S8): a forged plan.
+    let m = jpt();
+    let mut s = section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(default_words(&m)));
+    s.layer = LayerKey::Tool(1);
+    let p = job(&m, vec![s]);
+    assert!(codes(&validate(&p, &m)).contains(&RefusalCode::UnsupportedMode));
     // Repeats outside 1..=999.
     let (m, mut p) = galvo_job(vec![square(0.0, 0.0, 5.0)]);
     p.repeats = 1000;

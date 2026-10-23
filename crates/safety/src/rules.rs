@@ -35,7 +35,7 @@ pub(crate) static RULES: &[(RefusalCode, &str)] = &[
     (RefusalCode::FillWithoutHatch, "A Fill layer with shapes yields at least one hatch segment; open shapes on it become numbered notices"),
     (
         RefusalCode::UnsupportedMode,
-        "Nothing the build cannot do: Offset Fill, image burning, per-layer timings, wobble, Hull frames, out-of-range passes or repeats",
+        "Nothing the build cannot do: Offset Fill, image burning, per-layer timings, wobble, Hull frames, out-of-range passes or repeats; no section on a tool layer",
     ),
     (RefusalCode::NothingToMark, "At least one section burns something, the repeat count is at least 1, and a frame has something to trace"),
     (RefusalCode::WrongDeviceKind, "The plan, every section's cut settings and the project's device hint match the machine's kind"),

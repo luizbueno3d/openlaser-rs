@@ -479,6 +479,9 @@ pub(crate) fn check_section(out: &mut Out, m: &MachineProfile, area: &Area, s: &
             .layer(k),
         ),
     }
+    if k.is_tool() {
+        out.refuse(Refusal::new(RefusalCode::UnsupportedMode, format!("{}: tool layers are framed, never burned; plan again", label(s))).layer(k));
+    }
     if s.mode == SectionMode::Image {
         out.refuse(Refusal::new(RefusalCode::UnsupportedMode, format!("{}: burning images is not in this build", label(s))).layer(k));
     }
