@@ -12,6 +12,16 @@ type Pair = (String, String);
 type Vertex = (f64, f64, f64);
 
 pub fn parse_dxf_om(bytes: &[u8]) -> Result<Vec<Polyline>, Error> {
+    parse_dxf_with_tolerance(bytes, None)
+}
+
+/// Shipping DXF parser. Compatibility rows intentionally keep SPLINE control/fit points;
+/// the user-facing importer evaluates them into a deterministic polyline.
+pub(crate) fn parse_dxf_shipping(bytes: &[u8], tolerance_mm: f64) -> Result<Vec<Polyline>, Error> {
+    parse_dxf_with_tolerance(bytes, Some(tolerance_mm))
+}
+
+fn parse_dxf_with_tolerance(bytes: &[u8], spline_tolerance: Option<f64>) -> Result<Vec<Polyline>, Error> {
     let text = String::from_utf8_lossy(bytes);
     let pairs = dxf_pairs(&text);
     let mut polylines = Vec::new();
@@ -56,14 +66,17 @@ pub fn parse_dxf_om(bytes: &[u8]) -> Result<Vec<Polyline>, Error> {
                     ))
                 }
                 "ELLIPSE" => Some(ellipse_points(&fields)?),
-                "SPLINE" => {
-                    let fit = repeated_xy(&fields, "11", "21")?;
-                    let points = if fit.is_empty() { repeated_xy(&fields, "10", "20")? } else { fit };
-                    (points.len() >= 2).then_some(points)
-                }
+                "SPLINE" => Some(match spline_tolerance {
+                    Some(tolerance) => evaluate_spline(&fields, tolerance)?,
+                    None => {
+                        let fit = repeated_xy(&fields, "11", "21")?;
+                        let points = if fit.is_empty() { repeated_xy(&fields, "10", "20")? } else { fit };
+                        if points.len() < 2 { Polyline(Vec::new()) } else { points }
+                    }
+                }),
                 _ => None,
             };
-            if let Some(polyline) = polyline {
+            if let Some(polyline) = polyline.filter(|line| line.len() >= 2) {
                 polylines.push(polyline);
             }
             continue;
@@ -71,6 +84,174 @@ pub fn parse_dxf_om(bytes: &[u8]) -> Result<Vec<Polyline>, Error> {
         i += 1;
     }
     Ok(polylines)
+}
+
+fn evaluate_spline(fields: &[Pair], tolerance: f64) -> Result<Polyline, Error> {
+    let fit = repeated_xy(fields, "11", "21")?.0;
+    let controls = repeated_xy(fields, "10", "20")?.0;
+    let is_fit_spline = fit.len() >= 2;
+    let points = if is_fit_spline { fit } else { controls };
+    if points.len() < 2 {
+        return Ok(Polyline(Vec::new()));
+    }
+    if (!is_fit_spline && points.len() > 128) || points.len() > 100_000 {
+        return Err(Error::TooLarge(format!("DXF spline has {} fit/control points; limit is {}", points.len(), if is_fit_spline { 100_000 } else { 128 })));
+    }
+    // Many CAD writers omit the knot vector for a fit-point spline. Interpolate those
+    // points with a Catmull-Rom curve. Control-point entities without a full knot vector
+    // are represented as a clamped Bezier curve when the degree permits it.
+    let degree = fields.iter().find(|(code, _)| code == "71").and_then(|(_, value)| value.parse::<usize>().ok());
+    let knots: Vec<f64> = fields.iter().filter(|(code, _)| code == "40").map(|(_, value)| parse_f64(value)).collect::<Result<_, _>>()?;
+    let weights: Vec<f64> = fields.iter().filter(|(code, _)| code == "41").map(|(_, value)| parse_f64(value)).collect::<Result<_, _>>()?;
+    if !weights.is_empty() && weights.len() != points.len() {
+        return Err(Error::Malformed { format: "DXF", message: "spline weight count does not match its points".to_owned() });
+    }
+    if is_fit_spline {
+        return Ok(Polyline(interpolate_fit_points(&points, tolerance)?));
+    }
+    if let Some(degree) = degree
+        && degree > 0
+        && degree < points.len()
+        && knots.len() == points.len() + degree + 1
+    {
+        return Ok(Polyline(sample_bspline(&points, &knots, &weights, degree, tolerance)?));
+    }
+    if !knots.is_empty() || degree.is_some_and(|degree| degree != points.len().saturating_sub(1)) {
+        return Err(Error::Malformed { format: "DXF", message: "incomplete or inconsistent spline knot vector".to_owned() });
+    }
+    Ok(Polyline(sample_bezier(&points, &weights, tolerance)?))
+}
+
+fn sample_bezier(points: &[[f64; 2]], weights: &[f64], tolerance: f64) -> Result<Vec<[f64; 2]>, Error> {
+    if weights.iter().any(|weight| !weight.is_finite() || *weight <= 0.0) {
+        return Err(Error::Malformed { format: "DXF", message: "spline weights must be finite and positive".to_owned() });
+    }
+    let control_length = points.windows(2).try_fold(0.0, |length, pair| {
+        let start = *pair.first().ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid Bezier spline controls".to_owned() })?;
+        let end = *pair.get(1).ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid Bezier spline controls".to_owned() })?;
+        let dx = end.first().copied().unwrap_or(0.0) - start.first().copied().unwrap_or(0.0);
+        let dy = end.get(1).copied().unwrap_or(0.0) - start.get(1).copied().unwrap_or(0.0);
+        Ok::<f64, Error>(length + dx.hypot(dy))
+    })?;
+    let segments = (control_length / tolerance.sqrt().max(0.01)).ceil().clamp(16.0, 4096.0) as usize;
+    (0..=segments)
+        .map(|i| {
+            let t = i as f64 / segments as f64;
+            let mut work: Vec<[f64; 3]> = points
+                .iter()
+                .enumerate()
+                .map(|(index, point)| {
+                    let weight = weights.get(index).copied().unwrap_or(1.0);
+                    [point.first().copied().unwrap_or(0.0) * weight, point.get(1).copied().unwrap_or(0.0) * weight, weight]
+                })
+                .collect();
+            for level in (1..work.len()).rev() {
+                for index in 0..level {
+                    let left = *work.get(index).ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid Bezier spline controls".to_owned() })?;
+                    let right = *work.get(index + 1).ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid Bezier spline controls".to_owned() })?;
+                    let current =
+                        work.get_mut(index).ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid Bezier spline controls".to_owned() })?;
+                    *current = [
+                        left.first().copied().unwrap_or(0.0) * (1.0 - t) + right.first().copied().unwrap_or(0.0) * t,
+                        left.get(1).copied().unwrap_or(0.0) * (1.0 - t) + right.get(1).copied().unwrap_or(0.0) * t,
+                        left.get(2).copied().unwrap_or(1.0) * (1.0 - t) + right.get(2).copied().unwrap_or(1.0) * t,
+                    ];
+                }
+            }
+            let point = work.first().copied().ok_or_else(|| Error::Malformed { format: "DXF", message: "spline has no control points".to_owned() })?;
+            let weight = point.get(2).copied().unwrap_or(0.0);
+            if weight <= 0.0 || !weight.is_finite() {
+                return Err(Error::Malformed { format: "DXF", message: "invalid spline weight".to_owned() });
+            }
+            Ok([point.first().copied().unwrap_or(0.0) / weight, point.get(1).copied().unwrap_or(0.0) / weight])
+        })
+        .collect()
+}
+
+fn interpolate_fit_points(points: &[[f64; 2]], tolerance: f64) -> Result<Vec<[f64; 2]>, Error> {
+    let mut result = Vec::new();
+    let subdivisions = 16usize.max((1.0 / tolerance.sqrt()).ceil() as usize).min(128);
+    for i in 0..points.len().saturating_sub(1) {
+        let p1 = *points.get(i).ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid spline fit points".to_owned() })?;
+        let p2 = *points.get(i + 1).ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid spline fit points".to_owned() })?;
+        let p0 =
+            if i == 0 { p1 } else { *points.get(i - 1).ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid spline fit points".to_owned() })? };
+        let p3 = points.get(i + 2).copied().unwrap_or(p2);
+        for j in 0..subdivisions {
+            let t = j as f64 / subdivisions as f64;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            result.push([
+                0.5 * ((2.0 * p1[0])
+                    + (-p0[0] + p2[0]) * t
+                    + (2.0 * p0[0] - 5.0 * p1[0] + 4.0 * p2[0] - p3[0]) * t2
+                    + (-p0[0] + 3.0 * p1[0] - 3.0 * p2[0] + p3[0]) * t3),
+                0.5 * ((2.0 * p1[1])
+                    + (-p0[1] + p2[1]) * t
+                    + (2.0 * p0[1] - 5.0 * p1[1] + 4.0 * p2[1] - p3[1]) * t2
+                    + (-p0[1] + 3.0 * p1[1] - 3.0 * p2[1] + p3[1]) * t3),
+            ]);
+        }
+    }
+    if let Some(last) = points.last() {
+        result.push(*last);
+    }
+    Ok(result)
+}
+
+fn sample_bspline(points: &[[f64; 2]], knots: &[f64], weights: &[f64], degree: usize, tolerance: f64) -> Result<Vec<[f64; 2]>, Error> {
+    let start = *knots.get(degree).ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid spline knot vector".to_owned() })?;
+    let end = *knots.get(points.len()).ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid spline knot vector".to_owned() })?;
+    if !start.is_finite() || !end.is_finite() || end <= start {
+        return Err(Error::Malformed { format: "DXF", message: "invalid spline parameter range".to_owned() });
+    }
+    let segments = ((end - start) / tolerance.sqrt().max(0.01)).ceil().clamp(16.0, 4096.0) as usize;
+    (0..=segments).map(|i| bspline_point(points, knots, weights, degree, start + (end - start) * i as f64 / segments as f64)).collect()
+}
+
+fn bspline_point(points: &[[f64; 2]], knots: &[f64], weights: &[f64], degree: usize, u: f64) -> Result<[f64; 2], Error> {
+    let Some(n) = points.len().checked_sub(1) else {
+        return Err(Error::Malformed { format: "DXF", message: "spline has no control points".to_owned() });
+    };
+    let final_knot = *knots.get(n + 1).ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid spline knot vector".to_owned() })?;
+    let span = if u >= final_knot {
+        n
+    } else {
+        (degree..=n).find(|i| knots.get(*i).is_some_and(|a| u >= *a) && knots.get(*i + 1).is_some_and(|b| u < *b)).unwrap_or(n)
+    };
+    let mut d = Vec::with_capacity(degree + 1);
+    for j in 0..=degree {
+        let index = span - degree + j;
+        let w = weights.get(index).copied().unwrap_or(1.0);
+        if !w.is_finite() || w <= 0.0 {
+            return Err(Error::Malformed { format: "DXF", message: "spline weights must be finite and positive".to_owned() });
+        }
+        let point = points.get(index).ok_or_else(|| Error::Malformed { format: "DXF", message: "spline control index is invalid".to_owned() })?;
+        d.push([point[0] * w, point[1] * w, w]);
+    }
+    for r in 1..=degree {
+        for j in (r..=degree).rev() {
+            let i = span - degree + j;
+            let right_knot =
+                *knots.get(i + degree + 1 - r).ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid spline knot vector".to_owned() })?;
+            let left_knot = *knots.get(i).ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid spline knot vector".to_owned() })?;
+            let den = right_knot - left_knot;
+            let alpha = if den == 0.0 { 0.0 } else { (u - left_knot) / den };
+            let previous = *d.get(j - 1).ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid spline recursion".to_owned() })?;
+            let current = d.get_mut(j).ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid spline recursion".to_owned() })?;
+            let mix = |axis| {
+                let previous = previous.get(axis).copied().ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid spline recursion".to_owned() })?;
+                let current = current.get(axis).copied().ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid spline recursion".to_owned() })?;
+                Ok::<f64, Error>((1.0 - alpha) * previous + alpha * current)
+            };
+            *current = [mix(0)?, mix(1)?, mix(2)?];
+        }
+    }
+    let last = *d.get(degree).ok_or_else(|| Error::Malformed { format: "DXF", message: "invalid spline recursion".to_owned() })?;
+    if last[2] == 0.0 || !last[2].is_finite() {
+        return Err(Error::Malformed { format: "DXF", message: "invalid spline weight".to_owned() });
+    }
+    Ok([last[0] / last[2], last[1] / last[2]])
 }
 
 pub fn import_geometry_om(name: &str, bytes: &[u8]) -> Result<Vec<Polyline>, Error> {
@@ -399,5 +580,42 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, 25, "unexpected T4 DXF case coverage");
+    }
+
+    #[test]
+    fn t4_non_dxf_cases_have_explicit_shipping_coverage() {
+        let cases = openlaser_testkit::t4::load().expect("T4 fixtures load");
+        let mut checked = 0usize;
+        for case in cases.iter().filter(|case| case.kind != "dxf") {
+            let bytes = openlaser_testkit::t4::source_bytes(case).expect("T4 source");
+            match case.kind.as_str() {
+                "svg" => {
+                    let options = crate::ImportOptions { svg_units: crate::SvgUnits::Px96, ..crate::ImportOptions::default() };
+                    let result = crate::import(&case.filename, &bytes, &options);
+                    assert!(result.as_ref().is_ok_and(|imported| !imported.shapes.is_empty()), "T4 SVG {} imports: {result:?}", case.name);
+                    assert!(!case.rust_must_match, "SVG rows are informational, not parity requirements");
+                }
+                "stl" | "other" => {
+                    assert!(crate::import(&case.filename, &bytes, &crate::ImportOptions::default()).is_err(), "unsupported T4 case {} must refuse", case.name);
+                }
+                other => panic!("unexpected non-DXF T4 kind {other}"),
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 5, "all five non-DXF T4 rows must be covered");
+    }
+
+    #[test]
+    fn shipping_splines_are_evaluated_while_compatibility_points_are_retained() {
+        let case = openlaser_testkit::t4::load()
+            .expect("T4 fixtures load")
+            .into_iter()
+            .find(|case| case.name == "spline_fit_and_control.parse_dxf")
+            .expect("spline case");
+        let bytes = openlaser_testkit::t4::source_bytes(&case).expect("spline source");
+        let compatibility = parse_dxf_om(&bytes).expect("compatibility parser");
+        let shipping = parse_dxf_shipping(&bytes, 0.05).expect("shipping parser");
+        assert_eq!(compatibility.iter().map(Polyline::len).sum::<usize>(), 6);
+        assert!(shipping.iter().map(Polyline::len).sum::<usize>() > 6);
     }
 }

@@ -164,15 +164,15 @@ fn looks_like_workspace(bytes: &[u8]) -> bool {
 }
 
 fn import_dxf(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Imported> {
-    let mut polylines = dxf_om::parse_dxf_om(bytes)?;
-    if polylines.is_empty() {
-        return Err(Error::Malformed { format: "DXF", message: format!("no usable geometry found in {name}") });
-    }
     let unit_scale = match opts.dxf_units {
         DxfUnits::Auto => dxf_om::dxf_units_to_mm(bytes)?,
         DxfUnits::Mm => 1.0,
         DxfUnits::Inch => 25.4,
     };
+    let mut polylines = dxf_om::parse_dxf_shipping(bytes, opts.flatten_tol_mm / unit_scale)?;
+    if polylines.is_empty() {
+        return Err(Error::Malformed { format: "DXF", message: format!("no usable geometry found in {name}") });
+    }
     transform_polylines(&mut polylines, unit_scale * opts.scale, opts.center_at, false)?;
     paths_to_imported(polylines, opts.layer.unwrap_or(opts.current_layer), Vec::new())
 }
@@ -345,8 +345,115 @@ fn raster_dpi(bytes: &[u8]) -> Option<f64> {
             }
             offset = data_end.checked_add(4)?;
         }
+        return None;
+    }
+    if bytes.starts_with(b"BM") && bytes.len() >= 46 {
+        let ppm = i32::from_le_bytes(bytes.get(38..42)?.try_into().ok()?);
+        let dpi = f64::from(ppm) * 0.0254;
+        return (ppm > 0 && dpi.is_finite()).then_some(dpi);
+    }
+    if bytes.starts_with(&[0xff, 0xd8]) {
+        return jpeg_dpi(bytes);
+    }
+    if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
+        return tiff_dpi(bytes);
+    }
+    if bytes.get(0..4) == Some(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        let mut offset = 12usize;
+        while let Some(header) = bytes.get(offset..offset.checked_add(8)?) {
+            let size = usize::try_from(u32::from_le_bytes(header.get(4..8)?.try_into().ok()?)).ok()?;
+            let start = offset.checked_add(8)?;
+            let end = start.checked_add(size)?;
+            let data = bytes.get(start..end)?;
+            if header.get(..4) == Some(b"EXIF") {
+                return tiff_dpi(data.strip_prefix(b"Exif\0\0").unwrap_or(data));
+            }
+            offset = end.checked_add(size & 1)?;
+        }
     }
     None
+}
+
+fn jpeg_dpi(bytes: &[u8]) -> Option<f64> {
+    let mut offset = 2usize;
+    while bytes.get(offset) == Some(&0xff) {
+        let marker = *bytes.get(offset.checked_add(1)?)?;
+        offset = offset.checked_add(2)?;
+        if marker == 0xd9 || marker == 0xda {
+            break;
+        }
+        let length = usize::from(u16::from_be_bytes(bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?));
+        if length < 2 {
+            return None;
+        }
+        let end = offset.checked_add(length)?;
+        let segment = bytes.get(offset.checked_add(2)?..end)?;
+        if marker == 0xe0 && segment.starts_with(b"JFIF\0") && segment.len() >= 12 {
+            let units = *segment.get(7)?;
+            let density = u16::from_be_bytes(segment.get(8..10)?.try_into().ok()?);
+            let dpi = match units {
+                1 => f64::from(density),
+                2 => f64::from(density) * 2.54,
+                _ => 0.0,
+            };
+            if dpi.is_finite() && dpi > 0.0 {
+                return Some(dpi);
+            }
+        }
+        if marker == 0xe1
+            && segment.starts_with(b"Exif\0\0")
+            && let Some(dpi) = tiff_dpi(segment.get(6..)?)
+        {
+            return Some(dpi);
+        }
+        offset = end;
+    }
+    None
+}
+
+fn tiff_dpi(bytes: &[u8]) -> Option<f64> {
+    let little = match bytes.get(..2)? {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    let u16_at = |offset: usize| -> Option<u16> {
+        let s = bytes.get(offset..offset.checked_add(2)?)?;
+        Some(if little { u16::from_le_bytes(s.try_into().ok()?) } else { u16::from_be_bytes(s.try_into().ok()?) })
+    };
+    let u32_at = |offset: usize| -> Option<u32> {
+        let s = bytes.get(offset..offset.checked_add(4)?)?;
+        Some(if little { u32::from_le_bytes(s.try_into().ok()?) } else { u32::from_be_bytes(s.try_into().ok()?) })
+    };
+    if u16_at(2)? != 42 {
+        return None;
+    }
+    let ifd = usize::try_from(u32_at(4)?).ok()?;
+    let count = usize::from(u16_at(ifd)?);
+    let mut resolution = None;
+    let mut unit = 2u16;
+    for index in 0..count {
+        let entry = ifd.checked_add(2)?.checked_add(index.checked_mul(12)?)?;
+        let tag = u16_at(entry)?;
+        if tag == 296 {
+            unit = u16_at(entry.checked_add(8)?)?;
+        }
+        if tag == 282 && u16_at(entry.checked_add(2)?)? == 5 && u32_at(entry.checked_add(4)?)? == 1 {
+            let value_offset = usize::try_from(u32_at(entry.checked_add(8)?)?).ok()?;
+            let numerator = f64::from(u32_at(value_offset)?);
+            let denominator = f64::from(u32_at(value_offset.checked_add(4)?)?);
+            if denominator > 0.0 {
+                resolution = Some(numerator / denominator);
+            }
+        }
+    }
+    let value = resolution?;
+    let dpi = match unit {
+        2 => value,
+        3 => value * 2.54,
+        _ => return None,
+    };
+    (dpi.is_finite() && dpi > 0.0).then_some(dpi)
 }
 
 fn paths_to_imported(polylines: Vec<Polyline>, layer: LayerKey, notices: Vec<Notice>) -> Result<Imported> {
@@ -495,6 +602,27 @@ mod tests {
         let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm"><path d="M1 1L9 9" stroke="#000000" fill="none"/></svg>"##;
         let imported = import("palette.svg", svg, &ImportOptions::default()).expect("SVG imports");
         assert_eq!(imported.shapes.first().map(|shape| shape.layer), Some(LayerKey::Color(0)));
+    }
+
+    #[test]
+    fn raster_dpi_reads_bmp_jpeg_and_tiff_metadata() {
+        let mut bmp = vec![0u8; 46];
+        bmp[..2].copy_from_slice(b"BM");
+        bmp[38..42].copy_from_slice(&10_000i32.to_le_bytes());
+        assert!((raster_dpi(&bmp).expect("BMP DPI") - 254.0).abs() < 1e-9);
+
+        let jpeg = [0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0, 1, 2, 1, 0, 0xfe, 0, 0xfe, 0, 0xff, 0xd9];
+        assert!((raster_dpi(&jpeg).expect("JFIF DPI") - 254.0).abs() < 1e-9);
+
+        let tiff = [b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x1a, 1, 5, 0, 1, 0, 0, 0, 26, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 1, 0, 0, 0];
+        assert!((raster_dpi(&tiff).expect("TIFF DPI") - 100.0).abs() < 1e-9);
+
+        let mut webp = b"RIFF\0\0\0\0WEBPEXIF".to_vec();
+        webp.extend_from_slice(&(tiff.len() as u32).to_le_bytes());
+        webp.extend_from_slice(&tiff);
+        let riff_size = (webp.len() - 8) as u32;
+        webp[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        assert!((raster_dpi(&webp).expect("WebP EXIF DPI") - 100.0).abs() < 1e-9);
     }
 
     proptest::proptest! {

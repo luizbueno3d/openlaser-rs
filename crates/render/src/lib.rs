@@ -453,4 +453,62 @@ mod tests {
         view.max_side = 2049;
         assert!(matches!(render_png(&list, &view), Err(Error::TooLarge(_))));
     }
+
+    #[test]
+    fn render_business_card_snapshot() {
+        let case = openlaser_testkit::t4::load()
+            .expect("T4 fixtures")
+            .into_iter()
+            .find(|case| case.name == "businessCard.dxf.import_geometry")
+            .expect("business card DXF case");
+        let bytes = openlaser_testkit::t4::source_bytes(&case).expect("business card DXF bytes");
+        let imported = openlaser_import::import(&case.filename, &bytes, &openlaser_import::ImportOptions::default()).expect("business card imports");
+        assert_eq!(imported.shapes.len(), 403);
+        let bounds = imported.bounds.expect("business card bounds");
+        let mut list = DisplayList::default();
+        for shape in imported.shapes {
+            if let openlaser_doc::Geom::Path(path) = shape.geom {
+                let mut lines = Vec::new();
+                let mut points = Vec::new();
+                for element in path.elements() {
+                    match element {
+                        openlaser_geom::PathEl::MoveTo(point) => {
+                            if points.len() >= 2 {
+                                lines.push(Polyline(std::mem::take(&mut points)));
+                            }
+                            let point = shape.xform * *point;
+                            points.push([point.x, point.y]);
+                        }
+                        openlaser_geom::PathEl::LineTo(point) => {
+                            let point = shape.xform * *point;
+                            points.push([point.x, point.y]);
+                        }
+                        openlaser_geom::PathEl::ClosePath => {
+                            if points.len() >= 2 {
+                                lines.push(Polyline(std::mem::take(&mut points)));
+                            }
+                        }
+                        openlaser_geom::PathEl::QuadTo(_, _) | openlaser_geom::PathEl::CurveTo(_, _, _) => {}
+                    }
+                }
+                if points.len() >= 2 {
+                    lines.push(Polyline(points));
+                }
+                if !lines.is_empty() {
+                    list.items.push(Item::Polylines { stroke: Stroke::Hairline, color: layer_color(shape.layer), lines: lines.into(), object: Some(shape.id) });
+                }
+            }
+        }
+        assert!(!list.items.is_empty(), "business card paths must be present");
+        let width = bounds.max[0] - bounds.min[0];
+        let height = bounds.max[1] - bounds.min[1];
+        let margin = width.max(height) * 0.06;
+        let view = RenderView {
+            world: Bounds { min: [bounds.min[0] - margin, bounds.min[1] - margin], max: [bounds.max[0] + margin, bounds.max[1] + margin] },
+            max_side: 768,
+            background: Rgba([250, 250, 248, 255]),
+        };
+        let png = render_png(&list, &view).expect("business card renders");
+        insta::assert_binary_snapshot!("business_card.png", png);
+    }
 }
