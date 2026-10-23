@@ -1,0 +1,128 @@
+{
+ "meta": {
+  "schema": "openlaser-golden/1",
+  "generator": "tests/golden/generator",
+  "generator_version": "1.0.0",
+  "galvoplotter_version": "0.2.0",
+  "pyusb_version": "1.3.1",
+  "python_version": "3.10.0",
+  "tier": "T1",
+  "oracle": "v0+v1",
+  "om_git_sha": {"v0":"6aed8ffa8be5a938d195bf35198cfd168bb07f4e","v1":"5f7aa635ad4bf9ab0bd6592c4e9754909d6dd4bf"}
+ },
+ "about": "Machine-made diff of every T1 scenario, v0 -> v1. wire_hunks compare singles/reads with list packets collapsed to 'list'; list_command_hunks compare the decoded list-command streams (all packets concatenated). Hunks are truncated to 12 items per side; counts are exact.",
+ "scenarios": {
+  "init_abort": {
+   "identical": true,
+   "packets_identical": true,
+   "v0_packets": 1,
+   "v1_packets": 1,
+   "wire_hunks": [],
+   "wire_hunks_total": 0,
+   "list_command_hunks": [],
+   "list_command_hunks_total": 0
+  },
+  "mark_box10": {
+   "identical": true,
+   "packets_identical": true,
+   "v0_packets": 2,
+   "v1_packets": 2,
+   "wire_hunks": [],
+   "wire_hunks_total": 0,
+   "list_command_hunks": [],
+   "list_command_hunks_total": 0
+  },
+  "frame_box10": {
+   "identical": false,
+   "packets_identical": true,
+   "v0_packets": 4,
+   "v1_packets": 4,
+   "wire_hunks": [
+    {
+     "tag": "replace",
+     "v0_at": 83,
+     "v1_at": 83,
+     "v0_count": 1,
+     "v1_count": 1,
+     "v0": ["single WritePort 210000010000000000000000"],
+     "v1": ["single WritePort 210000000000000000000000"]
+    }
+   ],
+   "wire_hunks_total": 1,
+   "list_command_hunks": [],
+   "list_command_hunks_total": 0
+  },
+  "dot_test": {
+   "identical": false,
+   "packets_identical": false,
+   "v0_packets": 2,
+   "v1_packets": 2,
+   "wire_hunks": [],
+   "wire_hunks_total": 0,
+   "list_command_hunks": [
+    {"tag":"insert","v0_at":11,"v1_at":11,"v0_count":0,"v1_count":2,"v0":[],"v1":["listJumpDelay(8,0,0,0,0)","listJumpTo(32768,32768,0,0,0)"]}
+   ],
+   "list_command_hunks_total": 1
+  },
+  "line_test": {
+   "identical": true,
+   "packets_identical": true,
+   "v0_packets": 2,
+   "v1_packets": 2,
+   "wire_hunks": [],
+   "wire_hunks_total": 0,
+   "list_command_hunks": [],
+   "list_command_hunks_total": 0
+  },
+  "long_job": {
+   "identical": true,
+   "packets_identical": true,
+   "v0_packets": 10,
+   "v1_packets": 10,
+   "wire_hunks": [],
+   "wire_hunks_total": 0,
+   "list_command_hunks": [],
+   "list_command_hunks_total": 0
+  },
+  "bc_mark_vector-engrave_pass1": {
+   "identical": true,
+   "packets_identical": true,
+   "v0_packets": 7,
+   "v1_packets": 7,
+   "wire_hunks": [],
+   "wire_hunks_total": 0,
+   "list_command_hunks": [],
+   "list_command_hunks_total": 0
+  },
+  "bc_mark_raster_pass1": {
+   "identical": true,
+   "packets_identical": true,
+   "v0_packets": 9,
+   "v1_packets": 9,
+   "wire_hunks": [],
+   "wire_hunks_total": 0,
+   "list_command_hunks": [],
+   "list_command_hunks_total": 0
+  },
+  "bc_frame": {
+   "identical": false,
+   "packets_identical": true,
+   "v0_packets": 75,
+   "v1_packets": 75,
+   "wire_hunks": [
+    {
+     "tag": "replace",
+     "v0_at": 438,
+     "v1_at": 438,
+     "v0_count": 1,
+     "v1_count": 1,
+     "v0": ["single WritePort 210000010000000000000000"],
+     "v1": ["single WritePort 210000000000000000000000"]
+    }
+   ],
+   "wire_hunks_total": 1,
+   "list_command_hunks": [],
+   "list_command_hunks_total": 0
+  }
+ }
+}

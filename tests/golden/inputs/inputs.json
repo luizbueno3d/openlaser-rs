@@ -1,0 +1,11 @@
+{
+ "about": "Inputs the generator reads. workspace.json, layer_settings.json and calibration.json are untracked files from the OM working copy; the .ini is tracked in OM (the generator reads each oracle's own copy); the DXFs are Luiz's test drawings. Refresh with generate.py --refresh-inputs.",
+ "files": {
+  "workspace.json": {"sha256":"96c578b1d41a72627f6f5f9d9d3fb6a25dc283b980d0f3172557f57808c2afdc","bytes":364647,"copied_from":"~/AI/OpenLaser/OpenMopa/workspace.json"},
+  "layer_settings.json": {"sha256":"2d8ceec7b7165cf0bd6ee6f6d21c930698f7661969997d13a8acc6ae8b2892b9","bytes":1789,"copied_from":"~/AI/OpenLaser/OpenMopa/layer_settings.json"},
+  "openmopa-machine.ini": {"sha256":"c8162b28560f744a61c97f905da7f15a5d908e5e4e138645761f616d071d4627","bytes":422,"copied_from":"~/AI/OpenLaser/OpenMopa/profiles/openmopa-machine.ini"},
+  "calibration.json": {"sha256":"da22f11422e4a1b3309a211b8b8b6d32f46e5725d78a0dddfada4a77065e65fc","bytes":33,"copied_from":"~/AI/OpenLaser/OpenMopa/calibration.json"},
+  "dxf/square.dxf": {"sha256":"8d27292dd02e6db604bf4aa319e9b4102895a7c944a4de09abc5aea3294167c0","bytes":161916,"copied_from":"~/Documents/Playground/tests/DXF/square.dxf"},
+  "dxf/businessCard.dxf": {"sha256":"67b5cd7dcf6ef10d27f1f2274c1e1ba8c970d35d3a007b09753cdad900a9265a","bytes":458199,"copied_from":"~/Documents/Playground/tests/DXF/businessCard.dxf"}
+ }
+}

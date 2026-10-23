@@ -1,0 +1,29 @@
+; OpenLaser G-code
+; Machine: CO₂ cutter · GRBL 600 × 400 mm
+; Generated: <MASKED>
+; Design origin: center; units: millimetres
+G21
+G90
+M5
+; Layer: Air · vector_cut
+M8
+M5
+G0 X290 Y190
+M3 S600
+G1 X310 Y190 F1200
+G1 X310 Y210 F1200
+G1 X290 Y210 F1200
+G1 X290 Y190 F1200
+M5
+M5
+G0 X270 Y220
+M3 S600
+G1 X285 Y220 F1200
+G1 X277.5 Y233.333 F1200
+G1 X270 Y220 F1200
+M5
+M9
+M5
+M9
+G0 X0 Y0
+; End OpenLaser job
