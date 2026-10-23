@@ -317,6 +317,28 @@ fn plan_records_facts_never_drops() {
     assert_eq!((plan.machine.clone(), plan.device, plan.repeats), (m.id.clone(), DeviceKind::GalvoLmc, 1));
 }
 
+/// B6: a hidden layer with Output on is recorded (safety refuses it) and still framed, Contour and Bounds alike.
+#[test]
+#[ignore = "needs I1"]
+fn plan_frames_hidden_output_layers() {
+    let m = machine();
+    let mut p = project(&m, vec![rect(1, C0, 0.0, 0.0, 10.0, 10.0), rect(2, C1, 30.0, 0.0, 10.0, 10.0)]);
+    layer_mut(&mut p, 1).show = false;
+    for style in [FrameStyle::Contour, FrameStyle::Bounds] {
+        let plan = make_plan(&p, &m, &opts(style)).unwrap();
+        assert_eq!(plan.facts.hidden_output_layers, vec![C1]);
+        let hidden: Vec<&Polyline> = plan.sections.iter().filter(|s| s.layer == C1).flat_map(|s| s.paths.iter()).collect();
+        assert_eq!(hidden.len(), 1, "the hidden layer plans its burn");
+        let fb = openlaser_geom::bounds_of(&plan.frame).unwrap();
+        for q in hidden.iter().flat_map(|h| h.0.iter()) {
+            assert!(q[0] >= fb.min[0] && q[0] <= fb.max[0] && q[1] >= fb.min[1] && q[1] <= fb.max[1], "{style:?}: {q:?} is outside the frame");
+        }
+        if style == FrameStyle::Contour {
+            assert!(hidden.iter().all(|h| plan.frame.contains(h)), "the hidden layer's outline is traced");
+        }
+    }
+}
+
 #[test]
 #[ignore = "needs I1"]
 fn plan_selected_only_and_tool_frame() {
@@ -425,15 +447,26 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     /// PLAN §3.6 layer 3: every Line point lies on a traced contour, every Fill segment within the even-odd region
-    /// of the traced closed contours; with Bounds, everything lies inside the rectangle (B6).
+    /// of the traced closed contours; with Bounds, everything lies inside the rectangle (B6). `hide` hides C00
+    /// and/or C01 with Output still on: a hidden emitting layer is recorded and must be framed all the same.
     #[test]
     #[ignore = "needs I1"]
-    fn prop_frame_covers_burn((shapes, cross, passes, interval) in design(), bounds in any::<bool>()) {
+    fn prop_frame_covers_burn((shapes, cross, passes, interval) in design(), bounds in any::<bool>(), hide in any::<(bool, bool)>()) {
         let m = machine();
-        let p = design_project(&m, shapes, cross, passes, interval);
+        let mut p = design_project(&m, shapes, cross, passes, interval);
+        layer_mut(&mut p, 0).show = !hide.0;
+        layer_mut(&mut p, 1).show = !hide.1;
         let style = if bounds { FrameStyle::Bounds } else { FrameStyle::Contour };
         let plan = make_plan(&p, &m, &opts(style)).unwrap();
+        for (i, hidden) in [(0u8, hide.0), (1u8, hide.1)] {
+            let key = LayerKey::Color(i);
+            let burns = plan.sections.iter().any(|s| s.layer == key);
+            let fact = plan.facts.hidden_output_layers.contains(&key);
+            prop_assert!(!(hidden && burns) || fact, "a hidden layer that burns is a fact");
+            prop_assert!(hidden || !fact, "a shown layer is never reported hidden");
+        }
         let fb = openlaser_geom::bounds_of(&plan.frame);
+        prop_assert!(plan.sections.is_empty() || fb.is_some(), "a job that burns has a frame");
         for s in &plan.sections {
             for path in &s.paths {
                 for q in &path.0 {
