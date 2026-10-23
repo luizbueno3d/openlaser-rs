@@ -415,4 +415,33 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn menu_catalog_matches_cat() {
+        assert_eq!(MENUS, &["File", "Edit", "Tools", "Arrange", "Laser Tools", "Window", "Language", "Help"]);
+        assert!(!CATALOG.is_empty());
+        for row in CATALOG {
+            assert!(!row.path.is_empty(), "menu rows need a path: {row:?}");
+            if is_separator(row) {
+                assert!(row.shortcut.is_none(), "separators cannot have shortcuts: {row:?}");
+            } else {
+                assert!(!row.label.is_empty(), "menu rows need a visible label: {row:?}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "needs I2"]
+    fn catalog_shortcuts_match_registry() {
+        for row in CATALOG.iter().filter(|row| !is_separator(row) && !is_hw_row(row)) {
+            if let Some(spec) = openlaser_engine::registry().find(row.id) {
+                assert_eq!(row.shortcut, spec.shortcut, "shortcut mismatch for {}", row.id);
+                assert_ne!(spec.access, openlaser_engine::Access::Human, "human-only command has a menu row: {}", row.id);
+            }
+        }
+        for spec in openlaser_engine::registry().specs().iter().filter(|spec| !spec.menu.is_empty()) {
+            let row = CATALOG.iter().find(|row| !is_separator(row) && !is_hw_row(row) && row.id == spec.id);
+            assert!(row.is_some(), "registered menu command missing from catalogue: {}", spec.id);
+        }
+    }
 }

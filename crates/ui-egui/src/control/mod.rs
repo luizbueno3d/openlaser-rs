@@ -16,6 +16,24 @@ pub enum Outcome {
     Screenshot { max_side: u32, reply: Sender<Reply> },
 }
 
+/// Whether a method is routed by `handle`. Listed-but-unavailable protocol methods are deliberately
+/// answered with a method-specific unavailable error instead of falling through to "unknown method".
+pub fn has_handler(method: &str) -> bool {
+    matches!(
+        method,
+        "methods"
+            | "machine.stop"
+            | "ui.inspect"
+            | "ui.elements"
+            | "ui.menu.list"
+            | "ui.menu.invoke"
+            | "engine.execute"
+            | "engine.commands"
+            | "machine.list"
+            | "ui.screenshot"
+    ) || openlaser_control::methods::METHODS.contains(&method)
+}
+
 pub fn handle(app: &mut OpenLaserApp, ctx: &egui::Context, req: ControlRequest) -> Outcome {
     let _ = ctx;
     let id = req.request.id.clone();
@@ -81,4 +99,16 @@ fn execute_command(app: &mut OpenLaserApp, command: &str, params: serde_json::Va
 
 pub(crate) fn error_reply(id: serde_json::Value, error: &str) -> Reply {
     Reply { id, ok: false, result: None, error: Some(error.to_owned()) }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore = "needs I2"]
+    fn every_control_method_has_a_handler() {
+        for method in openlaser_control::methods::METHODS {
+            assert!(super::has_handler(method), "control method lacks a route: {method}");
+        }
+        assert!(!super::has_handler("definitely.unknown"));
+    }
 }

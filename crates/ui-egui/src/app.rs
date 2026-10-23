@@ -26,6 +26,7 @@ pub struct OpenLaserApp {
     control_rx: Option<Receiver<ControlRequest>>,
     pending_dialogs: Vec<(crate::services::DialogTicket, crate::services::DialogKind)>,
     close_after_stop: bool,
+    last_layer_click: Option<(usize, f64)>,
 }
 
 impl OpenLaserApp {
@@ -33,7 +34,7 @@ impl OpenLaserApp {
         let mut ui = UiState { selected_tool: "Select", active_panel: "Laser", ..UiState::default() };
         let saved = services.settings.load();
         ui.active_panel = if saved.show_laser { "Laser" } else { "Library" };
-        Self { session, ui, services, control_rx: None, pending_dialogs: Vec::new(), close_after_stop: false }
+        Self { session, ui, services, control_rx: None, pending_dialogs: Vec::new(), close_after_stop: false, last_layer_click: None }
     }
 
     pub fn with_control(mut self, rx: Receiver<ControlRequest>) -> Self {
@@ -170,56 +171,103 @@ impl OpenLaserApp {
             ui.strong("Mode");
             ui.strong("Speed");
             ui.strong("Power");
+            ui.strong("Freq.");
             ui.strong("O");
             ui.strong("S");
         });
         for idx in 0..32 {
-            let (name, color) =
-                if idx < 30 { (format!("{idx:02} C{idx:02}"), palette_color(idx)) } else { (format!("T{} Tool layer", idx - 29), egui::Color32::GRAY) };
+            let (name, color) = if idx < 30 {
+                let saved_name = self.session.active().and_then(|doc| doc.project.color_layer(idx as u8)).map(|layer| layer.name.as_str());
+                (saved_name.map(str::to_owned).unwrap_or_else(|| format!("C{idx:02}")), palette_color(idx))
+            } else {
+                (format!("T{} Tool layer", idx - 29), egui::Color32::GRAY)
+            };
+            let (mode, speed, power, frequency, output, show) = self.layer_values(idx);
             let row = ui.horizontal(|ui| {
                 let response = ui.selectable_label(self.ui.active_layer == idx, "");
+                response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Cut layer {name}")));
                 let rect = response.rect;
                 ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(14.0, 14.0)), 2.0, color);
                 ui.label(name);
-                ui.label(if idx < 30 { "Line" } else { "Tool" });
-                ui.label("1000 mm/s");
-                ui.label("30 %");
-                ui.label("✓");
-                ui.label("✓");
+                ui.label(mode);
+                ui.label(speed);
+                ui.label(power);
+                ui.label(frequency);
+                ui.label(if output { "✓" } else { "—" });
+                ui.label(if show { "✓" } else { "—" });
                 response
             });
             if row.inner.clicked() {
                 self.ui.active_layer = idx;
-            }
-            if row.inner.double_clicked() {
-                self.ui.cut_settings_open = true;
+                let now = ui.input(|input| input.time);
+                if self.last_layer_click.is_some_and(|(previous, at)| previous == idx && now - at <= 0.4) {
+                    self.ui.cut_settings_open = true;
+                    self.last_layer_click = None;
+                } else {
+                    self.last_layer_click = Some((idx, now));
+                }
             }
         }
         ui.separator();
+        let (mode, speed, power, frequency, _, _) = self.layer_values(self.ui.active_layer);
         ui.label("Quick edit");
         ui.horizontal(|ui| {
             ui.label("Mode");
-            ui.label("Line");
+            ui.label(mode);
         });
         ui.horizontal(|ui| {
             ui.label("Speed");
-            ui.label("1000 mm/s (actual)");
+            ui.label(format!("{speed} (actual)"));
         });
         ui.horizontal(|ui| {
             ui.label("Power");
-            ui.label("30 %");
+            ui.label(power);
         });
         ui.horizontal(|ui| {
             ui.label("Frequency");
-            ui.label("30 kHz");
+            ui.label(frequency);
         });
+        let q_pulse = self
+            .session
+            .active()
+            .and_then(|doc| doc.project.color_layer(self.ui.active_layer as u8))
+            .and_then(|layer| layer.ops.first())
+            .and_then(|op| op.galvo.q_pulse)
+            .map(|pulse| format!("{} ns", pulse.get()))
+            .unwrap_or_else(|| "—".to_owned());
         ui.horizontal(|ui| {
             ui.label("Q-Pulse");
-            ui.label("200 ns");
+            ui.label(q_pulse);
         });
         if ui.button("Edit Cut Settings…").clicked() {
             self.ui.cut_settings_open = true;
         }
+    }
+
+    fn layer_values(&self, idx: usize) -> (&'static str, String, String, String, bool, bool) {
+        let Some(layer) = (idx < 30).then(|| self.session.active().and_then(|doc| doc.project.color_layer(idx as u8))).flatten() else {
+            return ("Tool", "—".to_owned(), "—".to_owned(), "—".to_owned(), false, true);
+        };
+        let Some(op) = layer.ops.first() else {
+            return ("—", "—".to_owned(), "—".to_owned(), "—".to_owned(), layer.output, layer.show);
+        };
+        let mode = match op.mode {
+            openlaser_doc::CutMode::Line => "Line",
+            openlaser_doc::CutMode::Fill => "Fill",
+            openlaser_doc::CutMode::OffsetFill => "Offset Fill",
+        };
+        (
+            mode,
+            format!("{} mm/s", op.galvo.speed.get()),
+            format!("{} %", op.galvo.power.get()),
+            format!("{} kHz", f64::from(op.galvo.frequency.get()) / 1000.0),
+            layer.output,
+            layer.show,
+        )
+    }
+
+    fn active_machine_is_gantry(&self) -> bool {
+        self.session.active().is_some_and(|doc| doc.project.workspace.kind == openlaser_doc::DeviceKind::Grbl)
     }
 
     fn laser_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -231,7 +279,20 @@ impl OpenLaserApp {
         ui.label("Disconnected");
         ui.horizontal(|ui| {
             for name in ["Connect", "Frame", "Start"] {
-                let r = ui.button(name);
+                let can_plan = self.session.build_job(None, &Default::default()).is_ok();
+                let enabled = match name {
+                    "Connect" => true,
+                    "Frame" => can_plan && !self.ui.machine_active,
+                    "Start" => false,
+                    _ => false,
+                };
+                let r = ui.add_enabled(enabled, egui::Button::new(name));
+                if name == "Frame" && !can_plan {
+                    r.clone().on_hover_text("Frame is unavailable until the current job can be planned.");
+                }
+                if name == "Start" {
+                    r.clone().on_hover_text("Frame this job first. A human must approve every marking job.");
+                }
                 if self.services.human.is_human_click(ctx, &r) {
                     self.ui.status_message = format!("{name} requested");
                 } else if r.clicked() {
@@ -243,10 +304,30 @@ impl OpenLaserApp {
         if stop.clicked() {
             self.stop();
         }
-        ui.label("Start From: Absolute (not available for galvo)");
-        ui.checkbox(&mut false, "Cut Selected Graphics");
-        ui.label("Frame this job first");
-        ui.label("No current job");
+        ui.add_enabled(false, egui::Button::new("Start From: Absolute · galvo uses field centre"))
+            .on_hover_text("Start From is unavailable for galvo machines; the field centre is the origin.");
+        let mut cut_selected = self.session.active().is_some_and(|doc| doc.project.job.cut_selected);
+        ui.add_enabled_ui(self.session.active().is_some(), |ui| {
+            ui.checkbox(&mut cut_selected, "Cut Selected Graphics");
+        });
+        let check = self.session.build_job(None, &Default::default());
+        match check {
+            Ok(_job) => {
+                ui.label("Frame this job first");
+            }
+            Err(refused) if refused.refusals.is_empty() => {
+                ui.colored_label(egui::Color32::from_rgb(234, 107, 71), "Job unavailable");
+            }
+            Err(refused) => {
+                ui.colored_label(egui::Color32::from_rgb(234, 107, 71), format!("{} refusal(s)", refused.refusals.len()));
+                for refusal in refused.refusals.iter().take(3) {
+                    ui.label(refusal.message.as_str());
+                }
+            }
+        }
+        if self.session.active().is_none() {
+            ui.label("No current job · Frame this job first");
+        }
     }
 }
 
@@ -372,8 +453,22 @@ impl eframe::App for OpenLaserApp {
             });
         });
         egui::Panel::left("tools").default_size(42.0).show(ui, |ui| {
-            for tool in ["Select", "Line", "Rectangle", "Ellipse", "Polygon", "Text", "Pan", "Measure"] {
-                let response = ui.selectable_label(self.ui.selected_tool == tool, tool);
+            for (tool, icon) in [
+                ("Select", "⌖"),
+                ("Line", "╱"),
+                ("Rectangle", "□"),
+                ("Ellipse", "◯"),
+                ("Polygon", "⬡"),
+                ("Pen", "✎"),
+                ("Text", "T"),
+                ("Edit Nodes", "⌁"),
+                ("Offset", "↗"),
+                ("Weld", "⋈"),
+                ("Measure", "↔"),
+                ("Pan", "✋"),
+            ] {
+                let response = ui.selectable_label(self.ui.selected_tool == tool, icon).on_hover_text(tool);
+                response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tool));
                 if response.clicked() {
                     self.ui.selected_tool = tool;
                 }
@@ -442,7 +537,9 @@ impl eframe::App for OpenLaserApp {
                 ui.label("Scan Angle · °");
                 ui.label("Passes");
                 ui.separator();
-                ui.label("Air Assist is available for gantry machines only.");
+                if self.active_machine_is_gantry() {
+                    ui.checkbox(&mut false, "Air Assist");
+                }
                 if ui.button("OK").clicked() {
                     close_cut_settings = true;
                 }
@@ -471,4 +568,241 @@ impl eframe::App for OpenLaserApp {
 fn palette_color(idx: usize) -> egui::Color32 {
     let hue = ((idx % 30) as f32 / 30.0) * 360.0;
     egui::Color32::from(egui::ecolor::Hsva::new(hue / 360.0, 0.78, 0.88, 1.0))
+}
+
+#[cfg(test)]
+mod kittests {
+    use super::*;
+    use crate::services::{ArmModel, ArmOutcome, ControlInfo, DialogKind, DialogTicket, FileDialogs, HumanSurfaces, SettingsStore, UiSettings};
+    use eframe::App;
+    use egui_kittest::kittest::Queryable;
+    use openlaser_engine::{DeviceAccess, FsAuthority, Origin, SessionConfig};
+    use openlaser_types::{Clock, SystemClock};
+    use std::sync::Arc;
+
+    struct Files;
+    impl FileDialogs for Files {
+        fn open(&mut self, _kind: DialogKind) -> DialogTicket {
+            DialogTicket(1)
+        }
+        fn poll(&mut self, _ticket: DialogTicket) -> Option<Option<(String, Vec<u8>)>> {
+            None
+        }
+        fn save(&mut self, _kind: DialogKind, _bytes: Vec<u8>) -> DialogTicket {
+            DialogTicket(2)
+        }
+    }
+    struct Settings(UiSettings);
+    impl SettingsStore for Settings {
+        fn load(&self) -> UiSettings {
+            self.0.clone()
+        }
+        fn save(&mut self, value: &UiSettings) {
+            self.0 = value.clone();
+        }
+    }
+    struct Human;
+    impl HumanSurfaces for Human {
+        fn inject(&mut self, _ctx: &egui::Context, _raw: &mut egui::RawInput, _events: Vec<egui::Event>) {}
+        fn frame_is_synthetic(&self, _ctx: &egui::Context) -> bool {
+            false
+        }
+        fn is_human_click(&mut self, _ctx: &egui::Context, _response: &egui::Response) -> bool {
+            false
+        }
+        fn arm_dialog(&mut self, _ctx: &egui::Context, _model: &ArmModel) -> ArmOutcome {
+            ArmOutcome::Cancelled
+        }
+        fn surface_open(&self) -> bool {
+            false
+        }
+    }
+    struct Clipboard;
+    impl crate::Clipboard for Clipboard {
+        fn get(&mut self) -> Option<String> {
+            None
+        }
+        fn set(&mut self, _text: &str) {}
+    }
+    struct Automation;
+    impl crate::AutomationToggle for Automation {
+        fn set(&mut self, _on: bool) -> Result<Option<ControlInfo>, String> {
+            Ok(None)
+        }
+        fn info(&self) -> Option<ControlInfo> {
+            None
+        }
+    }
+
+    fn harness() -> egui_kittest::Harness<'static, OpenLaserApp> {
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
+        let session = Session::new(SessionConfig {
+            origin: Origin::Human,
+            window: true,
+            devices: DeviceAccess::None,
+            machines: Vec::new(),
+            profiles: None,
+            files: FsAuthority::Denied,
+            clock,
+        });
+        let services = Services {
+            human: Box::new(Human),
+            files: Box::new(Files),
+            settings: Box::new(Settings(UiSettings::default())),
+            clipboard: Box::new(Clipboard),
+            automation: Box::new(Automation),
+            quit: Box::new(|| {}),
+        };
+        egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1440.0, 900.0))
+            .with_step_dt(0.05)
+            .build_eframe(move |cc| OpenLaserApp::new(cc, session, services))
+    }
+
+    #[test]
+    fn kittest_lightburn_regions_present() {
+        let mut harness = harness();
+        harness.run();
+        for label in ["File", "Edit", "Tools", "Arrange", "Laser Tools", "Window", "Language", "Help", "Cuts / Layers", "Laser", "Stop laser"] {
+            assert!(harness.query_all_by_label(label).next().is_some(), "missing accessible region/control: {label}");
+        }
+    }
+
+    #[test]
+    fn kittest_palette_has_30_plus_tools() {
+        let mut harness = harness();
+        harness.run();
+        for label in (0..30).map(|n| format!("Layer {n:02}")).chain(["Layer 30".to_owned(), "Layer 31".to_owned()]) {
+            assert!(harness.query_by_label(&label).is_some(), "missing palette layer {label}");
+        }
+        for label in ["Select", "Rectangle", "Ellipse", "Polygon", "Pen", "Text", "Pan", "Measure"] {
+            assert!(harness.query_by_label(label).is_some(), "missing creation tool {label}");
+        }
+    }
+
+    #[test]
+    fn kittest_accessibility_labels() {
+        let mut harness = harness();
+        harness.run();
+        assert!(harness.query_by_label("Stop laser").is_some());
+        assert!(harness.query_by_label("Layer 00").is_some());
+        assert!(harness.query_by_label("Frame").is_some());
+    }
+
+    #[test]
+    fn kittest_stop_always_visible_and_enabled() {
+        let mut harness = harness();
+        harness.run();
+        let stop = harness.get_by_label("Stop laser");
+        stop.click();
+        harness.run();
+        assert_eq!(harness.state().ui.status_message, "Stop requested", "STOP must accept a click");
+    }
+
+    #[test]
+    fn kittest_air_hidden_for_galvo() {
+        let mut harness = harness();
+        harness.state_mut().ui.cut_settings_open = true;
+        harness.run();
+        assert!(harness.query_all_by_label("Air Assist").next().is_none());
+    }
+
+    #[test]
+    fn kittest_no_file_dialog_while_active() {
+        let mut harness = harness();
+        harness.state_mut().ui.machine_active = true;
+        harness.state_mut().invoke_ui_action("file.open");
+        assert!(harness.state().pending_dialogs.is_empty());
+    }
+
+    #[test]
+    fn kittest_esc_trips_latch_before_widgets() {
+        let mut harness = harness();
+        let ctx = harness.ctx.clone();
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: Some(egui::Key::Escape),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.state_mut().raw_input_hook(&ctx, &mut input);
+        assert!(!input.events.iter().any(|event| matches!(event, egui::Event::Key { key: egui::Key::Escape, pressed: true, .. })));
+    }
+
+    #[test]
+    fn kittest_double_click_opens_cut_settings() {
+        let mut harness = harness();
+        harness.run();
+        harness.get_by_label("Cut layer C00").click();
+        harness.run();
+        assert!(harness.state().last_layer_click.is_some(), "first row click was not received");
+        harness.get_by_label("Cut layer C00").click();
+        harness.run();
+        assert!(harness.state().ui.cut_settings_open);
+    }
+
+    #[test]
+    fn kittest_start_without_receipt_says_frame_first() {
+        let mut harness = harness();
+        harness.run();
+        assert!(harness.query_all_by_label("No current job · Frame this job first").next().is_some());
+    }
+
+    #[test]
+    fn kittest_laser_panel_galvo_disabled_reasons() {
+        let mut harness = harness();
+        harness.run();
+        assert!(harness.query_all_by_label_contains("Start From: Absolute").next().is_some());
+        harness.get_by_label("Start").hover();
+        harness.run();
+        assert!(harness.query_all_by_label_contains("Frame this job first").next().is_some());
+    }
+
+    #[test]
+    fn synthetic_click_on_frame_button_does_not_frame() {
+        let mut harness = harness();
+        harness.run();
+        harness.get_by_label("Frame").click();
+        harness.run();
+        assert!(!harness.state().ui.machine_active);
+        assert_ne!(harness.state().ui.status_message, "Frame requested");
+    }
+
+    #[test]
+    #[ignore = "needs I2"]
+    fn kittest_cuts_columns_and_actual_speed() {}
+
+    #[test]
+    #[ignore = "needs I2"]
+    fn kittest_cut_settings_ok_is_one_undo_step() {}
+
+    #[test]
+    #[ignore = "needs I2"]
+    fn kittest_palette_click_assigns_selection() {}
+
+    #[test]
+    #[ignore = "needs I2"]
+    fn kittest_refusal_badge_for_off_table_pulse() {}
+
+    #[test]
+    #[ignore = "needs I2"]
+    fn kittest_mark_disabled_while_refusals() {}
+
+    #[test]
+    #[ignore = "needs I2"]
+    fn control_refuses_human_only() {}
+
+    #[test]
+    #[ignore = "needs I2"]
+    fn kittest_quit_while_marking_stops_first() {}
+
+    #[test]
+    #[ignore = "needs I2"]
+    fn kittest_esc_closes_arm_dialog() {}
+
+    #[test]
+    #[ignore = "needs I2"]
+    fn hidden_window_still_polls_while_active() {}
 }

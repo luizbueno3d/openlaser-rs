@@ -22,6 +22,87 @@ impl ViewXform {
     }
 }
 
+/// Returns the first path whose nearest segment is within `tolerance` millimetres.
+/// Invalid points and tolerances are ignored; geometry from a malformed display list cannot crash hit testing.
+pub fn hit_test(paths: &[Vec<[f64; 2]>], point: [f64; 2], tolerance: f64) -> Option<usize> {
+    if !point.iter().all(|v| v.is_finite()) || !tolerance.is_finite() || tolerance < 0.0 {
+        return None;
+    }
+    paths.iter().position(|path| {
+        path.windows(2).any(|pair| {
+            let Some((a, b)) = pair.first().zip(pair.get(1)) else { return false };
+            let (a, b) = (*a, *b);
+            if !a.iter().chain(b.iter()).all(|v| v.is_finite()) {
+                return false;
+            }
+            distance_to_segment(point, a, b) <= tolerance
+        })
+    })
+}
+
+/// Marquee selection in design coordinates. Left-to-right (`crossing == false`) encloses every point;
+/// right-to-left (`crossing == true`) selects any path that intersects the rectangle.
+pub fn marquee_hits(paths: &[Vec<[f64; 2]>], rect: [[f64; 2]; 2], crossing: bool) -> Vec<usize> {
+    if !rect.iter().flatten().all(|v| v.is_finite()) {
+        return Vec::new();
+    }
+    let min = [rect[0][0].min(rect[1][0]), rect[0][1].min(rect[1][1])];
+    let max = [rect[0][0].max(rect[1][0]), rect[0][1].max(rect[1][1])];
+    paths
+        .iter()
+        .enumerate()
+        .filter_map(|(index, path)| {
+            let points: Vec<_> = path.iter().copied().filter(|p| p.iter().all(|v| v.is_finite())).collect();
+            let hit = if crossing {
+                points.windows(2).any(|pair| pair.first().zip(pair.get(1)).is_some_and(|(a, b)| segment_intersects_rect(*a, *b, min, max)))
+                    || points.iter().any(|p| in_rect(*p, min, max))
+            } else {
+                !points.is_empty() && points.iter().all(|p| in_rect(*p, min, max))
+            };
+            hit.then_some(index)
+        })
+        .collect()
+}
+
+fn in_rect(p: [f64; 2], min: [f64; 2], max: [f64; 2]) -> bool {
+    p[0] >= min[0] && p[0] <= max[0] && p[1] >= min[1] && p[1] <= max[1]
+}
+
+fn segment_intersects_rect(a: [f64; 2], b: [f64; 2], min: [f64; 2], max: [f64; 2]) -> bool {
+    if !a.iter().chain(b.iter()).all(|v| v.is_finite()) {
+        return false;
+    }
+    if in_rect(a, min, max) || in_rect(b, min, max) {
+        return true;
+    }
+    let bottom_left = [min[0], min[1]];
+    let bottom_right = [max[0], min[1]];
+    let top_right = [max[0], max[1]];
+    let top_left = [min[0], max[1]];
+    [(bottom_left, bottom_right), (bottom_right, top_right), (top_right, top_left), (top_left, bottom_left)]
+        .iter()
+        .any(|(c, d)| segments_intersect(a, b, *c, *d))
+}
+
+fn segments_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
+    let cross = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+    let (ab_c, ab_d, cd_a, cd_b) = (cross(a, b, c), cross(a, b, d), cross(c, d, a), cross(c, d, b));
+    let opposite = |left: f64, right: f64| (left < 0.0 && right > 0.0) || (left > 0.0 && right < 0.0);
+    if opposite(ab_c, ab_d) && opposite(cd_a, cd_b) {
+        return true;
+    }
+    let on_segment =
+        |p: [f64; 2], q: [f64; 2], r: [f64; 2]| q[0] >= p[0].min(r[0]) && q[0] <= p[0].max(r[0]) && q[1] >= p[1].min(r[1]) && q[1] <= p[1].max(r[1]);
+    (ab_c == 0.0 && on_segment(a, c, b)) || (ab_d == 0.0 && on_segment(a, d, b)) || (cd_a == 0.0 && on_segment(c, a, d)) || (cd_b == 0.0 && on_segment(c, b, d))
+}
+
+fn distance_to_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    let delta = [b[0] - a[0], b[1] - a[1]];
+    let length2 = delta[0] * delta[0] + delta[1] * delta[1];
+    let t = if length2 == 0.0 { 0.0 } else { (((p[0] - a[0]) * delta[0] + (p[1] - a[1]) * delta[1]) / length2).clamp(0.0, 1.0) };
+    ((p[0] - (a[0] + t * delta[0])).powi(2) + (p[1] - (a[1] + t * delta[1])).powi(2)).sqrt()
+}
+
 pub trait CanvasRenderer {
     fn paint(&mut self, painter: &egui::Painter, list: &DisplayList, view: &ViewXform);
 }
@@ -157,5 +238,16 @@ mod tests {
         let restored = view.screen_to_world(view.world_to_screen(world));
         assert!((restored[0] - world[0]).abs() < 1e-5);
         assert!((restored[1] - world[1]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn hit_test_and_marquee() {
+        let paths = vec![vec![[-3.0, 0.0], [3.0, 0.0]], vec![[2.0, 2.0], [3.0, 3.0]]];
+        assert_eq!(hit_test(&paths, [0.0, 0.2], 0.25), Some(0));
+        assert_eq!(hit_test(&paths, [0.0, 0.3], 0.25), None);
+        assert_eq!(marquee_hits(&paths, [[-1.0, -1.0], [1.0, 1.0]], false), Vec::<usize>::new());
+        assert_eq!(marquee_hits(&paths, [[-1.0, -1.0], [1.0, 1.0]], true), vec![0]);
+        assert_eq!(marquee_hits(&paths, [[5.0, 5.0], [6.0, 6.0]], true), Vec::<usize>::new());
+        assert_eq!(marquee_hits(&[vec![[2.0, 0.0], [3.0, 0.0]]], [[-1.0, -1.0], [1.0, 1.0]], true), Vec::<usize>::new());
     }
 }
