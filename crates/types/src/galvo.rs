@@ -1,5 +1,6 @@
 //! The T0 encoders (SPEC §3.1 galvo.rs; owned by WP4). Python operation order; tests read
-//! `tests/golden/t0_numeric` (every row of the seven tables, `crates/lmc/src/t0_acceptance.rs`).
+//! `tests/golden/t0_numeric` (every row of the seven tables, through these shipping functions and the `_om`
+//! variants: `crates/lmc/tests/t0_numeric.rs`).
 //!
 //! Rounding follows Python exactly: `round()` is ties-to-even (`f64::round_ties_even`), `int()` truncates. Every
 //! shipping encoder refuses a value it cannot represent instead of clamping or wrapping; the `_om` variants keep the

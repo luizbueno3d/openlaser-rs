@@ -37,15 +37,20 @@ use blake3::Hasher;
 use openlaser_machine::GalvoMachine;
 use openlaser_plan::CutQ;
 use openlaser_safety::{EmitPlan, FramePlan};
-use openlaser_types::galvo::{CENTER, distance_word, mm_to_galvo, speed_to_units};
-use openlaser_types::{Fingerprint, FrameSource, FrameStyle, LayerKey, MachineId};
+use openlaser_types::galvo::{CENTER, EncodeError, delay_word, distance_word, mm_to_galvo, speed_to_units};
+use openlaser_types::{DeviceKind, Fingerprint, FrameSource, FrameStyle, LayerKey, MachineId};
 
 use crate::Error;
+use crate::decode::packet_times;
 use crate::op;
 use crate::packet::{Packet, SLOTS, Single};
 
 type Word = [u16; 6];
 
+/// The MarkCurrent word for 100 % (`power_to_mark_current(100.0)`). A larger word asks for more than full power.
+pub(crate) const MARK_CURRENT_MAX: u16 = 4095;
+
+/// Built only from `EmitPlan` sections (SPEC §5.2 rule 9).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MarkingList {
     words: Vec<Word>,
@@ -61,15 +66,16 @@ impl MarkingList {
     }
 }
 
-/// A list builder whose API contains no emitting command. It cannot express
-/// `MarkTo`, `LaserOnPoint`, or MO control.
+/// A list builder whose only input is [`LightCommand`] (SPEC §5.2 rule 9): it cannot express `MarkTo`,
+/// `LaserOnPoint`, MO open or any parameter of the laser source, and its `WritePort` accepts only 0 or the red-light
+/// bit (never the laser bit; `lighting_packets` refuses a profile whose red bit is the laser bit).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LightingList {
     words: Vec<Word>,
     red: u16,
 }
 
-// A separate command type makes emitting opcodes unrepresentable at lighting call sites.
+/// Everything a lighting list can say. There is no variant for an emitting opcode.
 #[derive(Debug, Clone, Copy)]
 enum LightCommand {
     Ready,
@@ -82,6 +88,13 @@ enum LightCommand {
 }
 
 impl LightingList {
+    fn new(red: u16) -> Result<Self, Error> {
+        // The red bit must be exactly one bit (`bit()` builds it); 0 would make every port write a no-op claim.
+        if red == 0 || !red.is_power_of_two() {
+            return Err(Error::UnsafeLighting);
+        }
+        Ok(LightingList { words: Vec::new(), red })
+    }
     fn push(&mut self, command: LightCommand) -> Result<(), Error> {
         let (opcode, p) = match command {
             LightCommand::Ready => (op::LIST_READY_MARK, [0; 5]),
@@ -102,25 +115,32 @@ impl LightingList {
     }
 }
 
+/// 256 commands per packet; the last packet carries the explicit EndOfList and is padded with `0x8002`.
 fn packetize(words: &[Word]) -> Result<Vec<Packet>, Error> {
     words.chunks(SLOTS).map(|chunk| Packet::from_words(chunk).map_err(Error::Packet)).collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LmcJob {
+    /// Sent before EACH list: ResetList, WritePort(laser bit), Fiber_SetMo(1), GetVersion.
     pub prelude: Vec<Single>,
+    /// Per layer-pass, in burn order (one repeat).
     pub lists: Vec<LmcList>,
+    /// Run by the driver, stop checked between repeats; never expanded.
     pub repeats: u16,
+    /// After EACH list, only once !BUSY: Fiber_SetMo(0), WritePort(0), GetMarkTime(3).
     pub postlude: Vec<Single>,
     pub fingerprint: Fingerprint,
     pub machine: MachineId,
 }
 
 impl LmcJob {
-    /// Hashes each list's prelude, all full packets (including padding), postlude,
-    /// then the little-endian repeat count. Session protocol commands (polls,
-    /// SetEndOfList, ExecuteList), timing estimates, labels, machine id and
-    /// fingerprint are not hashed; emission identity is checked separately.
+    /// S22: blake3 over, in send order, every single command (12 bytes) and packet (3072 bytes, padding included) of
+    /// one repeat (per list: prelude, packets, postlude), then the repeat count as u16 LE.
+    ///
+    /// Not hashed: the session's own singles (status polls, SetEndOfList, ExecuteList, whose position depends on the
+    /// board), `packet_est`, each list's `layer`/`pass` labels, `fingerprint` and `machine`. Those are checked
+    /// separately (`emission_summary` against the plan, the driver against the ARM token).
     pub fn bytes_hash(&self) -> Fingerprint {
         let mut hash = Hasher::new();
         for list in &self.lists {
@@ -144,6 +164,8 @@ pub struct LmcList {
     pub layer: LayerKey,
     pub pass: u16,
     pub packets: Vec<Packet>,
+    /// Per packet: the larger of the packet's share of the section estimate and its nominal LMC time decoded from
+    /// its own bytes (`decode::packet_times`), so the run-ahead window never under-counts a packet.
     pub packet_est: Vec<Duration>,
 }
 
@@ -160,18 +182,47 @@ pub struct LmcFrameJob {
     pub source: FrameSource,
 }
 
+/// The prelude sent before each marking list (SPEC §3.12).
+pub(crate) fn job_prelude(laser: u16) -> Vec<Single> {
+    vec![
+        Single([op::RESET_LIST, 0, 0, 0, 0, 0]),
+        Single([op::WRITE_PORT, laser, 0, 0, 0, 0]),
+        Single([op::FIBER_SET_MO, 1, 0, 0, 0, 0]),
+        Single([op::GET_VERSION, 0, 0, 0, 0, 0]),
+    ]
+}
+
+/// The postlude sent after each marking list, once !BUSY (SPEC §3.12).
+pub(crate) fn job_postlude() -> Vec<Single> {
+    vec![Single([op::FIBER_SET_MO, 0, 0, 0, 0, 0]), Single([op::WRITE_PORT, 0, 0, 0, 0, 0]), Single([op::GET_MARK_TIME, 3, 0, 0, 0, 0])]
+}
+
 pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
-    if emit.sections().is_empty() {
+    if emit.device() != DeviceKind::GalvoLmc {
+        return Err(Error::NotGalvo);
+    }
+    if emit.sections().is_empty() || emit.repeats() == 0 {
         return Err(Error::Empty);
     }
+    let laser = bit(m.ports.laser_bit)?;
     let mut lists = Vec::with_capacity(emit.sections().len());
     for section in emit.sections() {
         let CutQ::Galvo(q) = &section.cut else { return Err(Error::NotGalvo) };
+        // The encoder reads only the planner's words (SPEC §5.2 rule 4) and refuses any it cannot send as-is.
         let pulse = q.pulse.word().ok_or(Error::InvalidPulse)?;
+        if !m.source.pulse_table_ns.contains(&pulse) {
+            return Err(Error::InvalidPulse);
+        }
+        if q.mark_current > MARK_CURRENT_MAX {
+            return Err(EncodeError::OutOfRange { what: "mark current", value: f64::from(q.mark_current) }.into());
+        }
+        if q.q_period == 0 {
+            return Err(EncodeError::OutOfRange { what: "q-switch period", value: 0.0 }.into());
+        }
         let mut list = MarkingList::default();
         list.push(op::LIST_READY_MARK, [0; 5]);
         list.push(op::LIST_DELAY_TIME, [q.timings.mo_settle_10us, 0, 0, 0, 0]);
-        list.push(op::LIST_WRITE_PORT, [bit(m.ports.laser_bit)?, 0, 0, 0, 0]);
+        list.push(op::LIST_WRITE_PORT, [laser, 0, 0, 0, 0]);
         list.push(op::LIST_JUMP_SPEED, [nonzero_speed(q.timings.jump_speed_units)?, 0, 0, 0, 0]);
         list.push(op::LIST_FIBER_YLPM_PULSE_WIDTH, [pulse, 0, 0, 0, 0]);
         list.push(op::LIST_MARK_CURRENT, [q.mark_current, 0, 0, 0, 0]);
@@ -183,12 +234,15 @@ pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
 
         let mut last = (CENTER, CENTER);
         let mut wrote_path = false;
+        let mut marks = 0usize;
         let mut jump_delay = None;
         for path in &section.paths {
-            if path.0.len() < 2 {
+            // A path needs a start and at least one more point; a shorter one is refused, never skipped (N5).
+            let [first, rest @ ..] = path.0.as_slice() else { return Err(Error::ShortPath) };
+            if rest.is_empty() {
                 return Err(Error::ShortPath);
             }
-            let start = encode_point(*path.0.first().ok_or(Error::ShortPath)?, m)?;
+            let start = encode_point(*first, m)?;
             let delay = if wrote_path { q.timings.jump_delay_short } else { q.timings.jump_delay_long };
             if !wrote_path || start != last {
                 if jump_delay != Some(delay) {
@@ -201,35 +255,32 @@ pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
             if !wrote_path {
                 list.push(op::LIST_DELAY_TIME, [q.timings.first_jump_settle_10us, 0, 0, 0, 0]);
             }
-            for p in path.0.iter().skip(1) {
+            for p in rest {
                 let to = encode_point(*p, m)?;
+                // GP elides a motion to the point the galvo is already at (it would mark nothing).
                 if to == last {
                     continue;
                 }
                 list.push(op::LIST_MARK_TO, motion(to, last));
+                marks += 1;
                 last = to;
             }
             wrote_path = true;
         }
-        if !wrote_path {
+        // A section whose every path is below one galvo unit would send MO open with nothing to mark.
+        if !wrote_path || marks == 0 {
             return Err(Error::Empty);
         }
         let packets = list.finish()?;
-        let each = divide_duration(section.estimate, packets.len());
-        let packet_est = vec![each; packets.len()];
+        let packet_est = packet_estimates(section.estimate, &packets);
         lists.push(LmcList { layer: section.layer, pass: section.pass, packets, packet_est });
     }
 
     Ok(LmcJob {
-        prelude: vec![
-            Single([op::RESET_LIST, 0, 0, 0, 0, 0]),
-            Single([op::WRITE_PORT, bit(m.ports.laser_bit)?, 0, 0, 0, 0]),
-            Single([op::FIBER_SET_MO, 1, 0, 0, 0, 0]),
-            Single([op::GET_VERSION, 0, 0, 0, 0, 0]),
-        ],
+        prelude: job_prelude(laser),
         lists,
         repeats: emit.repeats(),
-        postlude: vec![Single([op::FIBER_SET_MO, 0, 0, 0, 0, 0]), Single([op::WRITE_PORT, 0, 0, 0, 0, 0]), Single([op::GET_MARK_TIME, 3, 0, 0, 0, 0])],
+        postlude: job_postlude(),
         fingerprint: *emit.fingerprint(),
         machine: emit.machine().clone(),
     })
@@ -242,6 +293,10 @@ pub fn encode_frame(frame: &FramePlan, m: &GalvoMachine) -> Result<LmcFrameJob, 
     let paths: Vec<Vec<[f64; 2]>> = frame.paths().iter().map(|p| p.0.clone()).collect();
     if paths.is_empty() {
         return Err(Error::Empty);
+    }
+    // Every point is checked (and a bad one named) before any length or pass count is derived from them.
+    for p in paths.iter().flatten() {
+        encode_light_point(*p, m)?;
     }
     let points = paths.iter().try_fold(0usize, |n, p| n.checked_add(p.len()).ok_or(Error::TooManyCommands))?;
     // OM Frame Once includes dark travel between paths and the return to the start.
@@ -282,9 +337,9 @@ fn lighting_packets(paths: &[Vec<[f64; 2]>], passes: u32, m: &GalvoMachine) -> R
         return Err(Error::UnsafeLighting);
     }
     let red = bit(m.ports.red_bit)?;
-    let long = openlaser_types::galvo::delay_word(m.first_jump.delay_us)?;
-    let short = openlaser_types::galvo::delay_word(m.timings.jump_delay_short_us)?;
-    let mut list = LightingList { words: Vec::new(), red };
+    let long = delay_word(m.first_jump.delay_us)?;
+    let short = delay_word(m.timings.jump_delay_short_us)?;
+    let mut list = LightingList::new(red)?;
     list.push(LightCommand::Ready)?;
     list.push(LightCommand::Port(red))?;
     list.push(LightCommand::Port(0))?;
@@ -326,24 +381,36 @@ fn lighting_packets(paths: &[Vec<[f64; 2]>], passes: u32, m: &GalvoMachine) -> R
     list.finish()
 }
 
+/// SPEC §5.2 rule 4 / B7: a motion speed of 0 units is refused (the board would never finish the move).
 fn nonzero_speed(v: u16) -> Result<u16, Error> {
     if v == 0 { Err(Error::ZeroSpeed) } else { Ok(v) }
 }
 
+/// SPEC §5.2 rules 2 and 3 (B10): a point is sent only if it lies inside the machine's rated work area (closed, ±100 mm
+/// for Luiz's lens) AND strictly inside the encodable square |v| < F/2. Refused, never clamped. F is used only for the
+/// unit conversion.
 fn encode_point(p: [f64; 2], m: &GalvoMachine) -> Result<(u16, u16), Error> {
-    let fields = m.field_f();
-    for axis in 0..2 {
-        if !p[axis].is_finite() || p[axis] < m.work_area.min[axis] || p[axis] > m.work_area.max[axis]
-            || p[axis].abs() >= fields[axis] / 2.0 {
-            return Err(Error::NotEncodable { x: p[0], y: p[1] });
-        }
-    }
-    let x = mm_to_galvo(p[0], fields[0]).map_err(|_| Error::NotEncodable { x: p[0], y: p[1] })?;
-    let y = mm_to_galvo(p[1], fields[1]).map_err(|_| Error::NotEncodable { x: p[0], y: p[1] })?;
-    Ok((x, y))
+    let [x, y] = p;
+    let [fx, fy] = m.field_f();
+    let [x_min, y_min] = m.work_area.min;
+    let [x_max, y_max] = m.work_area.max;
+    let refused = || Error::NotEncodable { x, y };
+    let gx = encode_axis(x, x_min, x_max, fx).ok_or_else(refused)?;
+    let gy = encode_axis(y, y_min, y_max, fy).ok_or_else(refused)?;
+    Ok((gx, gy))
 }
 
+/// Written so that a NaN in the value, the bounds or F refuses (every comparison with NaN is false).
+fn encode_axis(v: f64, min: f64, max: f64, field: f64) -> Option<u16> {
+    let in_work_area = v >= min && v <= max;
+    let in_field = v.abs() < field / 2.0;
+    if in_work_area && in_field { mm_to_galvo(v, field).ok() } else { None }
+}
+
+/// A red-light point: the frame point itself must lie in the work area, and so must the point the galvo is sent to
+/// after the red-dot correction (identity until H26).
 fn encode_light_point(p: [f64; 2], m: &GalvoMachine) -> Result<(u16, u16), Error> {
+    encode_point(p, m)?;
     encode_point([p[0] * m.red_dot.scale[0] + m.red_dot.offset_mm[0], p[1] * m.red_dot.scale[1] + m.red_dot.offset_mm[1]], m)
 }
 
@@ -358,8 +425,10 @@ fn bit(index: u8) -> Result<u16, Error> {
     1u16.checked_shl(u32::from(index)).ok_or(Error::InvalidPort(index))
 }
 
-fn divide_duration(d: Duration, count: usize) -> Duration {
-    u32::try_from(count).ok().filter(|n| *n > 0).map_or(Duration::ZERO, |n| d / n)
+/// Each packet: max(its share of the section estimate, its nominal time decoded from its bytes).
+fn packet_estimates(section: Duration, packets: &[Packet]) -> Vec<Duration> {
+    let share = u32::try_from(packets.len()).ok().filter(|n| *n > 0).map_or(Duration::ZERO, |n| section / n);
+    packet_times(packets).into_iter().map(|t| t.max(share)).collect()
 }
 
 fn ceil_u32(v: f64) -> Result<u32, Error> {
@@ -368,4 +437,24 @@ fn ceil_u32(v: f64) -> Result<u32, Error> {
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     Ok(v.ceil() as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lighting_list_refuses_any_port_but_zero_and_red() {
+        let mut list = LightingList::new(0x0100).unwrap();
+        assert!(list.push(LightCommand::Port(0x0100)).is_ok());
+        assert!(list.push(LightCommand::Port(0)).is_ok());
+        for v in [0x0001, 0x0101, 0x0200, 0xFFFF] {
+            assert!(matches!(list.push(LightCommand::Port(v)), Err(Error::UnsafeLighting)), "port {v:#06x}");
+        }
+        assert!(matches!(list.push(LightCommand::Speed(0)), Err(Error::ZeroSpeed)));
+        assert!(matches!(LightingList::new(0), Err(Error::UnsafeLighting)));
+        assert!(matches!(LightingList::new(0x0101), Err(Error::UnsafeLighting)));
+        let words = list.words.clone();
+        assert!(words.iter().all(|w| w[0] == op::LIST_WRITE_PORT && (w[1] == 0 || w[1] == 0x0100)));
+    }
 }

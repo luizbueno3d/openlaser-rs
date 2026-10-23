@@ -58,6 +58,3 @@ pub enum Error {
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
 }
-
-#[cfg(test)]
-mod t0_acceptance;

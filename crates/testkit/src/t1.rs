@@ -105,18 +105,94 @@ fn required_u16(obj: &serde_json::Map<String, Value>, key: &str, path: &std::pat
     u16::try_from(value).map_err(|_| format!("{}: {key} does not fit u16", path.display()))
 }
 
-/// Load the scenario's inline or referenced millimetre paths, without running the oracle.
+/// Load the scenario's inline or referenced millimetre paths, without running the oracle. A referenced file must match
+/// the scenario's `polylines_compact_sha256`: the sha256 of the polylines array's compact JSON (no whitespace), which
+/// is the file's own text of that array with its whitespace removed (`generator/common.py` `_compact`).
 pub fn polylines(scenario: &Scenario) -> Result<Vec<Vec<[f64; 2]>>, String> {
     let value = if let Some(file) = scenario.inputs.get("polylines_file").and_then(Value::as_str) {
         let relative = std::path::Path::new(file);
         if relative.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
             return Err("invalid scenario input path".into());
         }
-        let bytes = std::fs::read(golden_dir().join(relative)).map_err(|e| e.to_string())?;
-        serde_json::from_slice::<Value>(&bytes).map_err(|e| e.to_string())?
+        let expected = scenario
+            .inputs
+            .get("polylines_compact_sha256")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{}: polylines_file without polylines_compact_sha256", scenario.scenario))?;
+        let path = golden_dir().join(relative);
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let actual = sha256_hex(compact_array(&text, "polylines")?.as_bytes());
+        if actual != expected {
+            return Err(format!("{}: polylines_compact_sha256 is {actual}, the scenario says {expected}", path.display()));
+        }
+        serde_json::from_str::<Value>(&text).map_err(|e| e.to_string())?
     } else {
         scenario.inputs.get("polylines").cloned().ok_or("missing polylines")?
     };
     let value = value.get("polylines").unwrap_or(&value);
     serde_json::from_value(value.clone()).map_err(|e| e.to_string())
+}
+
+/// The text of the JSON array stored under the one `"key":` of `text`, with every ASCII whitespace removed. Only for
+/// arrays of numbers (a string inside is refused, so no whitespace that matters is ever dropped).
+fn compact_array(text: &str, key: &str) -> Result<String, String> {
+    let needle = format!("\"{key}\":");
+    let mut found = text.match_indices(&needle).map(|(at, _)| at);
+    let at = found.next().ok_or_else(|| format!("no {needle} in the file"))?;
+    if found.next().is_some() {
+        return Err(format!("{needle} appears more than once"));
+    }
+    let rest = text.get(at + needle.len()..).ok_or("truncated file")?;
+    let mut depth = 0usize;
+    let mut out = String::new();
+    for c in rest.chars().filter(|c| !c.is_ascii_whitespace()) {
+        match c {
+            '[' => depth += 1,
+            ']' => depth = depth.checked_sub(1).ok_or("unbalanced brackets")?,
+            '"' => return Err(format!("{needle} holds a string")),
+            _ if depth == 0 => return Err(format!("{needle} is not an array")),
+            _ => {}
+        }
+        out.push(c);
+        if depth == 0 {
+            return Ok(out);
+        }
+    }
+    Err(format!("{needle} is not terminated"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_array_strips_whitespace_and_refuses_odd_shapes() {
+        assert_eq!(
+            compact_array("{\"a\": 1, \"polylines\": [\n [[1.0, -2.5], [3, 4e-05]],\n [[0.0, 0.0]]\n]}", "polylines").unwrap(),
+            "[[[1.0,-2.5],[3,4e-05]],[[0.0,0.0]]]"
+        );
+        assert!(compact_array("{\"polylines\": 3}", "polylines").is_err());
+        assert!(compact_array("{\"polylines\": [\"x\"]}", "polylines").is_err());
+        assert!(compact_array("{\"polylines\": [[1]", "polylines").is_err());
+        assert!(compact_array("{\"polylines\": [], \"polylines\": []}", "polylines").is_err());
+        assert!(compact_array("{}", "polylines").is_err());
+    }
+
+    #[test]
+    fn referenced_polylines_must_match_their_compact_sha256() {
+        let s = load("v1", "long_job").unwrap();
+        assert_eq!(polylines(&s).unwrap().len(), 1100);
+        let mut wrong = s.clone();
+        if let Some(obj) = wrong.inputs.as_object_mut() {
+            obj.insert("polylines_compact_sha256".into(), Value::String("0".repeat(64)));
+        }
+        assert!(polylines(&wrong).unwrap_err().contains("polylines_compact_sha256"));
+        let mut missing = s.clone();
+        if let Some(obj) = missing.inputs.as_object_mut() {
+            obj.remove("polylines_compact_sha256");
+        }
+        assert!(polylines(&missing).is_err());
+        // Inline polylines carry no hash.
+        assert_eq!(polylines(&load("v1", "mark_box10").unwrap()).unwrap(), vec![vec![[-5.0, -5.0], [5.0, -5.0], [5.0, 5.0], [-5.0, 5.0], [-5.0, -5.0]]]);
+    }
 }
