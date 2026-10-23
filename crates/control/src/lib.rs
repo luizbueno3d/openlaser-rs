@@ -1,11 +1,12 @@
 //! The control protocol (SPEC §3.17, §4.5; owned by WP7). std only; loopback only.
 //!
-//! WP0 stubs: the data types, budgets and wire envelope are complete; token, discovery, workspace and server
-//! functions return `Error::NotImplemented` (or fail closed: `Token::matches` is always false).
+//! Token, discovery file, bounded wire, method table, `AuthorizedWorkspace` and the loopback `ControlServer` with
+//! the `machine.stop` fast path. Every gate fails closed.
 #![forbid(unsafe_code)]
 
 pub mod budgets;
 pub mod discovery;
+mod fsutil;
 pub mod methods;
 pub mod server;
 pub mod token;
@@ -26,6 +27,12 @@ pub enum Error {
     BadToken(String),
     #[error("path refused: {0}")]
     PathRefused(String),
+    /// A secret file other users can read, or a file that is not what it claims to be.
+    #[error("insecure: {0}")]
+    Insecure(String),
+    /// The discovery file names a process that is gone or is not the OpenLaser that wrote it.
+    #[error("stale discovery: {0}")]
+    Stale(String),
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
 }
