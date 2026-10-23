@@ -151,12 +151,29 @@ fn read_file(path: &Path) -> Result<Vec<u8>, HwError> {
     std::fs::read(path).map_err(|e| HwError::Failed(format!("cannot read {}: {e}", path.display())))
 }
 
+/// A profile file that did not load leaves its machine on the built-in settings: the diff would compare the
+/// built-in (not the file) with the new values, and SAVE would replace the file with them. Every write refuses until
+/// each file loads again (`profile show` still lists them).
+pub fn refuse_writes_over_skipped(skipped: &[String]) -> Result<(), HwError> {
+    if skipped.is_empty() {
+        return Ok(());
+    }
+    Err(HwError::Failed(format!(
+        "machine profile files were skipped: {}. Fix or remove them before changing a profile (SAVE would replace a skipped file \
+         with the built-in settings plus this change); nothing was written",
+        crate::plain::field(&skipped.join("; "), crate::plain::MESSAGE_MAX_CHARS)
+    )))
+}
+
 pub fn run(o: &ProfileOpts, term: &mut dyn Terminal, env: &mut Env) -> Result<(), HwError> {
     require_tty(term, "profile")?;
     let dir = env.profiles_dir.clone().ok_or_else(|| HwError::Failed("no per-user data folder for machine profiles on this system".to_owned()))?;
     let (machines, skipped) = openlaser_format::machines::load_all(Some(&dir));
-    for s in skipped {
-        term.write(&format!("note: {s}\n"));
+    for s in &skipped {
+        term.write(&format!("note: {}\n", crate::plain::field(s, crate::plain::MESSAGE_MAX_CHARS)));
+    }
+    if !matches!(o.action, ProfileAction::Show) {
+        refuse_writes_over_skipped(&skipped)?;
     }
     let id = o.machine.clone().unwrap_or_else(|| MachineId(DEFAULT_USB_MACHINE.to_owned()));
     let old = pick(&machines, &id)?;
@@ -217,6 +234,15 @@ mod tests {
     use openlaser_machine::jpt_m7_200;
 
     use super::*;
+
+    #[test]
+    fn writes_refuse_while_a_profile_file_is_skipped() {
+        assert!(refuse_writes_over_skipped(&[]).is_ok());
+        let err = refuse_writes_over_skipped(&["machines/jpt-m7-200.json: cal.scale must be finite\u{1b}[8m".to_owned()]).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("machines/jpt-m7-200.json: cal.scale must be finite[8m") && text.contains("nothing was written"), "{text}");
+        assert!(!text.chars().any(crate::plain::hidden), "{text:?}");
+    }
 
     fn galvo(p: &MachineProfile) -> &GalvoMachine {
         match &p.kind {
