@@ -189,7 +189,11 @@ impl Env {
             clock,
             poll: Duration::from_millis(20),
             signals: true,
-            exit: Arc::new(|code| std::process::exit(i32::from(code))),
+            exit: Arc::new(|code| {
+                // A signal can arrive while the key thread holds the terminal in raw mode.
+                let _ = crossterm::terminal::disable_raw_mode();
+                std::process::exit(i32::from(code))
+            }),
             rigs: Box::new(rigs),
         }
     }

@@ -41,6 +41,8 @@ pub enum RigEvent {
     Fault(String),
     /// The engine voided the pending ARM (a stop, an edit).
     ArmVoided(String),
+    /// Something the operator should read that does not change the machine (a trace file that failed).
+    Warning(String),
 }
 
 /// What the ARM step shows and mints from: the engine's `PendingArm` (S22: its job is the one that will be sent).
@@ -175,10 +177,18 @@ pub struct EngineRig {
 
 struct TraceState {
     writer: TraceWriter,
-    /// Recorder events already written.
+    /// The FakeLmc recorder being copied (a new connection opens a new board) and its events already written.
+    recorder: Option<Arc<openlaser_lmc_sim::Recorder>>,
     seen: usize,
     opened: bool,
+    last_pump: Option<MonoTime>,
+    /// The first write failure, reported once.
+    failed: Option<String>,
+    reported: bool,
 }
+
+/// How often the simulator's recording is copied into the trace (a snapshot clones the whole recording).
+const TRACE_PUMP_EVERY: Duration = Duration::from_millis(250);
 
 /// `--extent`: the in-memory profile frames up to ±extent mm (never saved; the frame command never marks).
 fn widen_for_extent(p: &mut MachineProfile, extent: f64) -> Result<(), HwError> {
@@ -223,7 +233,15 @@ impl EngineRig {
         };
         let trace = match &spec.device.trace {
             None => None,
-            Some(path) if sim.is_some() => Some(TraceState { writer: TraceWriter::create(path).map_err(HwError::Failed)?, seen: 0, opened: false }),
+            Some(path) if sim.is_some() => Some(TraceState {
+                writer: TraceWriter::create(path).map_err(HwError::Failed)?,
+                recorder: None,
+                seen: 0,
+                opened: false,
+                last_pump: None,
+                failed: None,
+                reported: false,
+            }),
             Some(_) => {
                 return Err(HwError::Failed(
                     "--trace on the real USB device needs openlaser-driver to re-export openlaser_lmc::{Single, Packet} so the transport can be \
@@ -249,30 +267,57 @@ impl EngineRig {
         self.session.execute_as(Origin::Human, id, params).map_err(engine)
     }
 
-    /// Copies new FakeLmc wire events into the trace file.
+    /// Copies new FakeLmc wire events into the trace file (every 250 ms, and at the end).
     fn pump_trace(&mut self, closing: bool) {
         let (Some(t), Some(sim)) = (self.trace.as_mut(), self.sim.as_ref()) else { return };
         let now = self.clock.now();
-        if let Some(rec) = sim.last_recorder() {
-            let snap = rec.snapshot();
-            if let Some(first) = snap.wire.first()
-                && !t.opened
+        if !closing && t.last_pump.is_some_and(|p| now.saturating_since(p) < TRACE_PUMP_EVERY) {
+            return;
+        }
+        t.last_pump = Some(now);
+        let write = |t: &mut TraceState, ev: &WireEvent, at: MonoTime| {
+            if t.failed.is_none()
+                && let Err(e) = t.writer.write(ev, at)
             {
-                let (at, _) = crate::trace::from_sim(first);
-                let _ = t.writer.write(&WireEvent::Open, at);
-                t.opened = true;
+                t.failed = Some(e);
             }
+        };
+        if let Some(rec) = sim.last_recorder() {
+            if !t.recorder.as_ref().is_some_and(|r| Arc::ptr_eq(r, &rec)) {
+                // A new connection: close the previous board's stream, start the new one.
+                if t.opened {
+                    write(t, &WireEvent::Close, now);
+                    t.opened = false;
+                }
+                t.recorder = Some(Arc::clone(&rec));
+                t.seen = 0;
+            }
+            let snap = rec.snapshot();
             for w in snap.wire.iter().skip(t.seen) {
                 let (at, ev) = crate::trace::from_sim(w);
-                let _ = t.writer.write(&ev, at);
+                if !t.opened {
+                    write(t, &WireEvent::Open, at);
+                    t.opened = true;
+                }
+                write(t, &ev, at);
             }
             t.seen = snap.wire.len();
-            if closing && t.opened {
-                let at = snap.wire.last().map(|w| crate::trace::from_sim(w).0).unwrap_or(now);
-                let _ = t.writer.write(&WireEvent::Close, at);
-                t.opened = false;
-            }
         }
+        if closing && t.opened {
+            write(t, &WireEvent::Close, now);
+            t.opened = false;
+        }
+    }
+
+    /// The first trace failure, once (the flows print it; the machine is not stopped for a record).
+    fn trace_failure(&mut self) -> Option<String> {
+        let t = self.trace.as_mut()?;
+        if t.reported {
+            return None;
+        }
+        let f = t.failed.clone()?;
+        t.reported = true;
+        Some(f)
     }
 }
 
@@ -333,6 +378,9 @@ impl Rig for EngineRig {
         let events = self.session.poll();
         self.pump_trace(false);
         let mut out = Vec::new();
+        if let Some(f) = self.trace_failure() {
+            out.push(RigEvent::Warning(format!("the trace file stopped recording: {f}")));
+        }
         for ev in events {
             match ev {
                 Event::Driver { machine, event } if machine == self.machine => match event {

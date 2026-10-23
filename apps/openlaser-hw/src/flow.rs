@@ -133,7 +133,13 @@ fn frame_phase(
                     print_report(term, &rep);
                     return Ok(Phase::Stopped);
                 }
-                RigEvent::Fault(e) => return Err(HwError::Failed(format!("machine fault: {e}"))),
+                RigEvent::Fault(e) => {
+                    // The driver already stops on a fault; stopping again is idempotent and costs nothing.
+                    let acks = target.stop_and_wait(STOP_WAIT);
+                    print_stop(term, &acks);
+                    return Err(HwError::Failed(format!("machine fault: {e}")));
+                }
+                RigEvent::Warning(w) => term.write(&format!("warning: {w}\n")),
                 RigEvent::Progress { .. } | RigEvent::Finished(_) | RigEvent::ArmVoided(_) => {}
             }
         }
@@ -179,8 +185,13 @@ fn mark_phase(rig: &mut dyn Rig, term: &mut dyn Terminal, env: &Env, target: &Ar
                     print_report(term, &rep);
                     return Ok(Phase::Stopped);
                 }
-                RigEvent::Fault(e) => return Err(HwError::Failed(format!("machine fault: {e}; the job was stopped"))),
+                RigEvent::Fault(e) => {
+                    let acks = target.stop_and_wait(STOP_WAIT);
+                    print_stop(term, &acks);
+                    return Err(HwError::Failed(format!("machine fault: {e}; the job was stopped")));
+                }
                 RigEvent::ArmVoided(reason) => term.write(&format!("ARM voided: {reason}\n")),
+                RigEvent::Warning(w) => term.write(&format!("warning: {w}\n")),
                 RigEvent::FrameCompleted(_) => {}
             }
         }
