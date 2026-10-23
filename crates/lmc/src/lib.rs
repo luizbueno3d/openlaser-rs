@@ -18,7 +18,7 @@ mod transport;
 pub mod py_compat;
 
 pub use decode::{Decoded, Listing, ListingLine, decode_packet, disassemble, disassemble_frame, emission_summary, emitted_segments};
-pub use encode::{LmcFrameJob, LmcJob, LmcList, encode_frame, encode_job};
+pub use encode::{LightingList, LmcFrameJob, LmcJob, LmcList, MarkingList, encode_frame, encode_job};
 pub use packet::{PACKET_LEN, Packet, SLOTS, Single, StatusWord, init_sequence, status_from_reply};
 pub use transport::{LmcTransport, XferError};
 
@@ -40,6 +40,14 @@ pub enum Error {
     NotGalvo,
     #[error("empty job")]
     Empty,
+    #[error("pulse width was not validated")]
+    InvalidPulse,
+    #[error("port bit {0} does not fit the 16-bit LMC port word")]
+    InvalidPort(u8),
+    #[error("too many list commands")]
+    TooManyCommands,
+    #[error("packet: {0}")]
+    Packet(&'static str),
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
 }
