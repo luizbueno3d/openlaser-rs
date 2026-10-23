@@ -227,7 +227,19 @@ impl EngineRig {
     pub fn open(spec: &RigSpec, profiles_dir: Option<&Path>, sim_cfg: &SimConfig, clock: Arc<dyn Clock>) -> Result<Self, HwError> {
         // The hardware gate comes first: without `hw` nothing past this line runs for a real device.
         let usb = if spec.device.sim { None } else { Some(usb_provider()?) };
-        let (mut machines, skipped) = openlaser_format::machines::load_all(profiles_dir);
+        let loaded = openlaser_format::machines::load_all(profiles_dir);
+        Self::open_loaded(spec, usb, loaded, profiles_dir, sim_cfg, clock)
+    }
+
+    /// [`EngineRig::open`] after the hardware gate, with the profiles `format::machines::load_all` returned.
+    fn open_loaded(
+        spec: &RigSpec,
+        usb: Option<Arc<dyn DeviceProvider>>,
+        (mut machines, skipped): (Vec<MachineProfile>, Vec<String>),
+        profiles_dir: Option<&Path>,
+        sim_cfg: &SimConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, HwError> {
         refuse_skipped_profiles(&skipped)?;
         let default = if spec.device.sim { DEFAULT_SIM_MACHINE } else { DEFAULT_USB_MACHINE };
         let machine = spec.device.machine.clone().unwrap_or_else(|| MachineId(default.to_owned()));
@@ -476,7 +488,7 @@ fn stage_om_workspace(workspace: &Path, layers: &Path) -> Result<Staged, HwError
 
 #[cfg(test)]
 mod tests {
-    use openlaser_machine::jpt_m7_200;
+    use openlaser_machine::{jpt_m7_200, jpt_m7_200_sim};
 
     use super::*;
 
@@ -495,6 +507,19 @@ mod tests {
         assert!(text.contains("machines/jpt-m7-200.json: cal.scale must be finite"), "{text}");
         assert!(text.contains("nothing was opened"), "{text}");
         assert_eq!(err.exit_code(), crate::EXIT_FAIL);
+    }
+
+    #[test]
+    fn open_refuses_while_a_profile_file_is_skipped() {
+        let spec = RigSpec { purpose: Purpose::Frame, device: DeviceOpts { machine: None, sim: true, trace: None }, extent: None };
+        let clock: Arc<dyn Clock> = Arc::new(openlaser_types::VirtualClock::new());
+        let sim = crate::default_sim_config();
+        let loaded = (vec![jpt_m7_200_sim()], vec!["machines/jpt-m7-200-sim.json: not valid JSON".to_owned()]);
+        let err = EngineRig::open_loaded(&spec, None, loaded, None, &sim, Arc::clone(&clock)).err().unwrap();
+        assert!(err.to_string().contains("machines/jpt-m7-200-sim.json: not valid JSON"), "{err}");
+        // The same profiles with nothing skipped open (no device is touched by opening).
+        let rig = EngineRig::open_loaded(&spec, None, (vec![jpt_m7_200_sim()], Vec::new()), None, &sim, clock).unwrap();
+        assert_eq!(rig.machine(), &MachineId(DEFAULT_SIM_MACHINE.to_owned()));
     }
 
     #[test]

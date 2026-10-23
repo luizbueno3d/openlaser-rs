@@ -286,13 +286,20 @@ fn run_inner(rig: &mut dyn Rig, o: &RunOpts, term: &mut dyn Terminal, env: &Env,
 
     // Frame in a loop until Enter after an executed pass.
     let frame_opts = FrameOpts { job: o.job.clone(), looping: true, style: None, source: None, extent: None, device: o.device.clone() };
+    // Any stop while framing ends the run (frame_phase returns Stopped), so on the way to ARM the only stop expected
+    // from here is stop_framing's own: counting from before the frame, a key or a signal that raced the acceptance of
+    // the frame (pressed just after Enter, handled while the key thread wound down) is still seen.
+    let stops_before_frame = stops.requests();
     let receipt = match frame_phase(rig, term, env, target, FrameMode::Loop, &frame_opts, true)? {
         Phase::Accepted(r) => r,
         _ => return Err(HwError::Failed("stopped while framing; nothing was marked".to_owned())),
     };
     stop_framing(rig, term, env, target)?;
     // From here on any stop request, from any thread, means nothing is marked.
-    let stops_before_arm = stops.requests();
+    let stops_before_arm = stops_before_frame.saturating_add(1);
+    if stops.requests() != stops_before_arm {
+        return Err(HwError::Failed("a stop was asked for while the frame was being accepted; nothing was armed or marked".to_owned()));
+    }
     term.write(&format!("Frame accepted after {} executed pass(es); framing stopped.\n", receipt.full_passes));
     if !o.allow_emission {
         return Err(HwError::refused(

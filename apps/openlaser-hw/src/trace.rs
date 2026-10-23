@@ -136,13 +136,15 @@ pub struct TraceWriter {
     path: PathBuf,
     origin: Option<MonoTime>,
     written: u64,
+    /// Bytes were handed to the file (even if the write then failed): it is no longer empty.
+    touched: bool,
 }
 
 /// A trace that recorded nothing (the command failed before anything reached the wire) is removed, so the same name
 /// can be used again; this writer created the file itself (`create_new`), so it never removes anyone else's.
 impl Drop for TraceWriter {
     fn drop(&mut self) {
-        if self.written == 0 {
+        if !self.touched {
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -158,13 +160,14 @@ impl TraceWriter {
                 format!("cannot create the trace file {}: {e}", path.display())
             }
         })?;
-        Ok(TraceWriter { out: BufWriter::new(f), path: path.to_path_buf(), origin: None, written: 0 })
+        Ok(TraceWriter { out: BufWriter::new(f), path: path.to_path_buf(), origin: None, written: 0, touched: false })
     }
 
     pub fn write(&mut self, ev: &WireEvent, at: MonoTime) -> Result<(), String> {
         let origin = *self.origin.get_or_insert(at);
         let at_s = at.saturating_since(origin).as_secs_f64();
         // `\n` on every OS (SPEC §2.6): goldens and fixtures are compared as bytes.
+        self.touched = true;
         self.out
             .write_all(line(ev, at_s).as_bytes())
             .and_then(|()| self.out.write_all(b"\n"))

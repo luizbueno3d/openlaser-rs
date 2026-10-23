@@ -38,6 +38,9 @@ enum Key {
     Enter,
     Stop(StopKey),
     Close,
+    /// Pressed just as the key session ends: delivered by `Drop`, after the main loop stopped polling (a stop
+    /// racing the acceptance of the frame).
+    StopWhenDropped(StopKey),
 }
 
 /// How the operator answers the challenge: the typed line, from the challenge printed.
@@ -124,6 +127,29 @@ impl KeySession for ScriptedKeys {
                 KeyPoll::Nothing
             }
             Some(Key::Close) => KeyPoll::Closed,
+            Some(k @ Key::StopWhenDropped(_)) => {
+                keys.push_front(k);
+                KeyPoll::Nothing
+            }
+        }
+    }
+}
+
+impl Drop for ScriptedKeys {
+    fn drop(&mut self) {
+        let pending = {
+            let mut keys = self.keys.lock().unwrap();
+            match keys.front() {
+                Some(Key::StopWhenDropped(k)) => {
+                    let k = *k;
+                    keys.pop_front();
+                    Some(k)
+                }
+                _ => None,
+            }
+        };
+        if let Some(k) = pending {
+            (self.stop)(k);
         }
     }
 }
@@ -535,6 +561,20 @@ fn frame_stop_the_engine_does_not_report_refuses_to_arm() {
         assert!(out.contains(says), "{out}");
         assert!(!has(&calls(&s), "request_arm"), "{:?}", calls(&s));
     }
+}
+
+#[test]
+fn stop_racing_the_frame_acceptance_marks_nothing() {
+    // Enter accepts the frame and Esc follows at once; the key thread handles the Esc while it winds down, after the
+    // main loop took the Enter. The run ends before the ARM step instead of counting the Esc as the frame stop.
+    let (mut env, s) = fake_env(one_pass_on_poll_3(1.0, None));
+    let mut term = Scripted::new(true, &[Key::Wait(4), Key::Enter, Key::StopWhenDropped(StopKey::Esc)]);
+    term.typing = Some(|c| format!("ARM {c:06}"));
+    assert_eq!(run_with(&argv("run --builtin dot --sim --allow-emission"), &mut term, &mut env), EXIT_FAIL);
+    let out = term.output();
+    assert!(out.contains("a stop was asked for while the frame was being accepted"), "{out}");
+    assert!(!has(&calls(&s), "request_arm"), "{:?}", calls(&s));
+    assert!(term.challenges.is_empty());
 }
 
 fn armed_token() -> ArmToken {
