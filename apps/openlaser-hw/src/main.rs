@@ -1,4 +1,4 @@
-//! `openlaser-hw`: the human-only hardware CLI. Thin main over the library (WP9).
+//! `openlaser-hw`: the human-only hardware CLI. Thin main over the library (SPEC §3.21).
 #![forbid(unsafe_code)]
 
 use std::process::ExitCode;
@@ -13,9 +13,9 @@ fn main() -> ExitCode {
             Ok(s) => args.push(s),
             Err(_) => {
                 eprintln!("openlaser-hw: arguments must be valid Unicode");
-                return ExitCode::from(2);
+                return ExitCode::from(openlaser_hw::EXIT_USAGE);
             }
         }
     }
-    ExitCode::from(openlaser_hw::run(&args, &mut TtyTerminal))
+    ExitCode::from(openlaser_hw::run(&args, &mut TtyTerminal::default()))
 }
