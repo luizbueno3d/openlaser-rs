@@ -31,7 +31,10 @@ fn guards(env: &Env, target: &Arc<dyn StopTarget>) -> Result<Guards, HwError> {
     stop::install_panic_hook(Arc::clone(target));
     let signals = stop::install_signals().map_err(HwError::Failed)?;
     let flags = signals.flags.iter().map(|f| stop::SignalFlag { flag: Arc::clone(&f.flag), name: f.name, exit_code: f.exit_code }).collect();
-    let watcher = stop::watch(flags, Arc::clone(target), Box::new(|line| eprintln!("{line}")), Arc::clone(&env.exit)).map_err(HwError::Failed)?;
+    // `\r\n`: a signal can land while the key thread holds the terminal in raw mode, where `\n` alone does not
+    // return the cursor.
+    let sink: stop::ReportSink = Box::new(|line| eprint!("{}\r\n", line.replace('\n', "\r\n")));
+    let watcher = stop::watch(flags, Arc::clone(target), sink, Arc::clone(&env.exit)).map_err(HwError::Failed)?;
     Ok(Guards { _signals: Some(signals), _watcher: Some(watcher) })
 }
 
