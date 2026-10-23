@@ -58,7 +58,8 @@ pub struct Object {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Scenario {
-    pub name: String,
+    #[serde(default)]
+    pub about: String,
     #[serde(default)]
     pub layers: Vec<Layer>,
     #[serde(default)]

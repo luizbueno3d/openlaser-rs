@@ -131,7 +131,15 @@ pub fn import(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Imported
         Format::Png | Format::Jpeg | Format::Bmp | Format::Tiff | Format::Webp | Format::Gif => import_raster(name, bytes, opts),
         Format::OmWorkspace => {
             let workspace = om::parse_workspace(bytes)?;
-            om::to_imported(&workspace, &om::builtin_layers())
+            let mut imported = om::to_imported(&workspace, &om::builtin_layers())?;
+            imported.notices.push(Notice {
+                n: 1,
+                code: NoticeCode::ImportEntitySkipped,
+                message: "layer_settings.json was not supplied; OM built-in layers were used".to_owned(),
+                object: None,
+                layer: None,
+            });
+            Ok(imported)
         }
     }
 }
@@ -152,10 +160,7 @@ fn validate_options(opts: &ImportOptions) -> Result<()> {
 }
 
 fn looks_like_workspace(bytes: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(bytes)
-        .ok()
-        .and_then(|value| value.get("objects").cloned())
-        .is_some_and(|objects| objects.is_array())
+    serde_json::from_slice::<serde_json::Value>(bytes).ok().and_then(|value| value.get("objects").cloned()).is_some_and(|objects| objects.is_array())
 }
 
 fn import_dxf(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Imported> {
@@ -181,8 +186,7 @@ fn import_svg(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Imported
         SvgUnits::Px72 => 72.0,
         SvgUnits::RequirePhysical | SvgUnits::Px96 => 96.0,
     };
-    let mut parser_opts = usvg::Options::default();
-    parser_opts.dpi = dpi;
+    let parser_opts = usvg::Options { dpi, ..usvg::Options::default() };
     let tree = usvg::Tree::from_data(bytes, &parser_opts).map_err(|e| Error::Malformed { format: "SVG", message: e.to_string() })?;
     let mm_per_px = 25.4 / f64::from(dpi);
     let mut imported = Imported { shapes: Vec::new(), layers: Vec::new(), notices: Vec::new(), bounds: None };
@@ -227,28 +231,13 @@ fn collect_svg_nodes(group: &usvg::Group, opts: &ImportOptions, mm_per_px: f64, 
 fn svg_bez_path(path: &usvg::Path, scale: f64) -> Result<BezPath> {
     use usvg::tiny_skia_path::PathSegment;
     let t = path.abs_transform();
-    let affine = Affine::new([
-        f64::from(t.sx) * scale,
-        f64::from(t.ky) * scale,
-        f64::from(t.kx) * scale,
-        f64::from(t.sy) * scale,
-        f64::from(t.tx) * scale,
-        -f64::from(t.ty) * scale,
-    ]);
     let mut bez = BezPath::new();
     for segment in path.data().segments() {
         match segment {
-            PathSegment::MoveTo(p) => bez.move_to(affine * openlaser_doc::kurbo::Point::new(f64::from(p.x), -f64::from(p.y))),
-            PathSegment::LineTo(p) => bez.line_to(affine * openlaser_doc::kurbo::Point::new(f64::from(p.x), -f64::from(p.y))),
-            PathSegment::QuadTo(p1, p2) => bez.quad_to(
-                affine * openlaser_doc::kurbo::Point::new(f64::from(p1.x), -f64::from(p1.y)),
-                affine * openlaser_doc::kurbo::Point::new(f64::from(p2.x), -f64::from(p2.y)),
-            ),
-            PathSegment::CubicTo(p1, p2, p3) => bez.curve_to(
-                affine * openlaser_doc::kurbo::Point::new(f64::from(p1.x), -f64::from(p1.y)),
-                affine * openlaser_doc::kurbo::Point::new(f64::from(p2.x), -f64::from(p2.y)),
-                affine * openlaser_doc::kurbo::Point::new(f64::from(p3.x), -f64::from(p3.y)),
-            ),
+            PathSegment::MoveTo(p) => bez.move_to(svg_point(p, t, scale)),
+            PathSegment::LineTo(p) => bez.line_to(svg_point(p, t, scale)),
+            PathSegment::QuadTo(p1, p2) => bez.quad_to(svg_point(p1, t, scale), svg_point(p2, t, scale)),
+            PathSegment::CubicTo(p1, p2, p3) => bez.curve_to(svg_point(p1, t, scale), svg_point(p2, t, scale), svg_point(p3, t, scale)),
             PathSegment::Close => bez.close_path(),
         }
     }
@@ -256,6 +245,12 @@ fn svg_bez_path(path: &usvg::Path, scale: f64) -> Result<BezPath> {
         return Err(Error::TooLarge("SVG contains more than 2,000,000 path elements".to_owned()));
     }
     Ok(bez)
+}
+
+fn svg_point(p: usvg::tiny_skia_path::Point, t: usvg::Transform, scale: f64) -> openlaser_geom::Point {
+    let x = f64::from(t.sx) * f64::from(p.x) + f64::from(t.kx) * f64::from(p.y) + f64::from(t.tx);
+    let y = f64::from(t.ky) * f64::from(p.x) + f64::from(t.sy) * f64::from(p.y) + f64::from(t.ty);
+    openlaser_geom::Point::new(x * scale, -y * scale)
 }
 
 fn svg_layer(path: &usvg::Path, current: LayerKey, imported: &mut Imported, notice_n: &mut u32) -> LayerKey {
@@ -335,14 +330,20 @@ fn import_raster(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Impor
 
 fn raster_dpi(bytes: &[u8]) -> Option<f64> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        for chunk in bytes.get(8..)?.chunks_exact(12) {
-            if chunk.get(4..8) == Some(b"pHYs") && chunk.len() >= 21 {
-                let x = u32::from_be_bytes(chunk.get(8..12)?.try_into().ok()?);
-                let unit = *chunk.get(16)?;
-                if unit == 1 && x > 0 {
+        let mut offset = 8usize;
+        while let Some(header) = bytes.get(offset..offset.saturating_add(8)) {
+            let size = usize::try_from(u32::from_be_bytes(header.get(..4)?.try_into().ok()?)).ok()?;
+            let kind = header.get(4..8)?;
+            let data_start = offset.checked_add(8)?;
+            let data_end = data_start.checked_add(size)?;
+            let data = bytes.get(data_start..data_end)?;
+            if kind == b"pHYs" && data.len() == 9 {
+                let x = u32::from_be_bytes(data.get(..4)?.try_into().ok()?);
+                if data.get(8) == Some(&1) && x > 0 {
                     return Some(f64::from(x) * 0.0254);
                 }
             }
+            offset = data_end.checked_add(4)?;
         }
     }
     None
@@ -399,13 +400,31 @@ fn polyline_bounds(polylines: &[Polyline]) -> Option<Bounds> {
 }
 
 fn shape_bounds(shapes: &[Shape], tolerance: f64) -> Option<Bounds> {
-    let mut lines = Vec::new();
+    let _ = tolerance;
+    let mut bounds: Option<Bounds> = None;
     for shape in shapes {
         if let Geom::Path(path) = &shape.geom {
-            lines.extend(openlaser_geom::flatten(path, tolerance).into_iter().map(|line| line.transformed(&shape.xform)));
+            for element in path.elements() {
+                let ps: Vec<openlaser_geom::Point> = match element {
+                    openlaser_geom::PathEl::MoveTo(p) | openlaser_geom::PathEl::LineTo(p) => vec![*p],
+                    openlaser_geom::PathEl::QuadTo(p1, p2) => vec![*p1, *p2],
+                    openlaser_geom::PathEl::CurveTo(p1, p2, p3) => vec![*p1, *p2, *p3],
+                    openlaser_geom::PathEl::ClosePath => continue,
+                };
+                for p in ps {
+                    let p = shape.xform * p;
+                    let point = [p.x, p.y];
+                    bounds = Some(match bounds {
+                        None => Bounds { min: point, max: point },
+                        Some(old) => {
+                            Bounds { min: [old.min[0].min(point[0]), old.min[1].min(point[1])], max: [old.max[0].max(point[0]), old.max[1].max(point[1])] }
+                        }
+                    });
+                }
+            }
         }
     }
-    polyline_bounds(&lines)
+    bounds
 }
 
 fn recenter_shapes(shapes: &mut [Shape], bounds: Option<Bounds>, center_at: Option<P2>, scale: f64) -> Result<()> {
@@ -417,4 +436,74 @@ fn recenter_shapes(shapes: &mut [Shape], bounds: Option<Bounds>, center_at: Opti
         shape.xform = transform * shape.xform;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn svg_true_scale_mm() {
+        let bytes = include_bytes!("../../../tests/fixtures/square10mm.svg");
+        let imported = import("square10mm.svg", bytes, &ImportOptions::default()).expect("valid SVG");
+        let bounds = imported.bounds.expect("path bounds");
+        assert!((bounds.max[0] - bounds.min[0] - 10.0).abs() < 1e-6, "bounds: {bounds:?}");
+        assert!((bounds.max[1] - bounds.min[1] - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn svg_unitless_refused_unless_explicit_units() {
+        let bytes = include_bytes!("../../../tests/fixtures/unitless.svg");
+        assert!(matches!(import("unitless.svg", bytes, &ImportOptions::default()), Err(Error::Unitless(_))));
+        let opts = ImportOptions { svg_units: SvgUnits::Px96, ..ImportOptions::default() };
+        assert!(import("unitless.svg", bytes, &opts).is_ok());
+    }
+
+    #[test]
+    fn om_malformed_point_is_a_b9_refusal() {
+        let bytes = br#"{"version":1,"objects":[{"name":"bad-shape","layer_id":"x","polylines":[[[0,1,2]]],"x":0,"y":0,"scale":1,"rotation":0}]}"#;
+        assert!(matches!(om::parse_workspace(bytes), Err(Error::MalformedPoint { object, .. }) if object == "bad-shape"));
+    }
+
+    #[test]
+    fn om_fixture_import_preserves_objects_and_layers() {
+        let root = openlaser_testkit::fixture("om_small");
+        let workspace = std::fs::read(root.join("workspace.json")).expect("fixture workspace");
+        let layer_data = std::fs::read(root.join("layer_settings.json")).expect("fixture settings");
+        let ws = om::parse_workspace(&workspace).expect("workspace parses");
+        let layers = om::parse_layer_settings(&layer_data).expect("settings parse");
+        let imported = om::to_imported(&ws, &layers).expect("workspace imports");
+        assert_eq!(imported.shapes.len(), 3);
+        assert_eq!(imported.layers.len(), 3);
+    }
+
+    #[test]
+    fn om_business_card_imports_403_objects_and_3057_paths() {
+        let root = openlaser_testkit::golden_dir().join("inputs");
+        let workspace = std::fs::read(root.join("workspace.json")).expect("business card workspace");
+        let layer_data = std::fs::read(root.join("layer_settings.json")).expect("business card settings");
+        let ws = om::parse_workspace(&workspace).expect("workspace parses");
+        let layers = om::parse_layer_settings(&layer_data).expect("settings parse");
+        let imported = om::to_imported(&ws, &layers).expect("business card imports");
+        assert_eq!(imported.shapes.len(), 403);
+        assert_eq!(ws.objects.iter().flat_map(|object| &object.polylines).map(Vec::len).sum::<usize>(), 3057);
+        assert_eq!(imported.layers.len(), 3);
+    }
+
+    #[test]
+    fn svg_palette_match_uses_exact_rgb_value() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm"><path d="M1 1L9 9" stroke="#000000" fill="none"/></svg>"##;
+        let imported = import("palette.svg", svg, &ImportOptions::default()).expect("SVG imports");
+        assert_eq!(imported.shapes.first().map(|shape| shape.layer), Some(LayerKey::Color(0)));
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config { cases: 256, .. proptest::test_runner::Config::default() })]
+        #[test]
+        fn prop_importers_never_panic(bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..4096)) {
+            let _ = import("random.unknown", &bytes, &ImportOptions::default());
+            let _ = dxf_om::parse_dxf_om(&bytes);
+            let _ = om::parse_workspace(&bytes);
+        }
+    }
 }

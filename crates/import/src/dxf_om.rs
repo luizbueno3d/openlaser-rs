@@ -124,7 +124,7 @@ pub(crate) fn dxf_units_to_mm(bytes: &[u8]) -> Result<f64, Error> {
                 17 => 1_000_000_000.0,
                 18 => 149_597_870_700_000.0,
                 19 => 9.460_730_472_580_8e18,
-                20 => 3.085_677_581_491_367_3e19,
+                20 => 3.085_677_581_491_367e19,
                 _ => 1.0,
             });
         }
@@ -227,7 +227,8 @@ fn flatten_bulged_vertices(vertices: &[Vertex], closed: bool) -> Polyline {
         let segment = bulge_segment_points([x1, y1], [x2, y2], bulge);
         points.extend(segment.0.into_iter().skip(1));
     }
-    if closed && points.first() != points.last()
+    if closed
+        && points.first() != points.last()
         && let Some(first) = points.first().copied()
     {
         points.push(first);
@@ -256,7 +257,9 @@ fn bulge_segment_points(start: [f64; 2], end: [f64; 2], bulge: f64) -> Polyline 
     let start_angle = (y1 - cy).atan2(x1 - cx);
     let raw_steps = (theta.abs() / (PI / 24.0)).trunc() as i64 + 2;
     let steps = raw_steps.clamp(6, 96) as usize;
-    Polyline(linspace(0.0, 1.0, steps).into_iter().map(|t| [cx + (start_angle + theta * t).cos() * radius, cy + (start_angle + theta * t).sin() * radius]).collect())
+    Polyline(
+        linspace(0.0, 1.0, steps).into_iter().map(|t| [cx + (start_angle + theta * t).cos() * radius, cy + (start_angle + theta * t).sin() * radius]).collect(),
+    )
 }
 
 fn repeated_xy(fields: &[Pair], x_code: &str, y_code: &str) -> Result<Polyline, Error> {
@@ -335,10 +338,7 @@ fn ellipse_points(fields: &[Pair]) -> Result<Polyline, Error> {
     let minor_x = -major_y * ratio;
     let minor_y = major_x * ratio;
     Ok(Polyline(
-        linspace(start, end, 96)
-            .into_iter()
-            .map(|t| [cx + major_x * t.cos() + minor_x * t.sin(), cy + major_y * t.cos() + minor_y * t.sin()])
-            .collect(),
+        linspace(start, end, 96).into_iter().map(|t| [cx + major_x * t.cos() + minor_x * t.sin(), cy + major_y * t.cos() + minor_y * t.sin()]).collect(),
     ))
 }
 
@@ -369,4 +369,35 @@ fn raw_bounds(polylines: &[Polyline]) -> Option<(f64, f64, f64, f64)> {
         }
     }
     bounds
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn t4_dxf_cases_match_golden() {
+        let cases = openlaser_testkit::t4::load().expect("T4 fixtures load");
+        assert_eq!(cases.len(), 30, "unexpected T4 fixture count");
+        let mut checked = 0usize;
+        for case in cases.iter().filter(|case| case.kind == "dxf") {
+            let bytes = openlaser_testkit::t4::source_bytes(case).expect("T4 source");
+            if case.function == "parse_dxf" {
+                let actual = parse_dxf_om(&bytes).expect("DXF parses");
+                let expected = case.output.as_ref().and_then(|v| v.get("polylines")).cloned().expect("expected polylines");
+                assert_eq!(serde_json::to_value(actual).expect("serializable polylines"), expected, "T4 case {}", case.name);
+            } else if case.function == "import_geometry" {
+                let name = case.filename.as_str();
+                let actual = import_geometry_om(name, &bytes);
+                if let Some(expected) = case.output.as_ref().and_then(|v| v.get("polylines")) {
+                    let actual = actual.expect("DXF geometry imports");
+                    assert_eq!(serde_json::to_value(actual).expect("serializable polylines"), *expected, "T4 case {}", case.name);
+                } else {
+                    assert!(actual.is_err(), "T4 case {} must refuse", case.name);
+                }
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 25, "unexpected T4 DXF case coverage");
+    }
 }
