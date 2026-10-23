@@ -238,7 +238,7 @@ fn om_fixture_import_preserves_objects_and_layers() {
 
 #[test]
 fn om_workspace_without_layer_settings_uses_builtins_with_a_notice() {
-    let bytes = std::fs::read(openlaser_testkit::fixture("om_small/workspace.json")).unwrap();
+    let bytes = std::fs::read(openlaser_testkit::fixture("om_small").join("workspace.json")).unwrap();
     let imported = import("workspace.json", &bytes, &ImportOptions::default()).unwrap();
     assert_eq!(imported.notices.len(), 1);
     assert!(imported.notices[0].message.contains("layer_settings.json"));
@@ -247,13 +247,22 @@ fn om_workspace_without_layer_settings_uses_builtins_with_a_notice() {
 
 // ---- review items 3, 4, 6: SVG hardening -------------------------------------------------------------------------
 
+/// The depth refusal: `TooLarge` naming the nesting limit (anything else means the file was refused for another
+/// reason, or not at all).
+fn depth_refusal(name: &'static str, bytes: Vec<u8>) -> Result<String, String> {
+    on_small_stack(move || match import(name, &bytes, &ImportOptions::default()) {
+        Err(Error::TooLarge(message)) if message.contains(&format!("nested more than {MAX_SVG_DEPTH} deep")) => Ok(message),
+        other => Err(format!("{other:?}")),
+    })
+}
+
 /// Review item 4: 20,000 nested `<g>` (~60 KB) aborted the process (stack overflow). Now refused before roxmltree
 /// and usvg, on a 2 MiB thread stack.
 #[test]
 fn svg_deep_nesting_refused() {
     let deep = svg_mm(&format!("{}{}", "<g>".repeat(20_000), "</g>".repeat(20_000)));
-    let result = on_small_stack(move || import("deep.svg", &deep, &ImportOptions::default()).map(|_| ()).map_err(|e| e.to_string()));
-    assert!(result.as_ref().is_err_and(|e| e.contains("nested")), "{result:?}");
+    let result = depth_refusal("deep.svg", deep);
+    assert!(result.is_ok(), "{result:?}");
     // At the limit (the root, 254 groups and the path) still imports on the same stack.
     let levels = MAX_SVG_DEPTH - 2;
     let ok = svg_mm(&format!(r##"{}<path d="M1 1L9 9" stroke="#000000"/>{}"##, "<g>".repeat(levels), "</g>".repeat(levels)));
@@ -261,14 +270,15 @@ fn svg_deep_nesting_refused() {
     assert_eq!(result, Ok(1));
 }
 
-/// Nesting hidden in an internal entity is caught on the parsed tree.
+/// Nesting hidden in an internal entity: the root plus 256 levels in the entity is one level too deep. No entity is
+/// ever expanded (an internal subset is always refused, before any parser runs); the refusal names the depth.
 #[test]
 fn svg_entity_nesting_refused() {
     let levels = MAX_SVG_DEPTH;
     let entity = format!("{}{}", "<g>".repeat(levels), "</g>".repeat(levels));
     let doc = format!(r#"<!DOCTYPE svg [<!ENTITY deep "{entity}">]><svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm">&deep;</svg>"#);
-    let result = on_small_stack(move || import("entity.svg", doc.as_bytes(), &ImportOptions::default()).map(|_| ()).map_err(|e| e.to_string()));
-    assert!(result.is_err(), "{result:?}");
+    let result = depth_refusal("entity.svg", doc.into_bytes());
+    assert!(result.as_ref().is_ok_and(|m| m.contains("DOCTYPE entity")), "{result:?}");
 }
 
 /// A `<use>` fan-out ("billion laughs" for SVG) is bounded before usvg expands it; a recursive `<use>` refuses.
@@ -291,21 +301,17 @@ fn svg_use_expansion_is_bounded() {
     assert_eq!(import("reuse.svg", &reuse, &ImportOptions::default()).unwrap().shapes.len(), 2);
 }
 
+/// Markers (usvg clones the marker's content at every vertex, and clips it) are refused, however they are set; an
+/// unused marker definition is harmless.
 #[test]
-fn svg_marker_expansion_is_bounded() {
+fn svg_markers_are_refused() {
     let marker = r##"<defs><marker id="m"><path d="M0 0L1 1" stroke="#000000"/></marker></defs>"##;
-    let ok = svg_mm(&format!(r##"{marker}<path d="M0 0L5 5L9 1" stroke="#000000" marker-mid="url(#m)"/>"##));
-    assert!(import("arrow.svg", &ok, &ImportOptions::default()).is_ok());
-    let nested = svg_mm(
-        r##"<defs><marker id="a"><path d="M0 0L1 1L2 0" stroke="#000000" marker-mid="url(#b)"/></marker><marker id="b"><path d="M0 0L1 1L2 0" stroke="#000000" marker-mid="url(#a)"/></marker></defs><path d="M0 0L5 5L9 1" stroke="#000000" marker-mid="url(#a)"/>"##,
-    );
-    assert!(import("nested.svg", &nested, &ImportOptions::default()).is_err());
-    let many: String = (0..30_000).map(|i| format!("L{i} {i}")).collect();
-    let big_mid = svg_mm(&format!(
-        r##"<defs><marker id="m"><g>{}</g></marker></defs><path d="M0 0{many}" stroke="#000000" marker-mid="url(#m)"/>"##,
-        r##"<path d="M0 0L1 1" stroke="#000000"/>"##.repeat(10)
-    ));
-    assert!(matches!(import("many.svg", &big_mid, &ImportOptions::default()), Err(Error::TooLarge(_))));
+    for set in [r##"marker-mid="url(#m)""##, r##"marker-end=" url( #m ) ""##, r##"style="marker:url(#m)""##] {
+        let doc = svg_mm(&format!(r##"{marker}<path d="M0 0L5 5L9 1" stroke="#000000" {set}/>"##));
+        assert!(matches!(import("arrow.svg", &doc, &ImportOptions::default()), Err(Error::NotImplemented(m)) if m.contains("marker")), "{set}");
+    }
+    let unused = svg_mm(&format!(r##"{marker}<path d="M0 0L5 5L9 1" stroke="#000000" marker-mid="none"/>"##));
+    assert_eq!(import("unused.svg", &unused, &ImportOptions::default()).unwrap().shapes.len(), 1);
 }
 
 /// Review item 3: `<image>` hrefs are never resolved, and the import says so. (That no file is read is proven on the
