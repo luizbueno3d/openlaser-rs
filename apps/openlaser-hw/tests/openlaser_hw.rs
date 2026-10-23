@@ -770,3 +770,18 @@ fn cli_frame_extent_reaches_past_the_work_area_on_red_light_only() {
     assert_eq!(run_with(&argv("frame --builtin corners --extent 118.34 --sim"), &mut term, &mut env), EXIT_FAIL);
     assert!(term.output().contains("not_encodable"), "{}", term.output());
 }
+
+#[test]
+#[ignore = "needs I1"]
+fn cli_skipped_profile_file_refuses_device_commands() {
+    // A saved profile that no longer loads would leave the machine on its built-in calibration: refused, not run.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("jpt-m7-200-sim.json"), b"{ \"id\": \"jpt-m7-200-sim\", ").unwrap();
+    let mut env = engine_env(default_sim_config());
+    env.rigs = Box::new(EngineRigs::new(Some(dir.path().to_path_buf()), default_sim_config(), Arc::clone(&env.clock)));
+    let mut term = Scripted::new(true, &[]);
+    assert_eq!(run_with(&argv("frame --builtin box10 --sim"), &mut term, &mut env), EXIT_FAIL);
+    let out = term.output();
+    assert!(out.contains("machine profile files were skipped"), "{out}");
+    assert!(!out.contains("Framing"), "{out}");
+}

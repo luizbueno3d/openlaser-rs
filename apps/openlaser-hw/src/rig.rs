@@ -209,11 +209,26 @@ fn widen_for_extent(p: &mut MachineProfile, extent: f64) -> Result<(), HwError> 
     Ok(())
 }
 
+/// A saved profile file that could not be loaded leaves its machine on the built-in settings (calibration, axis
+/// reversal, work area), so a device command refuses until the file is fixed or removed, never runs on the
+/// built-in in its place (AGENTS.md §1 rule 3).
+pub fn refuse_skipped_profiles(skipped: &[String]) -> Result<(), HwError> {
+    if skipped.is_empty() {
+        return Ok(());
+    }
+    Err(HwError::Failed(format!(
+        "machine profile files were skipped, so their machines would run on the built-in settings: {}. Fix or remove them \
+         (`openlaser-hw profile show` lists them) and run again; nothing was opened",
+        skipped.join("; ")
+    )))
+}
+
 impl EngineRig {
     pub fn open(spec: &RigSpec, profiles_dir: Option<&Path>, sim_cfg: &SimConfig, clock: Arc<dyn Clock>) -> Result<Self, HwError> {
         // The hardware gate comes first: without `hw` nothing past this line runs for a real device.
         let usb = if spec.device.sim { None } else { Some(usb_provider()?) };
-        let (mut machines, _skipped) = openlaser_format::machines::load_all(profiles_dir);
+        let (mut machines, skipped) = openlaser_format::machines::load_all(profiles_dir);
+        refuse_skipped_profiles(&skipped)?;
         let default = if spec.device.sim { DEFAULT_SIM_MACHINE } else { DEFAULT_USB_MACHINE };
         let machine = spec.device.machine.clone().unwrap_or_else(|| MachineId(default.to_owned()));
         let profile = machines.iter_mut().find(|m| m.id == machine).ok_or_else(|| {
@@ -457,4 +472,44 @@ fn stage_om_workspace(workspace: &Path, layers: &Path) -> Result<Staged, HwError
     std::fs::copy(workspace, &staged.workspace).map_err(|e| HwError::Failed(format!("cannot read {}: {e}", workspace.display())))?;
     std::fs::copy(layers, staged.dir.join("layer_settings.json")).map_err(|e| HwError::Failed(format!("cannot read {}: {e}", layers.display())))?;
     Ok(staged)
+}
+
+#[cfg(test)]
+mod tests {
+    use openlaser_machine::jpt_m7_200;
+
+    use super::*;
+
+    fn galvo(p: &MachineProfile) -> &openlaser_machine::GalvoMachine {
+        match &p.kind {
+            Kinematics::Galvo(g) => g,
+            Kinematics::Gantry(_) => panic!("galvo profile"),
+        }
+    }
+
+    #[test]
+    fn a_skipped_profile_file_refuses_the_device_command() {
+        assert!(refuse_skipped_profiles(&[]).is_ok());
+        let err = refuse_skipped_profiles(&["machines/jpt-m7-200.json: cal.scale must be finite".to_owned()]).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("machines/jpt-m7-200.json: cal.scale must be finite"), "{text}");
+        assert!(text.contains("nothing was opened"), "{text}");
+        assert_eq!(err.exit_code(), crate::EXIT_FAIL);
+    }
+
+    #[test]
+    fn extent_widens_the_frame_only_inside_the_encodable_square() {
+        let mut p = jpt_m7_200();
+        widen_for_extent(&mut p, 110.0).unwrap();
+        let rect = FieldRect { min: [-110.0, -110.0], max: [110.0, 110.0] };
+        assert_eq!(galvo(&p).work_area, rect);
+        assert_eq!(galvo(&p).h27_cleared, Some(rect));
+        // F = 200 mm × 1.1834: ±118.34 mm is the edge of the encodable square, never inside it.
+        for bad in [118.34, 150.0, 0.0, -5.0, f64::NAN, f64::INFINITY] {
+            let mut p = jpt_m7_200();
+            let err = widen_for_extent(&mut p, bad).unwrap_err();
+            assert_eq!(err.code(), Some(RefusalCode::NotEncodable), "{bad}");
+            assert_eq!(p, jpt_m7_200(), "a refused extent changes nothing ({bad})");
+        }
+    }
 }
