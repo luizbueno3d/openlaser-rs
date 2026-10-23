@@ -519,6 +519,22 @@ fn crash_bound_is_the_largest_run_ahead_window_and_never_zero() {
     assert!(!s.crash_bound.is_zero());
 }
 
+// ---- packets ------------------------------------------------------------------------------------------------------
+
+#[test]
+fn packets_hold_at_most_256_commands_padded_with_end_of_list() {
+    for count in [0usize, 1, 17, 255, 256] {
+        let words = vec![[op::LIST_DELAY_TIME, 1, 0, 0, 0, 0]; count];
+        let p = Packet::from_words(&words).unwrap();
+        assert_eq!(p.bytes().len(), 3072);
+        assert_eq!(p.real_commands(), count);
+        assert!(p.words().iter().skip(count).all(|w| *w == PAD));
+        assert_eq!(Packet::try_from_bytes(p.bytes()).unwrap(), p);
+    }
+    assert!(Packet::from_words(&vec![[op::LIST_DELAY_TIME, 1, 0, 0, 0, 0]; 257]).is_err());
+    assert!(Packet::try_from_bytes(&[0u8; 3071]).is_err());
+}
+
 // ---- bytes_hash ---------------------------------------------------------------------------------------------------
 
 #[test]

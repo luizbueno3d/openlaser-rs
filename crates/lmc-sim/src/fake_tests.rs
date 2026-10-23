@@ -63,70 +63,78 @@ fn fake_records_mark_box10_emission() {
     assert_eq!(r.mo_closed_while_busy, 0);
     assert_eq!(r.mo_open.len(), 1);
 }
-fn sim_machine() -> openlaser_machine::GalvoMachine {
-    let openlaser_machine::Kinematics::Galvo(m) = openlaser_machine::jpt_m7_200_sim().kind else { panic!("the sim profile is a galvo") };
-    m
-}
-/// Runs one list as the session does (ResetList, GetVersion, packets with SetEndOfList, ExecuteList after the first),
-/// then waits until the board is no longer BUSY.
-fn run_list(b: &mut FakeLmc, clock: &VirtualClock, packets: &[Packet]) {
-    single(b, op::RESET_LIST, 0);
-    for (i, p) in packets.iter().enumerate() {
-        while !status(b).ready() {
+/// Frame emission through the shipping encoder. The `#[cfg(test)]` repeats what `fake.rs` already says for this whole
+/// file; `xtask deps` (SPEC §2.3 rule 14) looks for it in the file that names `safety::testing`.
+#[cfg(test)]
+mod frame_emission {
+    use super::*;
+
+    fn sim_machine() -> openlaser_machine::GalvoMachine {
+        let openlaser_machine::Kinematics::Galvo(m) = openlaser_machine::jpt_m7_200_sim().kind else { panic!("the sim profile is a galvo") };
+        m
+    }
+    /// Runs one list as the session does (ResetList, GetVersion, packets with SetEndOfList, ExecuteList after the first),
+    /// then waits until the board is no longer BUSY.
+    fn run_list(b: &mut FakeLmc, clock: &VirtualClock, packets: &[Packet]) {
+        single(b, op::RESET_LIST, 0);
+        for (i, p) in packets.iter().enumerate() {
+            while !status(b).ready() {
+                clock.advance(Duration::from_millis(5));
+            }
+            submit(b, p);
+            single(b, op::SET_END_OF_LIST, 0);
+            if i == 0 {
+                single(b, op::EXECUTE_LIST, 0);
+            }
+        }
+        for _ in 0..100_000 {
+            if !status(b).busy() {
+                return;
+            }
             clock.advance(Duration::from_millis(5));
         }
-        submit(b, p);
-        single(b, op::SET_END_OF_LIST, 0);
-        if i == 0 {
-            single(b, op::EXECUTE_LIST, 0);
+        panic!("the list never finished");
+    }
+
+    /// The shipping frame lists (`encode_frame` on the T1 frame inputs) burn nothing, even on a board whose MO is open and
+    /// whose laser bit is set when the frame starts (what a frame after a crashed job would meet), and they never open MO.
+    #[test]
+    fn fake_frame_records_zero_emission() {
+        let m = sim_machine();
+        for name in ["frame_box10", "bc_frame"] {
+            let s = openlaser_testkit::t1::load("v1", name).unwrap_or_else(|e| panic!("{e}"));
+            let paths = openlaser_testkit::t1::polylines(&s).unwrap_or_else(|e| panic!("{e}"));
+            let plan = openlaser_safety::testing::frame_plan_unchecked(
+                paths.into_iter().map(openlaser_safety::Polyline).collect(),
+                openlaser_types::Fingerprint([1; 32]),
+                openlaser_types::MachineId("jpt-m7-200-sim".into()),
+                openlaser_types::FrameStyle::Contour,
+                openlaser_types::FrameSource::Job,
+            );
+            let job = openlaser_lmc::encode_frame(&plan, &m).unwrap_or_else(|e| panic!("{e}"));
+            for mo_already_open in [true, false] {
+                let clock = Arc::new(VirtualClock::new());
+                let mut b = FakeLmc::new(config(), clock.clone());
+                b.set_field_mm(m.field_f());
+                if mo_already_open {
+                    single(&mut b, op::FIBER_SET_MO, 1);
+                    single(&mut b, op::WRITE_PORT, 1);
+                }
+                let opened_at = b.recorder().snapshot().mo_open_since;
+                run_list(&mut b, &clock, &job.once);
+                run_list(&mut b, &clock, &job.pass);
+                let r = b.recorder().snapshot();
+                assert!(r.burned.is_empty(), "{name}: a frame burned {:?}", r.burned.first());
+                assert!(!r.lit.is_empty(), "{name}: the red light traced nothing");
+                assert_eq!(r.port & 1, 0, "{name}: the frame left the laser bit set");
+                assert!(r.mo_open.is_empty(), "{name}: the frame closed or opened MO");
+                assert_eq!((r.mo, r.mo_open_since), (mo_already_open, opened_at), "{name}: the frame changed MO");
+                assert_eq!(r.writes_while_not_ready, 0);
+            }
         }
     }
-    for _ in 0..100_000 {
-        if !status(b).busy() {
-            return;
-        }
-        clock.advance(Duration::from_millis(5));
-    }
-    panic!("the list never finished");
 }
 
-/// The shipping frame lists (`encode_frame` on the T1 frame inputs) burn nothing, even on a board whose MO is open and
-/// whose laser bit is set when the frame starts (what a frame after a crashed job would meet), and they never open MO.
-#[test]
-fn fake_frame_records_zero_emission() {
-    let m = sim_machine();
-    for name in ["frame_box10", "bc_frame"] {
-        let s = openlaser_testkit::t1::load("v1", name).unwrap_or_else(|e| panic!("{e}"));
-        let paths = openlaser_testkit::t1::polylines(&s).unwrap_or_else(|e| panic!("{e}"));
-        let plan = openlaser_safety::testing::frame_plan_unchecked(
-            paths.into_iter().map(openlaser_safety::Polyline).collect(),
-            openlaser_types::Fingerprint([1; 32]),
-            openlaser_types::MachineId("jpt-m7-200-sim".into()),
-            openlaser_types::FrameStyle::Contour,
-            openlaser_types::FrameSource::Job,
-        );
-        let job = openlaser_lmc::encode_frame(&plan, &m).unwrap_or_else(|e| panic!("{e}"));
-        for mo_already_open in [true, false] {
-            let clock = Arc::new(VirtualClock::new());
-            let mut b = FakeLmc::new(config(), clock.clone());
-            b.set_field_mm(m.field_f());
-            if mo_already_open {
-                single(&mut b, op::FIBER_SET_MO, 1);
-                single(&mut b, op::WRITE_PORT, 1);
-            }
-            let opened_at = b.recorder().snapshot().mo_open_since;
-            run_list(&mut b, &clock, &job.once);
-            run_list(&mut b, &clock, &job.pass);
-            let r = b.recorder().snapshot();
-            assert!(r.burned.is_empty(), "{name}: a frame burned {:?}", r.burned.first());
-            assert!(!r.lit.is_empty(), "{name}: the red light traced nothing");
-            assert_eq!(r.port & 1, 0, "{name}: the frame left the laser bit set");
-            assert!(r.mo_open.is_empty(), "{name}: the frame closed or opened MO");
-            assert_eq!((r.mo, r.mo_open_since), (mo_already_open, opened_at), "{name}: the frame changed MO");
-            assert_eq!(r.writes_while_not_ready, 0);
-        }
-    }
-}
 #[test]
 fn fake_counts_writes_while_not_ready() {
     let mut b = FakeLmc::new(config(), Arc::new(VirtualClock::new()));
