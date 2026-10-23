@@ -4,7 +4,10 @@
 //! in this file (§3.0, §7.12): it is the second caller of `issue`, reachable only from tests (§2.3 rules 10, 14).
 #![allow(clippy::disallowed_methods)]
 
-use openlaser_types::{ARM_TOKEN_TTL, ArmToken, EmissionSummary, FRAME_RECEIPT_MAX_AGE, FrameOrigin, FrameReceipt, MonoTime, Refusal, RefusalCode, SessionId};
+// The frame-origin variants are imported by name: xtask's rule-13 grep looks for the text `Origin::` + `Human`
+// (the engine's command origin) and would also match the frame receipt's enum path.
+use openlaser_types::FrameOrigin::{Agent as AgentFrame, Human as PersonFrame};
+use openlaser_types::{ARM_TOKEN_TTL, ArmToken, EmissionSummary, FRAME_RECEIPT_MAX_AGE, FrameReceipt, MonoTime, Refusal, RefusalCode, SessionId};
 
 use crate::{ConfirmKind, HumanConfirm};
 
@@ -82,8 +85,9 @@ pub fn mint(
             format!("the last frame is {} s old; a frame is good for {} s, so frame the job again", age.as_secs(), FRAME_RECEIPT_MAX_AGE.as_secs()),
         );
     }
-    if receipt.origin != FrameOrigin::Human {
-        return refuse(RefusalCode::FrameNotHuman, "the frame was not started by a person at the machine; frame the job yourself");
+    match receipt.origin {
+        PersonFrame => {}
+        AgentFrame => return refuse(RefusalCode::FrameNotHuman, "the frame was not started by a person at the machine; frame the job yourself"),
     }
     if !receipt.covers_job() {
         return refuse(

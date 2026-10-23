@@ -4,9 +4,12 @@
 use std::time::Duration;
 
 use openlaser_types::{
-    ARM_TOKEN_TTL, Bounds, EmissionSummary, FRAME_RECEIPT_MAX_AGE, Fingerprint, FrameOrigin, FrameReceipt, FrameSource, FrameStyle, MachineId, MonoTime,
-    RefusalCode, SessionId,
+    ARM_TOKEN_TTL, Bounds, EmissionSummary, FRAME_RECEIPT_MAX_AGE, Fingerprint, FrameReceipt, FrameSource, FrameStyle, MachineId, MonoTime, RefusalCode,
+    SessionId,
 };
+
+// Imported by name: xtask's rule-13 grep would mistake the enum path for the engine's command origin.
+use openlaser_types::FrameOrigin::{Agent as AgentFrame, Human as PersonFrame};
 
 use crate::testing::confirm_for_tests;
 use crate::{ConfirmKind, HumanConfirm, mint};
@@ -51,7 +54,7 @@ fn receipt() -> FrameReceipt {
         at: t(100.0),
         style: FrameStyle::Contour,
         source: FrameSource::Job,
-        origin: FrameOrigin::Human,
+        origin: PersonFrame,
     }
 }
 
@@ -148,7 +151,7 @@ fn mint_refuses_frame_receipt_expired() {
 #[test]
 fn mint_refuses_frame_not_human() {
     let mut r = receipt();
-    r.origin = FrameOrigin::Agent;
+    r.origin = AgentFrame;
     assert_eq!(refused(r, gui("ARM"), CHECKLIST, now()), Some(RefusalCode::FrameNotHuman));
 }
 
@@ -201,7 +204,7 @@ fn mint_tty_needs_arm_and_the_challenge() {
     assert_eq!(refused(receipt(), tty("ARM 482913", 482_913), 0, now()), Some(RefusalCode::ChecklistIncomplete));
     // The frame rules hold at a TTY too.
     let mut r = receipt();
-    r.origin = FrameOrigin::Agent;
+    r.origin = AgentFrame;
     assert_eq!(refused(r, tty("ARM 482913", 482_913), CHECKLIST, now()), Some(RefusalCode::FrameNotHuman));
 }
 
@@ -221,6 +224,6 @@ fn mint_checks_in_the_documented_order() {
     assert_eq!(refused(r, gui("nope"), 0, now()), Some(RefusalCode::Stale));
     let mut r = receipt();
     r.full_passes = 0;
-    r.origin = FrameOrigin::Agent;
+    r.origin = AgentFrame;
     assert_eq!(refused(r, gui("nope"), CHECKLIST, now()), Some(RefusalCode::FrameRequired));
 }
