@@ -57,7 +57,13 @@ pub fn seconds(d: Duration) -> String {
 
 /// Plain text, control characters dropped, at most [`NOTE_MAX_CHARS`] characters.
 pub fn note(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control() || *c == ' ').take(NOTE_MAX_CHARS).collect()
+    text.chars().filter(|c| !c.is_control() && !invisible_format(*c)).take(NOTE_MAX_CHARS).collect()
+}
+
+/// Bidirectional overrides, isolates and zero-width characters: they change how the rest of a line reads (or hide
+/// text) without being visible themselves, so an agent's note never carries them.
+fn invisible_format(c: char) -> bool {
+    matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
 }
 
 /// The rows above the S23 first-emission cap, as "C00 at 50.00 % is above the 10 % cap".
@@ -125,5 +131,8 @@ mod tests {
         let long: String = "x".repeat(400);
         assert_eq!(note(&long).chars().count(), NOTE_MAX_CHARS);
         assert_eq!(note("a\u{1b}[31mb\nc"), "a[31mbc");
+        // A right-to-left override would make "Approve 05%" read backwards; zero-width characters hide text.
+        assert_eq!(note("power \u{202E}%05\u{202C} ok\u{200B}\u{2066}x\u{2069}\u{FEFF}"), "power %05 okx");
+        assert_eq!(note("Visitenkarte, Ébauche, 名刺 ok"), "Visitenkarte, Ébauche, 名刺 ok");
     }
 }
