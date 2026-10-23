@@ -25,6 +25,9 @@ fn cli_mcp_initialize_lists_tools_and_recovers_parse_errors() {
     stdin
         .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"session_list\",\"arguments\":{\"force\":true}}}\n")
         .unwrap();
+    let oversized = vec![b' '; openlaser_control::budgets::MAX_REQUEST_BYTES + 1];
+    stdin.write_all(&oversized).unwrap();
+    stdin.write_all(b"\n{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"ping\"}\n").unwrap();
     drop(child.stdin.take());
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());

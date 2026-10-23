@@ -66,28 +66,37 @@ pub enum TokenSource {
 /// recovery, single writer, `_meta` 2026-07-28 list fields. Server info {name: "openlaser", version}.
 pub fn run_mcp_stdio(cfg: McpConfig) -> Result<(), Error> {
     let client = ClientInfo { name: "openlaser-cli".to_owned(), version: env!("CARGO_PKG_VERSION").to_owned() };
-    let mut backend: Box<dyn ToolBackend> = match cfg.backend {
+    let backend: Box<dyn ToolBackend> = match cfg.backend {
         BackendChoice::Headless => Box::new(Headless::new(cfg.read_root.as_deref(), cfg.write_root.as_deref())?),
         BackendChoice::Bridge(target) => Box::new(Bridge::connect(&target, &client)?),
     };
     let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
+    let backend = std::sync::Arc::new(std::sync::Mutex::new(backend));
+    let stop = backend.lock().ok().and_then(|backend| backend.stop_handle());
+    let stdout = std::sync::Arc::new(std::sync::Mutex::new(()));
     let mut reader = stdin.lock();
-    let mut writer = stdout.lock();
+    let mut calls: Vec<std::thread::JoinHandle<()>> = Vec::new();
     loop {
         let line = match openlaser_control::wire::read_line_bounded(&mut reader, openlaser_control::budgets::MAX_REQUEST_BYTES) {
             Ok(Some(line)) => line,
-            Ok(None) => return Ok(()),
-            Err(openlaser_control::Error::LineTooLong { .. }) => return Ok(()),
+            Ok(None) => {
+                for call in calls {
+                    let _ = call.join();
+                }
+                return Ok(());
+            }
+            Err(openlaser_control::Error::LineTooLong { .. }) => {
+                for call in calls {
+                    let _ = call.join();
+                }
+                return Ok(());
+            }
             Err(error) => return Err(Error::Control(error)),
         };
         let request: serde_json::Value = match serde_json::from_slice(&line) {
             Ok(value) => value,
             Err(error) => {
-                write_json_line(
-                    &mut writer,
-                    &serde_json::json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":format!("Parse error: {error}")}}),
-                )?;
+                write_mcp_response(&stdout, serde_json::json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":format!("Parse error: {error}")}}))?;
                 continue;
             }
         };
@@ -97,13 +106,30 @@ pub fn run_mcp_stdio(cfg: McpConfig) -> Result<(), Error> {
         let params = request.get("params").cloned().unwrap_or_else(|| serde_json::json!({}));
         let modern =
             request.get("_meta").and_then(|meta| meta.get("io.modelcontextprotocol/protocolVersion")).and_then(serde_json::Value::as_str) == Some("2026-07-28");
+        if method == "tools/call" {
+            let params = params.clone();
+            let id = id.clone();
+            let backend = std::sync::Arc::clone(&backend);
+            let stdout = std::sync::Arc::clone(&stdout);
+            let stop = stop.clone();
+            let call = std::thread::Builder::new().name("openlaser-mcp-call".to_owned()).spawn(move || {
+                let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| mcp_tool_call(&backend, stop.as_ref(), &id, &params)))
+                    .unwrap_or_else(|_| mcp_tool_error(&id, "internal error: tool call panicked"));
+                let response = bounded_mcp_response(response, &id);
+                let _ = write_mcp_response(&stdout, response);
+            })?;
+            calls.push(call);
+            continue;
+        }
         let response = match method {
             "initialize" => {
-                serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":false},"resources":{"subscribe":false,"listChanged":false},"prompts":{"listChanged":false}},"serverInfo":{"name":"openlaser","version":env!("CARGO_PKG_VERSION")},"instructions":format!("OpenLaser laser design automation. Units are millimetres, Y up; galvo origin is the field centre. Backend: {}", if backend.mode()==Mode::Headless {"headless"} else {"bridge"})}})
+                let mode = backend.lock().map(|backend| backend.mode()).unwrap_or(Mode::Headless);
+                serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":false},"resources":{"subscribe":false,"listChanged":false},"prompts":{"listChanged":false}},"serverInfo":{"name":"openlaser","version":env!("CARGO_PKG_VERSION")},"instructions":format!("OpenLaser laser design automation. Units are millimetres, Y up; galvo origin is the field centre. Backend: {}", if mode==Mode::Headless {"headless"} else {"bridge"})}})
             }
             "ping" => serde_json::json!({"jsonrpc":"2.0","id":id,"result":{}}),
             "tools/list" => {
-                let listed: Vec<_> = tools().iter().filter(|def| (def.modes.contains(&backend.mode()) || def.name == "stop") && (!cfg.compact || def.compact || def.name == "stop" || matches!(def.name, "tool_search"|"tool_call"))).map(|def| serde_json::json!({"name":def.name,"description":def.description,"inputSchema":(def.input_schema)(),"annotations":{"readOnlyHint":def.hints.read_only,"destructiveHint":def.hints.destructive,"idempotentHint":def.hints.idempotent}})).collect();
+                let mode = backend.lock().map(|backend| backend.mode()).unwrap_or(Mode::Headless);
+                let listed: Vec<_> = tools().iter().filter(|def| (def.modes.contains(&mode) || def.name == "stop") && (!cfg.compact || def.compact || def.name == "stop" || matches!(def.name, "tool_search"|"tool_call"))).map(|def| serde_json::json!({"name":def.name,"description":def.description,"inputSchema":(def.input_schema)(),"annotations":{"readOnlyHint":def.hints.read_only,"destructiveHint":def.hints.destructive,"idempotentHint":def.hints.idempotent}})).collect();
                 if modern {
                     serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"tools":listed,"resultType":"complete","ttlMs":600000,"cacheScope":"private"}})
                 } else {
@@ -142,37 +168,66 @@ pub fn run_mcp_stdio(cfg: McpConfig) -> Result<(), Error> {
             "prompts/list" => {
                 serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"prompts":[{"name":"prepare-job","description":"Plan, review and submit a job for a person"},{"name":"mopa-color-test","description":"Prepare a MOPA layer test design"},{"name":"fix-refusals","description":"Inspect and address job planning refusals"}]}})
             }
-            "tools/call" => {
-                let name = params.get("name").and_then(serde_json::Value::as_str).unwrap_or("");
-                let args = params.get("arguments").cloned().unwrap_or_else(|| serde_json::json!({}));
-                match tools().iter().find(|tool| tool.name == name && tool.modes.contains(&backend.mode())) {
-                    None => serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":format!("unknown tool `{name}`")}}),
-                    Some(definition) => match validate_arguments(&(definition.input_schema)(), &args) {
-                        Some(reason) => serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":reason}}),
-                        None => {
-                            let info = ClientInfo { name: "mcp-client".to_owned(), version: String::new() };
-                            let output = if name == "stop" {
-                                backend.stop_handle().map_or_else(
-                                    || ToolOutput::Error { message: "needs_bridge: stop requires bridge mode".to_owned(), data: None },
-                                    |h| h.stop(args.get("machine").and_then(serde_json::Value::as_str)),
-                                )
-                            } else {
-                                backend.call(name, args, &info)
-                            };
-                            let (text, is_error) = match output {
-                                ToolOutput::Json(value) => (serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned()), false),
-                                ToolOutput::Png { note, .. } => (serde_json::to_string(&note).unwrap_or_else(|_| "{}".to_owned()), false),
-                                ToolOutput::Error { message, .. } => (message, true),
-                            };
-                            serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":is_error}})
-                        }
-                    },
-                }
-            }
+            "tools/call" => continue,
             _ => serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":format!("Method not found: {method}")}}),
         };
-        write_json_line(&mut writer, &response)?;
+        write_mcp_response(&stdout, bounded_mcp_response(response, &id))?;
     }
+}
+
+fn mcp_tool_call(
+    backend: &std::sync::Arc<std::sync::Mutex<Box<dyn ToolBackend>>>,
+    stop: Option<&StopHandle>,
+    id: &serde_json::Value,
+    params: &serde_json::Value,
+) -> serde_json::Value {
+    let name = params.get("name").and_then(serde_json::Value::as_str).unwrap_or("");
+    let args = params.get("arguments").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let is_stop = name == "stop";
+    let mode = if is_stop {
+        Mode::Bridge
+    } else {
+        let Ok(guard) = backend.lock() else { return mcp_tool_error(id, "internal error: backend unavailable") };
+        guard.mode()
+    };
+    let Some(definition) = tools().iter().find(|tool| tool.name == name && tool.modes.contains(&mode)) else {
+        return serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":format!("unknown tool `{name}`")}});
+    };
+    if let Some(reason) = validate_arguments(&(definition.input_schema)(), &args) {
+        return serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":reason}});
+    }
+    let info = ClientInfo { name: "mcp-client".to_owned(), version: String::new() };
+    let output = if is_stop {
+        stop.map_or_else(
+            || ToolOutput::Error { message: "needs_bridge: stop requires bridge mode".to_owned(), data: None },
+            |handle| handle.stop(args.get("machine").and_then(serde_json::Value::as_str)),
+        )
+    } else {
+        let Ok(mut guard) = backend.lock() else { return mcp_tool_error(id, "internal error: backend unavailable") };
+        guard.call(name, args, &info)
+    };
+    let (text, is_error) = match output {
+        ToolOutput::Json(value) => (serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned()), false),
+        ToolOutput::Png { note, .. } => (serde_json::to_string(&note).unwrap_or_else(|_| "{}".to_owned()), false),
+        ToolOutput::Error { message, .. } => (message, true),
+    };
+    serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":is_error}})
+}
+
+fn mcp_tool_error(id: &serde_json::Value, message: &str) -> serde_json::Value {
+    serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":message}],"isError":true}})
+}
+
+fn bounded_mcp_response(response: serde_json::Value, id: &serde_json::Value) -> serde_json::Value {
+    let too_large = serde_json::to_vec(&response).map(|bytes| bytes.len() > openlaser_control::budgets::MAX_RESPONSE_BYTES).unwrap_or(true);
+    if too_large { mcp_tool_error(id, "response exceeds 8388608 bytes; operation may have completed; inspect state before retrying") } else { response }
+}
+
+fn write_mcp_response(lock: &std::sync::Arc<std::sync::Mutex<()>>, response: serde_json::Value) -> Result<(), Error> {
+    let Ok(_guard) = lock.lock() else { return Err(Error::NotImplemented("MCP response writer is unavailable")) };
+    let stdout = std::io::stdout();
+    let mut writer = stdout.lock();
+    write_json_line(&mut writer, &response)
 }
 
 fn validate_arguments(schema: &serde_json::Value, args: &serde_json::Value) -> Option<String> {
@@ -207,7 +262,7 @@ pub struct ServeConfig {
 
 /// `openlaser-cli serve`: the control protocol over a headless Session (stdio: no auth; TCP: auth frame).
 pub fn run_serve(cfg: ServeConfig) -> Result<(), Error> {
-    let _backend = Headless::new(cfg.read_root.as_deref(), cfg.write_root.as_deref())?;
+    let mut backend = Headless::new(cfg.read_root.as_deref(), cfg.write_root.as_deref())?;
     if let Some(port) = cfg.port {
         let token = match cfg.token {
             Some(TokenSource::Inline(value)) => openlaser_control::token::Token::from_hex(&value)?,
@@ -232,12 +287,9 @@ pub fn run_serve(cfg: ServeConfig) -> Result<(), Error> {
             if !request.dispatch.try_dispatch() {
                 continue;
             }
-            let reply = openlaser_control::wire::Reply {
-                id: request.request.id,
-                ok: false,
-                result: None,
-                error: Some("not implemented: engine control dispatch is unavailable in this engine build".to_owned()),
-            };
+            let method = request.request.method.as_str();
+            let output = backend.dispatch_control(method, request.request.params);
+            let reply = control_reply(request.request.id, output);
             let _ = request.reply.send(reply);
         }
         server.shutdown();
@@ -251,9 +303,50 @@ pub fn run_serve(cfg: ServeConfig) -> Result<(), Error> {
     loop {
         let Some(line) = openlaser_control::wire::read_line_bounded(&mut input, openlaser_control::budgets::MAX_REQUEST_BYTES)? else { return Ok(()) };
         let value: serde_json::Value = serde_json::from_slice(&line)?;
-        let reply = serde_json::json!({"id":value.get("id").cloned().unwrap_or(serde_json::Value::Null),"ok":false,"error":"not implemented: headless engine command dispatcher"});
+        let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let method = value.get("method").and_then(serde_json::Value::as_str).unwrap_or("");
+        let params = value.get("params").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let reply = serde_json::to_value(control_reply(id, backend.dispatch_control(method, params))).unwrap_or(serde_json::Value::Null);
         serde_json::to_writer(&mut output, &reply)?;
         output.write_all(b"\n")?;
         output.flush()?;
+    }
+}
+
+fn control_reply(id: serde_json::Value, output: ToolOutput) -> openlaser_control::wire::Reply {
+    match output {
+        ToolOutput::Json(result) => openlaser_control::wire::Reply { id, ok: true, result: Some(result), error: None },
+        ToolOutput::Png { note, .. } => openlaser_control::wire::Reply { id, ok: true, result: Some(note), error: None },
+        ToolOutput::Error { message, .. } => openlaser_control::wire::Reply { id, ok: false, result: None, error: Some(message) },
+    }
+}
+
+#[cfg(test)]
+mod mcp_tests {
+    use super::*;
+
+    struct PanickingBackend;
+
+    impl ToolBackend for PanickingBackend {
+        fn mode(&self) -> Mode {
+            Mode::Headless
+        }
+        fn call(&mut self, _: &str, _: serde_json::Value, _: &ClientInfo) -> ToolOutput {
+            panic!("backend panic")
+        }
+        fn stop_handle(&self) -> Option<StopHandle> {
+            None
+        }
+    }
+
+    #[test]
+    fn panic_contained() {
+        let backend: std::sync::Arc<std::sync::Mutex<Box<dyn ToolBackend>>> = std::sync::Arc::new(std::sync::Mutex::new(Box::new(PanickingBackend)));
+        let id = serde_json::json!(5);
+        let params = serde_json::json!({"name":"session_list","arguments":{}});
+        let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| mcp_tool_call(&backend, None, &id, &params)))
+            .unwrap_or_else(|_| mcp_tool_error(&id, "internal error: tool call panicked"));
+        assert_eq!(response.pointer("/result/isError").and_then(serde_json::Value::as_bool), Some(true));
+        assert!(response.pointer("/result/content/0/text").and_then(serde_json::Value::as_str).unwrap_or_default().contains("panicked"));
     }
 }

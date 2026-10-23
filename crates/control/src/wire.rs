@@ -89,6 +89,19 @@ mod tests {
         assert_eq!(read_line_bounded(&mut input, 4).unwrap(), None);
     }
 
+    #[test]
+    fn batch_reply_budget_escaped() {
+        let escaped = "\\n".repeat(crate::budgets::MAX_RESPONSE_BYTES / 3);
+        let reply = Reply { id: serde_json::json!(7), ok: true, result: Some(serde_json::json!({"steps":escaped})), error: None };
+        let mut bytes = Vec::new();
+        write_reply(&mut bytes, &reply).unwrap();
+        assert!(bytes.len() < crate::budgets::MAX_RESPONSE_BYTES);
+        let result: Reply = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result.id, serde_json::json!(7));
+        assert!(!result.ok);
+        assert!(result.error.as_deref().unwrap_or_default().contains("operation may have completed"));
+    }
+
     proptest::proptest! {
         #[test]
         fn prop_control_reader_never_panics(data in proptest::collection::vec(proptest::num::u8::ANY, 0..4096), max in 0usize..1024) {

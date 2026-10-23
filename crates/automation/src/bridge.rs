@@ -144,3 +144,39 @@ pub enum BridgeError {
     Definite(String),
     NotImplemented(&'static str),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_stop_not_blocked_by_inflight_call() {
+        use openlaser_control::{
+            server::{ControlServer, ServerConfig},
+            token::Token,
+        };
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        let token = Token::generate().unwrap();
+        let token_hex = token.to_hex();
+        let fast_stop: openlaser_control::server::FastStop = Arc::new(|machine| serde_json::json!({"latched":true,"machine":machine}));
+        let (server, requests) =
+            ControlServer::start(ServerConfig { port: 0, token: Token::from_hex(&token_hex).unwrap(), fast_stop, wake: Arc::new(|| {}) }).unwrap();
+        let target = BridgeTarget::Addr { addr: SocketAddr::from(([127, 0, 0, 1], server.port())), token: TokenSource::Inline(token_hex) };
+        let info = ClientInfo { name: "test".to_owned(), version: "1".to_owned() };
+        let mut call_client = BridgeClient::connect(&target, &info).unwrap();
+        let stop = call_client.stop_handle().unwrap();
+        let in_flight = std::thread::spawn(move || call_client.call("doc.inspect", serde_json::json!({})));
+        let request = requests.recv_timeout(budgets::BRIDGE_TIMEOUT).unwrap();
+        assert!(request.dispatch.try_dispatch());
+
+        let started = Instant::now();
+        assert!(matches!(stop.stop(None), crate::ToolOutput::Json(value) if value.get("latched").and_then(serde_json::Value::as_bool) == Some(true)));
+        assert!(started.elapsed() < budgets::STOP_WAIT);
+
+        request.reply.send(Reply { id: request.request.id, ok: true, result: Some(serde_json::json!({})), error: None }).unwrap();
+        assert!(in_flight.join().unwrap().is_ok());
+        server.shutdown();
+    }
+}

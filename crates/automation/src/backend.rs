@@ -72,6 +72,62 @@ impl Headless {
         });
         Ok(Self { session })
     }
+
+    /// Dispatch a raw control method through the same headless tool implementation as MCP.
+    pub fn dispatch_control(&mut self, method: &str, params: serde_json::Value) -> ToolOutput {
+        let tool = match method {
+            "engine.execute" => "command_run",
+            "engine.commands" => "command_list",
+            "engine.schema" => "command_schema",
+            "jobs.list" => "jobs_list",
+            "jobs.cancel" => "jobs_cancel",
+            "app.open" => "doc_open",
+            "app.import" => "doc_import",
+            "app.save" => "doc_save",
+            "app.export" => "doc_export",
+            "doc.inspect" => "doc_inspect",
+            "doc.render" => "render_preview",
+            "doc.select" => "doc_select",
+            "doc.close" => "doc_close",
+            "session.list" => "session_list",
+            "machine.list" => "machine_list",
+            "machine.status" => "machine_status",
+            "job.plan" => "job_plan",
+            "job.preview" => "job_preview",
+            "job.estimate" => "job_estimate",
+            "job.simulate" => "job_simulate",
+            "job.export" => "job_export",
+            "gcode.export" => "gcode_export",
+            "frame.request" => "frame_request",
+            "job.submit" => "job_submit",
+            "job.status" => "job_status",
+            "job.withdraw" => "job_withdraw",
+            "machine.stop" => "stop",
+            "ui.inspect" => "ui_inspect",
+            "ui.elements" => "ui_elements",
+            "ui.screenshot" => "ui_screenshot",
+            "ui.click" => "ui_click",
+            "ui.drag" => "ui_drag",
+            "ui.key" => "ui_key",
+            "ui.type" => "ui_type",
+            "ui.pointer" => "ui_pointer",
+            "ui.menu.invoke" => "ui_menu_invoke",
+            "ui.set" => "ui_set",
+            "methods" => return ToolOutput::Json(serde_json::to_value(openlaser_control::methods::METHODS).unwrap_or(serde_json::Value::Null)),
+            _ if openlaser_control::methods::METHODS.contains(&method) => {
+                return ToolOutput::Error { message: format!("not implemented: headless control method `{method}`"), data: None };
+            }
+            _ => return ToolOutput::Error { message: format!("unknown method `{method}`"), data: None },
+        };
+        let mut args = params;
+        if let Some(object) = args.as_object_mut()
+            && method == "engine.execute"
+            && let Some(command) = object.remove("command")
+        {
+            object.insert("id".to_owned(), command);
+        }
+        self.call(tool, args, &ClientInfo { name: "openlaser-cli".to_owned(), version: env!("CARGO_PKG_VERSION").to_owned() })
+    }
 }
 
 impl ToolBackend for Headless {
@@ -262,6 +318,23 @@ fn format_bridge_error(error: crate::BridgeError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_failure_wording() {
+        assert!(format_bridge_error(crate::BridgeError::NotSent("connection refused".to_owned())).contains("the request was not sent"));
+        assert!(format_bridge_error(crate::BridgeError::Transport("reset".to_owned())).contains("operation may have completed; inspect state before retrying"));
+        assert!(format_bridge_error(crate::BridgeError::TimedOut { read: true }).contains("may be retried safely"));
+        assert!(format_bridge_error(crate::BridgeError::TimedOut { read: false }).contains("may have completed"));
+    }
+
+    #[test]
+    fn headless_control_dispatch_uses_engine_tool_routes() {
+        let mut backend = Headless::new(None, None).unwrap();
+        let output = backend.dispatch_control("methods", serde_json::json!({}));
+        assert!(matches!(output, ToolOutput::Json(value) if value.as_array().is_some_and(|items| items.iter().any(|item| item == "engine.execute"))));
+        let unknown = backend.dispatch_control("made.up", serde_json::json!({}));
+        assert!(matches!(unknown, ToolOutput::Error { message, .. } if message.starts_with("unknown method")));
+    }
 
     #[test]
     fn headless_device_tools_need_bridge() {

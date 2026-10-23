@@ -320,4 +320,21 @@ mod tests {
             assert!(err.starts_with("human-only:"));
         }
     }
+
+    #[test]
+    fn cli_plan_exit_1_on_refusal() {
+        let (code, _, err) = invoke(&["plan", "empty.olp"]);
+        assert_eq!(code, 1);
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    #[ignore = "needs I1"]
+    fn cli_simulate_writes_png() {
+        let temp = tempfile::tempdir().unwrap();
+        let png = temp.path().join("simulation.png");
+        let (code, _, _) = invoke(&["simulate", "business-card.olp", "--out", png.to_str().unwrap_or("")]);
+        assert_eq!(code, 0);
+        assert!(std::fs::read(&png).unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
 }
