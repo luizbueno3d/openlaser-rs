@@ -225,6 +225,9 @@ fn validate_project(project: &ProjectM, paths: &std::collections::BTreeMap<Strin
     if project.layers.tools[0].which != 1 || project.layers.tools[1].which != 2 {
         return Err(corrupt("tool layers must be T1 and T2 in order"));
     }
+    // A pass count of 0 would plan nothing for the layer's shapes: refused like every other invariant, on load
+    // and on save.
+    project.layers.check_passes().map_err(|error| corrupt(&error.to_string()))?;
     if !(1..=999).contains(&project.job.repeats) {
         return Err(corrupt("job repeats must be in 1..=999"));
     }
@@ -1146,9 +1149,28 @@ mod tests {
         });
         assert_corrupt(|m| m["project"]["nextId"] = serde_json::json!(0));
         assert_corrupt(|m| m["project"]["nextId"] = serde_json::json!(7));
+        // Every pass count is at least 1 (regression: a 0 used to load, then the layer planned nothing for its
+        // shapes).
+        assert_corrupt(|m| m["project"]["layers"]["colors"][0]["ops"][0]["passes"] = serde_json::json!(0));
+        assert_corrupt(|m| m["project"]["layers"]["colors"][2]["globalPasses"] = serde_json::json!(0));
+        assert_corrupt(|m| m["project"]["layers"]["colors"][4]["image"]["passes"] = serde_json::json!(0));
         assert_corrupt(|m| m["project"]["workspace"]["sizeMm"] = serde_json::json!([-5.0, 0.0]));
         assert_corrupt(|m| m["project"]["layers"]["order"] = serde_json::json!([2, 2]));
         assert_corrupt(|m| m["project"]["layers"]["order"] = serde_json::json!([30]));
+    }
+
+    #[test]
+    fn olp_save_refuses_zero_passes() {
+        // Save refuses exactly what load refuses, so a saved file always loads.
+        let mut bad = project();
+        bad.layers.colors[0].ops[0].passes = 0;
+        assert!(matches!(save(&bad), Err(Error::Corrupt(_))));
+        let mut bad = project();
+        bad.layers.colors[5].global_passes = 0;
+        assert!(matches!(save(&bad), Err(Error::Corrupt(_))));
+        let mut bad = project();
+        bad.layers.colors[7].image.passes = 0;
+        assert!(matches!(save(&bad), Err(Error::Corrupt(_))));
     }
 
     #[test]

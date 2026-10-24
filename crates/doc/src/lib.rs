@@ -34,6 +34,10 @@ pub enum Error {
     /// WP1 addition: `Project::alloc_id` cannot hand out a new id (`next_id` is 0 or would pass `MAX_NEXT_ID`).
     #[error("no object id left to allocate (next id {next_id}; ids run 1..2^53)")]
     IdsExhausted { next_id: u64 },
+    /// A pass count of 0 (`CutOp::passes`, `ColorLayer::global_passes` or `ImageCut::passes`): the layer would
+    /// plan nothing for its shapes. Refused on load/save and by the planner via [`CutTable::check_passes`].
+    #[error("layer {layer} has zero passes at {field}")]
+    ZeroPasses { layer: LayerKey, field: String },
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
 }

@@ -156,8 +156,19 @@ impl Project {
         Ok(id)
     }
 
+    /// The shape with `id`, wherever it sits in the tree. Its `xform` is relative to the parent group it may
+    /// live in: world (design mm) queries go through [`Self::world_transform`], [`Self::world_polylines`] and
+    /// [`Self::bounds`], which all apply the full ancestor chain.
     pub fn shape(&self, id: ObjectId) -> Option<&Arc<Shape>> {
         find_shape(&self.shapes, id)
+    }
+
+    /// The transform that maps the shape's object-space coordinates to world (design mm): every ancestor
+    /// group's `xform` composed with the shape's own, outermost first. `None` for an unknown id; a non-finite
+    /// composition along the ancestor chain is refused ([`GeomError::NonFinite`]).
+    pub fn world_transform(&self, id: ObjectId) -> Result<Option<Affine>, GeomError> {
+        let Some((shape, ancestors)) = find_with_ancestors(&self.shapes, id, Affine::IDENTITY)? else { return Ok(None) };
+        Ok(Some(compose(ancestors, shape.xform)?))
     }
 
     pub fn color_layer(&self, index: u8) -> Option<&ColorLayer> {
@@ -177,30 +188,35 @@ impl Project {
     }
 
     /// Flattened world polylines (design mm) of one shape, groups expanded; bitmaps give their outline rectangle.
+    /// The full ancestor chain applies: a shape inside a transformed group lands where it is drawn, so hit-testing,
+    /// field validation and planning all see the same coordinates.
     ///
     /// The tolerance holds in world space: every vertex lies on the shape's true outline (parametric shapes are
     /// sampled from their exact ellipse arcs, paths are transformed before flattening) and every point of the
     /// outline is within `tol_mm` of the polylines, whatever the transforms. Refuses a bad tolerance
-    /// ([`GeomError::BadTolerance`]), a transform or coordinate that is not finite ([`GeomError::NonFinite`]) and
-    /// more than [`openlaser_geom::MAX_FLATTEN_POINTS`] points for the whole shape, groups included
-    /// ([`GeomError::TooManyPoints`], checked before the points are stored). An unknown id gives no polylines.
+    /// ([`GeomError::BadTolerance`]), a transform or coordinate that is not finite ([`GeomError::NonFinite`],
+    /// ancestors included) and more than [`openlaser_geom::MAX_FLATTEN_POINTS`] points for the whole shape, groups
+    /// included ([`GeomError::TooManyPoints`], checked before the points are stored). An unknown id gives no
+    /// polylines.
     pub fn world_polylines(&self, id: ObjectId, tol_mm: f64) -> Result<Vec<Polyline>, GeomError> {
         let tol = check_tolerance(tol_mm)?;
-        let Some(shape) = find_shape(&self.shapes, id) else { return Ok(Vec::new()) };
         let mut budget = PointBudget::default();
         let mut out = Vec::new();
-        append_world_polylines(shape, Affine::IDENTITY, tol, &mut budget, &mut out)?;
+        if let Some((shape, ancestors)) = find_with_ancestors(&self.shapes, id, Affine::IDENTITY)? {
+            append_world_polylines(shape, ancestors, tol, &mut budget, &mut out)?;
+        }
         Ok(out)
     }
 
-    /// Exact bounds (design mm) of the shapes' true outlines, groups expanded, computed without flattening (curve
-    /// and arc extrema are solved), so it holds every polyline [`Self::world_polylines`] returns at any tolerance.
-    /// Unknown ids are skipped; refuses a transform or coordinate that is not finite ([`GeomError::NonFinite`]).
+    /// Exact bounds (design mm) of the shapes' true outlines, groups expanded and ancestor transforms applied,
+    /// computed without flattening (curve and arc extrema are solved), so it holds every polyline
+    /// [`Self::world_polylines`] returns at any tolerance. Unknown ids are skipped; refuses a transform or
+    /// coordinate that is not finite ([`GeomError::NonFinite`], ancestors included).
     pub fn bounds(&self, ids: &[ObjectId]) -> Result<Option<Bounds>, GeomError> {
         let mut acc = None;
         for id in ids {
-            if let Some(shape) = find_shape(&self.shapes, *id) {
-                append_world_bounds(shape, Affine::IDENTITY, &mut acc)?;
+            if let Some((shape, ancestors)) = find_with_ancestors(&self.shapes, *id, Affine::IDENTITY)? {
+                append_world_bounds(shape, ancestors, &mut acc)?;
             }
         }
         Ok(acc)
@@ -450,6 +466,23 @@ fn find_shape(shapes: &[Arc<Shape>], id: ObjectId) -> Option<&Arc<Shape>> {
         }
     }
     None
+}
+
+/// [`find_shape`], also returning the composition of the found shape's ancestor groups' transforms (its own
+/// `xform` is not included). Only the transforms on the path to the found shape are composed: a non-finite
+/// composition in a branch that does not contain `id` cannot fail its query.
+fn find_with_ancestors(shapes: &[Arc<Shape>], id: ObjectId, ancestors: Affine) -> Result<Option<(&Arc<Shape>, Affine)>, GeomError> {
+    for shape in shapes {
+        if shape.id == id {
+            return Ok(Some((shape, ancestors)));
+        }
+        if let Geom::Group(children) = &shape.geom
+            && find_shape(children, id).is_some()
+        {
+            return find_with_ancestors(children, id, compose(ancestors, shape.xform)?);
+        }
+    }
+    Ok(None)
 }
 
 /// `parent * xform`, refused when the composition is not finite (deep groups of large scales overflow).
@@ -743,8 +776,63 @@ mod tests {
         let bounds = project.bounds(&[ObjectId(1)]).unwrap().unwrap();
         assert_eq!(bounds.min, [14.0, 18.0]);
         assert_eq!(bounds.max, [16.0, 22.0]);
-        assert!(!project.world_polylines(ObjectId(2), 0.01).unwrap().is_empty());
+        // Querying the child by its own id must apply the group's transform too (regression: ancestors used to
+        // be dropped, so the child reported object-space coordinates where it was not drawn).
+        assert_eq!(project.bounds(&[ObjectId(2)]).unwrap(), Some(bounds));
+        let polys = project.world_polylines(ObjectId(2), 0.01).unwrap();
+        assert_eq!(polys.len(), 1);
+        assert_eq!(openlaser_geom::bounds_of(&polys), Some(bounds));
+        assert_eq!(project.world_transform(ObjectId(2)).unwrap(), Some(Affine::translate((15.0, 20.0))));
         assert!(project.shape(ObjectId(2)).is_some());
+    }
+
+    #[test]
+    fn world_queries_compose_nested_group_transforms_in_order() {
+        // Nested groups of rotate, scale and translate: the leaf must land exactly where designed. Composition
+        // is outermost-first (group * … * leaf); the wrong order puts the leaf somewhere else.
+        let rect = Geom::Rect { w: mm(2.0), h: mm(2.0), corner_radius: mm(0.0) };
+        let leaf_shape = leaf(4, Affine::translate((5.0, 0.0)), rect);
+        let middle = leaf(3, Affine::scale(2.0), Geom::Group(vec![leaf_shape]));
+        let outer = leaf(2, Affine::translate((10.0, 20.0)), Geom::Group(vec![middle]));
+        let top = leaf(1, Affine::rotate(FRAC_PI_2), Geom::Group(vec![outer]));
+        let project = project_with(vec![top]);
+
+        // Corners ±1 → T(5,0) (4..6, -1..1) → ×2 (8..12, -2..2) → T(10,20) (18..22, 18..22) → R90 (x,y) → (-y,x).
+        let want = Bounds { min: [-22.0, 18.0], max: [-18.0, 22.0] };
+        assert_eq!(project.bounds(&[ObjectId(4)]).unwrap(), Some(want));
+        // Every id on the chain sees the same world geometry.
+        for id in 1..=4 {
+            assert_eq!(project.bounds(&[ObjectId(id)]).unwrap(), Some(want), "id {id}");
+            let polys = project.world_polylines(ObjectId(id), 0.01).unwrap();
+            assert_eq!(openlaser_geom::bounds_of(&polys), Some(want), "id {id}");
+        }
+        let expected = Affine::rotate(FRAC_PI_2) * Affine::translate((10.0, 20.0)) * Affine::scale(2.0) * Affine::translate((5.0, 0.0));
+        assert_eq!(project.world_transform(ObjectId(4)).unwrap(), Some(expected));
+        // A top-level shape's world transform is its own; an unknown id is None.
+        assert_eq!(project.world_transform(ObjectId(1)).unwrap(), Some(Affine::rotate(FRAC_PI_2)));
+        assert_eq!(project.world_transform(ObjectId(99)), Ok(None));
+        assert_eq!(project.bounds(&[ObjectId(99)]), Ok(None));
+        assert_eq!(project.world_polylines(ObjectId(99), 0.01), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn world_queries_refuse_a_non_finite_ancestor() {
+        // The leaf's own transform is finite, but an ancestor's composition overflows: the query refuses rather
+        // than place the shape anywhere.
+        let leaf_shape = leaf(3, Affine::IDENTITY, ellipse(1.0, 1.0));
+        let inner = leaf(2, Affine::scale(1e300), Geom::Group(vec![leaf_shape]));
+        let outer = leaf(1, Affine::scale(1e10), Geom::Group(vec![inner]));
+        let project = project_with(vec![outer]);
+        assert_eq!(project.world_polylines(ObjectId(3), 0.01), Err(GeomError::NonFinite));
+        assert_eq!(project.bounds(&[ObjectId(3)]), Err(GeomError::NonFinite));
+        assert_eq!(project.world_transform(ObjectId(3)), Err(GeomError::NonFinite));
+        // A broken ancestor in a sibling branch does not fail an unrelated shape's query.
+        let fine = leaf(9, Affine::translate((1.0, 1.0)), ellipse(1.0, 1.0));
+        let project = project_with(vec![
+            leaf(1, Affine::scale(1e300), Geom::Group(vec![leaf(2, Affine::scale(1e10), Geom::Group(vec![fine]))])),
+            leaf(8, Affine::IDENTITY, ellipse(1.0, 1.0)),
+        ]);
+        assert!(project.bounds(&[ObjectId(8)]).unwrap().is_some());
     }
 
     fn leaf(id: u64, xform: Affine, geom: Geom) -> Arc<Shape> {
@@ -1096,5 +1184,19 @@ mod tests {
             priority: 0,
         }));
         assert_eq!(project.used_layers(), vec![LayerKey::Color(4)]);
+    }
+
+    #[test]
+    fn cut_table_refuses_zero_passes() {
+        let mut project = Project::new(workspace(), &defaults());
+        assert!(project.layers.check_passes().is_ok());
+        project.layers.colors[2].ops[0].passes = 0;
+        assert_eq!(project.layers.check_passes(), Err(Error::ZeroPasses { layer: LayerKey::Color(2), field: "ops[0].passes".to_owned() }));
+        let mut project = Project::new(workspace(), &defaults());
+        project.layers.colors[0].global_passes = 0;
+        assert_eq!(project.layers.check_passes(), Err(Error::ZeroPasses { layer: LayerKey::Color(0), field: "globalPasses".to_owned() }));
+        let mut project = Project::new(workspace(), &defaults());
+        project.layers.colors[29].image.passes = 0;
+        assert_eq!(project.layers.check_passes(), Err(Error::ZeroPasses { layer: LayerKey::Color(29), field: "image.passes".to_owned() }));
     }
 }
