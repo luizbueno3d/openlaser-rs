@@ -986,6 +986,11 @@ mod tests {
             assert_eq!(project.world_polylines(ObjectId(1), 0.01), Err(GeomError::NonFinite), "{geom:?}");
             assert_eq!(project.bounds(&[ObjectId(1)]), Err(GeomError::NonFinite), "{geom:?}");
         }
+        // A composition that overflows to a pure infinity (no NaN yet) is NonFinite too, not "too many points".
+        let inner = leaf(2, Affine::scale(1e10), ellipse(1.0, 1.0));
+        let project = project_with(vec![leaf(1, Affine::scale(1e300), Geom::Group(vec![inner]))]);
+        assert_eq!(project.world_polylines(ObjectId(1), 0.01), Err(GeomError::NonFinite));
+        assert_eq!(project.bounds(&[ObjectId(1)]), Err(GeomError::NonFinite));
         let mut curve = BezPath::new();
         curve.move_to((0.0, 0.0));
         curve.line_to((1.0, 1.0));
@@ -1010,6 +1015,17 @@ mod tests {
         let b = project.bounds(&[ObjectId(1)]).unwrap().unwrap();
         assert_eq!(b.min, [-1e7, -1e7 + 2.0]);
         assert_eq!(b.max, [1e7, 1e7 + 17.0]);
+        // Paths draw from the same allowance: two 600 k-point paths fit alone, not together.
+        let mut long = BezPath::new();
+        long.move_to((0.0, 0.0));
+        for i in 1..600_000 {
+            long.line_to((f64::from(i), 0.0));
+        }
+        let long = Geom::Path(Arc::new(long));
+        let pair = Geom::Group(vec![leaf(2, Affine::IDENTITY, long.clone()), leaf(3, Affine::IDENTITY, long)]);
+        let project = project_with(vec![leaf(1, Affine::IDENTITY, pair)]);
+        assert_eq!(project.world_polylines(ObjectId(2), 0.01).map(|p| p[0].len()), Ok(600_000));
+        assert_eq!(project.world_polylines(ObjectId(1), 0.01), Err(GeomError::TooManyPoints(openlaser_geom::MAX_FLATTEN_POINTS)));
     }
 
     #[test]

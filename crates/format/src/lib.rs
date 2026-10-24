@@ -136,6 +136,7 @@ pub fn load(bytes: &[u8]) -> Result<Project, Error> {
 }
 
 /// Reads one entry, refusing more bytes than its header declared (the declared sizes are what the limits checked).
+/// zip 9 already fails such a read with `InvalidData`; the `take` keeps the bound if a reader ever stops doing so.
 fn read_entry(file: impl Read, size: usize) -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::with_capacity(size);
     let limit = u64::try_from(size).map_err(|_| Error::LimitExceeded("zip entry is too large".to_owned()))?.saturating_add(1);
@@ -1360,6 +1361,33 @@ mod tests {
         assert_eq!(patched, 2, "local header and central directory");
         let result = load(&bytes).map(|_| ());
         assert!(matches!(result, Err(Error::Corrupt(_))), "{result:?}");
+    }
+
+    #[test]
+    fn olp_refuses_entries_larger_than_declared() {
+        // A stored manifest whose local and central headers both declare one byte less than it holds: the limits
+        // were checked against the declared size, so the extra bytes are refused rather than read (by zip itself,
+        // `Io(InvalidData)`, and by `read_entry` behind it).
+        let json = manifest_json(&project());
+        let mut writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer.start_file("manifest.json", SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+        writer.write_all(&json).unwrap();
+        let mut bytes = writer.finish().unwrap().into_inner();
+        assert!(load(&bytes).is_ok());
+        let declared = u32::try_from(json.len() - 1).unwrap().to_le_bytes();
+        let mut patched = 0;
+        for i in 0..bytes.len() - 4 {
+            let size_at = match &bytes[i..i + 4] {
+                [0x50, 0x4b, 0x03, 0x04] => i + 22,
+                [0x50, 0x4b, 0x01, 0x02] => i + 24,
+                _ => continue,
+            };
+            bytes[size_at..size_at + 4].copy_from_slice(&declared);
+            patched += 1;
+        }
+        assert_eq!(patched, 2, "local header and central directory");
+        let result = load(&bytes).map(|_| ());
+        assert!(matches!(result, Err(Error::Corrupt(_)) | Err(Error::Io(_))), "{result:?}");
     }
 
     #[test]
