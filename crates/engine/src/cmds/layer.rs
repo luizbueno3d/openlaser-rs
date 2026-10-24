@@ -416,7 +416,10 @@ fn cut_settings_set(s: &mut Session, p: CutSettingsParams) -> Result<Value, Engi
     s.edit(label, coalesce.as_deref(), |project, _| match key {
         LayerKey::Color(i) => {
             let Some(l) = project.color_layer_mut(i) else { return Err(EngineError::bad(ID, "/layer", format!("the project has no layer {key}"))) };
-            apply_color(&p, l)
+            apply_color(&p, l)?;
+            // Defence in depth behind the per-field `passes()` range check: the table the edit leaves must pass
+            // the same `check_passes` `format` and the planner refuse (a zero-pass layer plans nothing).
+            project.layers.check_passes().map_err(geomx::doc_error)
         }
         LayerKey::Tool(w) => {
             let Some(t) = project.layers.tools.iter_mut().find(|t| t.which == w) else {

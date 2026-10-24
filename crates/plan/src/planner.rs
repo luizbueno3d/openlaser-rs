@@ -546,6 +546,9 @@ fn kind_name(k: DeviceKind) -> &'static str {
 }
 
 pub(crate) fn plan(project: &Project, machine: &MachineProfile, opts: &PlanOptions) -> Result<JobPlan, Error> {
+    // A pass count of 0 would plan no sections for the layer's shapes, and nothing may be dropped silently:
+    // the same `check_passes` `format` applies on load/save refuses the job outright (doc::Error::ZeroPasses).
+    project.layers.check_passes()?;
     // A tolerance this build cannot use is refused by `finish` (an `unsupported` fact); the plan is still made, at
     // the default, so every other fact is reported with it. It is never silently replaced or raised.
     let requested = opts.flatten_tol_mm;

@@ -249,6 +249,29 @@ fn plan_orders_layers_sub_layers_passes_and_global_passes() {
     assert_eq!(plan.frame.len(), 1);
 }
 
+/// A `passes`, `globalPasses` or `image.passes` of 0 would plan no sections for the layer's shapes, and nothing is
+/// ever dropped silently: `plan` refuses it through `CutTable::check_passes` (`doc::Error::ZeroPasses`), the same
+/// check `format` applies on load/save. `layer.cutSettings.set` refuses the same values at edit time.
+#[test]
+fn plan_refuses_a_zero_pass_layer() {
+    let m = machine();
+    let refuses = |p: &Project, field: &str| match make_plan(p, &m, &opts(FrameStyle::Contour)) {
+        Err(openlaser_plan::Error::Doc(openlaser_doc::Error::ZeroPasses { layer, field: got })) => {
+            assert_eq!((layer, got.as_str()), (C2, field), "the refusal names the layer and the field");
+        }
+        other => panic!("{field}: a zero-pass layer must be refused, got {other:?}"),
+    };
+    let mut p = project(&m, vec![rect(1, C2, 0.0, 0.0, 10.0, 10.0)]);
+    layer_mut(&mut p, 2).ops[0].passes = 0;
+    refuses(&p, "ops[0].passes");
+    let mut p = project(&m, vec![rect(1, C2, 0.0, 0.0, 10.0, 10.0)]);
+    layer_mut(&mut p, 2).global_passes = 0;
+    refuses(&p, "globalPasses");
+    let mut p = project(&m, vec![rect(1, C2, 0.0, 0.0, 10.0, 10.0)]);
+    layer_mut(&mut p, 2).image.passes = 0;
+    refuses(&p, "image.passes");
+}
+
 #[test]
 fn plan_fill_hatches_closed_shapes_and_notes_open_ones() {
     let m = machine();

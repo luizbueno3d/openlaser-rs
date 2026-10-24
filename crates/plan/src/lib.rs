@@ -153,14 +153,18 @@ pub struct PlanFacts {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("{0}")]
+    Doc(#[from] openlaser_doc::Error),
     #[error("geometry: {0}")]
     Geom(#[from] openlaser_geom::Error),
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
 }
 
-/// Plans a project for a machine. `Err` only for a geometry failure that is not a refusal (a stubbed or broken
-/// geometry kernel); everything about the design itself becomes a section, a frame path or a fact.
+/// Plans a project for a machine. `Err` for a layer that would plan nothing for its shapes
+/// ([`openlaser_doc::CutTable::check_passes`]: a zero `passes`, `globalPasses` or `image.passes`, the same check
+/// `format` applies on load/save) and for a geometry failure that is not a refusal (a stubbed or broken geometry
+/// kernel); everything else about the design becomes a section, a frame path or a fact.
 pub fn plan(project: &Project, machine: &MachineProfile, opts: &PlanOptions) -> Result<JobPlan, Error> {
     planner::plan(project, machine, opts)
 }

@@ -880,6 +880,8 @@ fn layers_and_cut_settings() {
         (json!({ "layer": 5, "galvo": { "speedMmS": 0 } }), "/galvo/speedMmS"),
         (json!({ "layer": 5, "fill": { "intervalMm": 0 } }), "/fill/intervalMm"),
         (json!({ "layer": 5, "passes": 0 }), "/passes"),
+        (json!({ "layer": 5, "globalPasses": 0 }), "/globalPasses"),
+        (json!({ "layer": 5, "image": { "passes": 0 } }), "/image/passes"),
         (json!({ "layer": 5, "subLayer": 3 }), "/subLayer"),
         (json!({ "layer": "T1", "output": true }), "/layer"),
         (json!({ "layer": 30 }), "/layer"),
