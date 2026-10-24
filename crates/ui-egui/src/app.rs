@@ -783,5 +783,5 @@ pub(crate) fn show_in_window_menus(requested: bool, macos: bool) -> bool {
 }
 
 #[cfg(test)]
-#[path = "app_tests.rs"]
+#[path = "tests/app_kittests.rs"]
 mod tests;
