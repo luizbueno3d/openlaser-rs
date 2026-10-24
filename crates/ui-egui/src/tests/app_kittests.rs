@@ -459,8 +459,8 @@ fn kittest_palette_has_30_plus_tools() {
         let mut h = harness_with(Options { size: egui::vec2(width, 700.0), ..Options::default() });
         h.run();
         let mut previous = f32::NEG_INFINITY;
-        for slot in 0..32 {
-            let label = crate::panels::swatch_label(crate::panels::slot_key(slot).unwrap());
+        let expected: Vec<String> = (0..30).map(|n| format!("Layer {n:02}")).chain(["T1".to_owned(), "T2".to_owned()]).collect();
+        for label in expected {
             let rect = h.get_by_label(&label).rect();
             assert!(rect.left() >= 0.0 && rect.right() <= width, "{label} is off-window at {width}: {rect:?}");
             assert!(rect.width() >= 12.0 && rect.height() >= 20.0, "{label} too small at {width}: {rect:?}");
@@ -784,7 +784,8 @@ const STATES: [MachineState; 9] = [
 #[test]
 fn kittest_stop_always_visible_and_enabled() {
     for state in STATES {
-        let active = state_requires_stop(&state);
+        // Spelled out here, not taken from the code under test (UI §7.1: framing, marking, stopping, not confirmed).
+        let active = matches!(state, MachineState::Framing | MachineState::Running { .. } | MachineState::Stopping | MachineState::StopNotConfirmed);
         for layout in ["default", "laser closed", "laser floated", "modal open"] {
             for ppp in [1.0, 2.0] {
                 for no_human in [true, false] {
@@ -1243,7 +1244,13 @@ fn canvas_draws_rulers_grid_field_work_area_and_origin() {
         // Rulers: numeric labels along the top strip (one y) and the left strip (one x).
         let labels: Vec<egui::Pos2> = shapes
             .iter()
-            .filter_map(|s| if let egui::Shape::Text(t) = &s.shape { t.galley.text().parse::<f64>().is_ok().then_some(t.pos) } else { None })
+            .filter_map(|s| match &s.shape {
+                // Ruler labels only (monospace 9 pt): the palette's "00".."29" are numbers too.
+                egui::Shape::Text(t) if t.galley.job.sections.first().is_some_and(|f| f.format.font_id == egui::FontId::monospace(9.0)) => {
+                    t.galley.text().parse::<f64>().is_ok().then_some(t.pos)
+                }
+                _ => None,
+            })
             .collect();
         let most = |key: &dyn Fn(&egui::Pos2) -> i32| {
             let mut counts = std::collections::BTreeMap::new();

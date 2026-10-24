@@ -530,8 +530,9 @@ mod tests {
         }
     }
 
+    /// Runs now and bites at I2: with WP0's empty registry there is nothing to compare yet; once WP6 registers its
+    /// commands, every catalogue shortcut must equal the registry's and no menu row may be human-only.
     #[test]
-    #[ignore = "needs I2"]
     fn catalog_shortcuts_match_registry() {
         for row in CATALOG.iter().filter(|row| !is_separator(row) && !is_hw_row(row)) {
             if let Some(spec) = openlaser_engine::registry().find(row.id) {

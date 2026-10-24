@@ -325,7 +325,7 @@ mod tests {
         .unwrap();
         signal_hook::low_level::raise(signal_hook::consts::SIGUSR2).unwrap();
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Step::Stop(STOP_BUDGET));
-        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Step::Exit(EXIT_SIGNAL));
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Step::Exit(143));
         assert_eq!(STOP_SIGNALS, [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP]);
     }
 
@@ -339,7 +339,7 @@ mod tests {
         assert!(rx.recv_timeout(Duration::from_millis(50)).is_err(), "nothing happens before a signal");
         flag.store(true, Ordering::SeqCst);
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Step::Stop(STOP_BUDGET));
-        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Step::Exit(EXIT_SIGNAL));
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Step::Exit(143));
 
         let (tx, rx) = mpsc::channel::<Step>();
         let exit_tx = tx.clone();
