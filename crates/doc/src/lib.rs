@@ -10,7 +10,10 @@ pub use layers::{
     ColorLayer, CutMode, CutOp, CutTable, FillParams, GalvoParams, GalvoTimings, GantryParams, ImageCut, ImageMode, LayerDefaults, ToolLayer, Wobble,
 };
 pub use palette::{COLOR_LAYERS, PALETTE, TOOL_COLORS};
-pub use project::{AssetId, BitmapData, DeviceHint, DeviceKind, Geom, JobSettings, Project, Selection, Shape, Workspace, WorkspaceOrigin, default_layer_name};
+pub use project::{
+    AssetId, BitmapData, DeviceHint, DeviceKind, Geom, JobSettings, MAX_ARC_CUBICS_PER_QUARTER, MAX_NEXT_ID, Project, Selection, Shape, Workspace,
+    WorkspaceOrigin, default_layer_name,
+};
 
 // Re-exports for callers that name these through the model (SPEC §3.0).
 pub use kurbo::{Affine, BezPath};
@@ -28,6 +31,9 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum Error {
+    /// WP1 addition: `Project::alloc_id` cannot hand out a new id (`next_id` is 0 or would pass `MAX_NEXT_ID`).
+    #[error("no object id left to allocate (next id {next_id}; ids run 1..2^53)")]
+    IdsExhausted { next_id: u64 },
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
 }

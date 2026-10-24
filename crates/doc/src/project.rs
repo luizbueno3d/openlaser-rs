@@ -3,13 +3,15 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use kurbo::{Affine, BezPath, Ellipse, Point, Rect, RoundedRect, Shape as KurboShape};
-use openlaser_geom::{DEFAULT_FLATTEN_TOL_MM, Polyline, bounds_of, flatten};
+use std::f64::consts::FRAC_PI_2;
+
+use kurbo::{Affine, BezPath, CubicBez, ParamCurveExtrema, PathEl, Point, QuadBez, Rect};
+use openlaser_geom::{DEFAULT_FLATTEN_TOL_MM, Error as GeomError, PointBudget, Polyline, check_tolerance, flatten_with_budget};
 use openlaser_types::{Bounds, FrameSource, FrameStyle, LayerKey, MachineId, Mm, ObjectId, Percent};
 use serde::{Deserialize, Serialize};
 
-use crate::COLOR_LAYERS;
 use crate::layers::{ColorLayer, CutMode, CutOp, CutTable, ImageCut, ImageMode, LayerDefaults, ToolLayer};
+use crate::{COLOR_LAYERS, Error};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Project {
@@ -120,6 +122,10 @@ pub struct Selection {
     pub key: Option<ObjectId>,
 }
 
+/// The largest `next_id` (2^53). Ids stay exact as JSON numbers read by JavaScript and MCP clients; `format`
+/// refuses a project whose `nextId` is above it and [`Project::alloc_id`] refuses to pass it.
+pub const MAX_NEXT_ID: u64 = 1 << 53;
+
 impl Project {
     /// 30 colour layers + T1/T2, next_id = 1.
     pub fn new(workspace: Workspace, defaults: &LayerDefaults) -> Self {
@@ -138,10 +144,16 @@ impl Project {
         }
     }
 
-    pub fn alloc_id(&mut self) -> ObjectId {
+    /// Hands out `next_id` and advances it. Ids are never 0, never repeated and never above [`MAX_NEXT_ID`]: a
+    /// `next_id` of 0, or one that would have to pass [`MAX_NEXT_ID`], is refused ([`Error::IdsExhausted`]) instead
+    /// of wrapping or saturating into a duplicate id.
+    pub fn alloc_id(&mut self) -> Result<ObjectId, Error> {
+        if self.next_id == 0 || self.next_id >= MAX_NEXT_ID {
+            return Err(Error::IdsExhausted { next_id: self.next_id });
+        }
         let id = ObjectId(self.next_id);
-        self.next_id = self.next_id.saturating_add(1);
-        id
+        self.next_id += 1;
+        Ok(id)
     }
 
     pub fn shape(&self, id: ObjectId) -> Option<&Arc<Shape>> {
@@ -165,17 +177,33 @@ impl Project {
     }
 
     /// Flattened world polylines (design mm) of one shape, groups expanded; bitmaps give their outline rectangle.
-    pub fn world_polylines(&self, id: ObjectId, tol_mm: f64) -> Result<Vec<Polyline>, openlaser_geom::Error> {
+    ///
+    /// The tolerance holds in world space: every vertex lies on the shape's true outline (parametric shapes are
+    /// sampled from their exact ellipse arcs, paths are transformed before flattening) and every point of the
+    /// outline is within `tol_mm` of the polylines, whatever the transforms. Refuses a bad tolerance
+    /// ([`GeomError::BadTolerance`]), a transform or coordinate that is not finite ([`GeomError::NonFinite`]) and
+    /// more than [`openlaser_geom::MAX_FLATTEN_POINTS`] points for the whole shape, groups included
+    /// ([`GeomError::TooManyPoints`], checked before the points are stored). An unknown id gives no polylines.
+    pub fn world_polylines(&self, id: ObjectId, tol_mm: f64) -> Result<Vec<Polyline>, GeomError> {
+        let tol = check_tolerance(tol_mm)?;
         let Some(shape) = find_shape(&self.shapes, id) else { return Ok(Vec::new()) };
+        let mut budget = PointBudget::default();
         let mut out = Vec::new();
-        append_world_polylines(shape, Affine::IDENTITY, tol_mm, &mut out)?;
+        append_world_polylines(shape, Affine::IDENTITY, tol, &mut budget, &mut out)?;
         Ok(out)
     }
 
-    pub fn bounds(&self, ids: &[ObjectId]) -> Result<Option<Bounds>, openlaser_geom::Error> {
-        let polys: Vec<Polyline> =
-            ids.iter().map(|id| self.world_polylines(*id, DEFAULT_FLATTEN_TOL_MM)).collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect();
-        Ok(bounds_of(&polys))
+    /// Exact bounds (design mm) of the shapes' true outlines, groups expanded, computed without flattening (curve
+    /// and arc extrema are solved), so it holds every polyline [`Self::world_polylines`] returns at any tolerance.
+    /// Unknown ids are skipped; refuses a transform or coordinate that is not finite ([`GeomError::NonFinite`]).
+    pub fn bounds(&self, ids: &[ObjectId]) -> Result<Option<Bounds>, GeomError> {
+        let mut acc = None;
+        for id in ids {
+            if let Some(shape) = find_shape(&self.shapes, *id) {
+                append_world_bounds(shape, Affine::IDENTITY, &mut acc)?;
+            }
+        }
+        Ok(acc)
     }
 
     /// Removes unused layer entries, then appends newly used layers in draw traversal order. Groups do not use
@@ -193,33 +221,174 @@ impl Project {
 
 impl Geom {
     /// Parametric shapes stay parametric until Convert to Path.
+    ///
+    /// Ellipse arcs and rounded corners are cubic Béziers built per quarter turn (at most
+    /// [`MAX_ARC_CUBICS_PER_QUARTER`] each, within `max(0.01 mm, 1e-9 × radius)` of the true arc), so the path never
+    /// has more than 42 elements (polygons: `sides + 1`) and its control points never leave the shape's own
+    /// bounding box, so finite dimensions always give finite coordinates.
     pub fn to_bez(&self) -> BezPath {
         match self {
             Geom::Path(path) => path.as_ref().clone(),
-            Geom::Rect { w, h, corner_radius } => {
-                let (hw, hh) = (w.get() / 2.0, h.get() / 2.0);
-                let rect = Rect::new(-hw, -hh, hw, hh).abs();
-                let radius = corner_radius.get().max(0.0).min(rect.width().abs() / 2.0).min(rect.height().abs() / 2.0);
-                RoundedRect::from_rect(rect, radius).to_path(curve_tolerance(rect.width().abs().max(rect.height().abs())))
-            }
-            Geom::Ellipse { rx, ry } => {
-                let rx = rx.get().abs();
-                let ry = ry.get().abs();
-                Ellipse::new(Point::ORIGIN, (rx, ry), 0.0).to_path(curve_tolerance(rx.max(ry)))
-            }
-            Geom::Polygon { sides, radius } => polygon_path(*sides, radius.get()),
-            Geom::Bitmap(bitmap) => {
-                let [w, h] = bitmap.size_mm;
-                let rect = Rect::new(-w / 2.0, -h / 2.0, w / 2.0, h / 2.0).abs();
-                rect.to_path(curve_tolerance(rect.width().abs().max(rect.height().abs())))
-            }
             Geom::Group(_) => BezPath::new(),
+            geom => outline(geom).map(|pieces| outline_bez(&pieces)).unwrap_or_default(),
         }
     }
 }
 
+/// Upper bound on the cubic segments [`Geom::to_bez`] uses for one quarter of an ellipse or one rounded corner.
+pub const MAX_ARC_CUBICS_PER_QUARTER: usize = 16;
+
+/// The cubic quarter-circle approximation's radial error is at most `ARC_ERROR_COEF × θ⁶` for a segment of θ ≤ 90°
+/// (1.8142e-5 at 90°, the worst case; measured), scaled by the larger radius for an ellipse.
+const ARC_ERROR_COEF: f64 = 1.82e-5;
+
 fn curve_tolerance(size: f64) -> f64 {
     DEFAULT_FLATTEN_TOL_MM.max(if size.is_finite() { size * 1e-9 } else { DEFAULT_FLATTEN_TOL_MM })
+}
+
+/// One piece of a parametric outline in object space. The outline is a closed loop through its pieces in order;
+/// a straight edge joins one piece's end to the next piece's start.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Piece {
+    /// A vertex.
+    Corner(Point),
+    /// The quarter of the axis-aligned ellipse (`center`, `rx`, `ry`) from angle q·90° to (q+1)·90°, counter-clockwise
+    /// (Y up).
+    Quarter { center: Point, rx: f64, ry: f64, q: u8 },
+}
+
+impl Piece {
+    fn start(self) -> Point {
+        match self {
+            Piece::Corner(p) => p,
+            Piece::Quarter { center, rx, ry, q } => on_quarter(center, rx, ry, q, (1.0, 0.0)),
+        }
+    }
+}
+
+/// `(cos a, sin a)` of a first-quadrant angle, rotated into quadrant `q` with exact sign and swap operations.
+fn rotate_quadrant(q: u8, (c, s): (f64, f64)) -> (f64, f64) {
+    match q % 4 {
+        0 => (c, s),
+        1 => (-s, c),
+        2 => (-c, -s),
+        _ => (s, -c),
+    }
+}
+
+fn on_quarter(center: Point, rx: f64, ry: f64, q: u8, unit: (f64, f64)) -> Point {
+    let (x, y) = rotate_quadrant(q, unit);
+    Point::new(center.x + rx * x, center.y + ry * y)
+}
+
+/// The unit-circle point `j/m` of the way through the first quadrant: exactly (1, 0) and (0, 1) at the ends.
+fn unit_at(j: usize, m: usize) -> (f64, f64) {
+    if j == 0 {
+        (1.0, 0.0)
+    } else if j >= m {
+        (0.0, 1.0)
+    } else {
+        let a = FRAC_PI_2 * j as f64 / m as f64;
+        (a.cos(), a.sin())
+    }
+}
+
+/// The outline of a parametric shape (`None` for paths and groups). Polygons with fewer than 3 sides are empty.
+fn outline(geom: &Geom) -> Option<Vec<Piece>> {
+    match geom {
+        Geom::Path(_) | Geom::Group(_) => None,
+        Geom::Rect { w, h, corner_radius } => Some(rect_outline(w.get().abs() / 2.0, h.get().abs() / 2.0, corner_radius.get())),
+        Geom::Ellipse { rx, ry } => {
+            let (rx, ry) = (rx.get().abs(), ry.get().abs());
+            Some((0..4).map(|q| Piece::Quarter { center: Point::ORIGIN, rx, ry, q }).collect())
+        }
+        Geom::Polygon { sides, radius } => Some(polygon_outline(*sides, radius.get().abs())),
+        Geom::Bitmap(bitmap) => Some(rect_outline(bitmap.size_mm[0].abs() / 2.0, bitmap.size_mm[1].abs() / 2.0, 0.0)),
+    }
+}
+
+/// A centred rectangle; the corner radius is limited to half the shorter side (a negative one means square
+/// corners). Starts at the bottom-left corner (x0, y0) and runs (x1, y0), (x1, y1), (x0, y1), as kurbo's `Rect`
+/// and `RoundedRect` paths do.
+fn rect_outline(hw: f64, hh: f64, corner_radius: f64) -> Vec<Piece> {
+    let r = corner_radius.max(0.0).min(hw).min(hh);
+    if r > 0.0 {
+        vec![
+            Piece::Quarter { center: Point::new(-hw + r, -hh + r), rx: r, ry: r, q: 2 },
+            Piece::Quarter { center: Point::new(hw - r, -hh + r), rx: r, ry: r, q: 3 },
+            Piece::Quarter { center: Point::new(hw - r, hh - r), rx: r, ry: r, q: 0 },
+            Piece::Quarter { center: Point::new(-hw + r, hh - r), rx: r, ry: r, q: 1 },
+        ]
+    } else {
+        vec![Piece::Corner(Point::new(-hw, -hh)), Piece::Corner(Point::new(hw, -hh)), Piece::Corner(Point::new(hw, hh)), Piece::Corner(Point::new(-hw, hh))]
+    }
+}
+
+/// A regular polygon with its first vertex straight up.
+fn polygon_outline(sides: u16, radius: f64) -> Vec<Piece> {
+    if sides < 3 {
+        return Vec::new();
+    }
+    (0..sides)
+        .map(|i| {
+            let angle = FRAC_PI_2 + std::f64::consts::TAU * f64::from(i) / f64::from(sides);
+            Piece::Corner(Point::new(radius * angle.cos(), radius * angle.sin()))
+        })
+        .collect()
+}
+
+/// Cubic segments per quarter turn for an arc of the given (larger) radius at `curve_tolerance(radius)`.
+fn arc_cubics_per_quarter(radius: f64) -> usize {
+    let theta = (curve_tolerance(radius) / (ARC_ERROR_COEF * radius)).powf(1.0 / 6.0);
+    let m = (FRAC_PI_2 / theta).ceil();
+    if m >= MAX_ARC_CUBICS_PER_QUARTER as f64 {
+        MAX_ARC_CUBICS_PER_QUARTER
+    } else if m >= 1.0 {
+        m as usize
+    } else {
+        1
+    }
+}
+
+fn outline_bez(pieces: &[Piece]) -> BezPath {
+    let mut path = BezPath::new();
+    let Some(first) = pieces.first() else { return path };
+    let mut current = first.start();
+    path.move_to(current);
+    for (i, piece) in pieces.iter().enumerate() {
+        let start = piece.start();
+        // Every vertex after the first is drawn to (as kurbo's Rect and the old polygon path do); an arc only gets a
+        // joining edge when it does not already start where the outline is.
+        let joins = match piece {
+            Piece::Corner(_) => i > 0,
+            Piece::Quarter { .. } => start != current,
+        };
+        if joins {
+            path.line_to(start);
+        }
+        current = match *piece {
+            Piece::Corner(p) => p,
+            Piece::Quarter { center, rx, ry, q } => {
+                let m = arc_cubics_per_quarter(rx.max(ry));
+                let k = 4.0 / 3.0 * (FRAC_PI_2 / m as f64 / 4.0).tan();
+                // The control points of a quarter-aligned circle segment stay inside the unit square; the clamp
+                // only removes rounding noise, so the shape's own bounding box holds every control point.
+                let unit = |x: f64, y: f64| (x.clamp(-1.0, 1.0), y.clamp(-1.0, 1.0));
+                for j in 0..m {
+                    let (c0, s0) = unit_at(j, m);
+                    let (c1, s1) = unit_at(j + 1, m);
+                    path.curve_to(
+                        on_quarter(center, rx, ry, q, unit(c0 - k * s0, s0 + k * c0)),
+                        on_quarter(center, rx, ry, q, unit(c1 + k * s1, s1 - k * c1)),
+                        on_quarter(center, rx, ry, q, (c1, s1)),
+                    );
+                }
+                on_quarter(center, rx, ry, q, (0.0, 1.0))
+            }
+        };
+    }
+    path.close_path();
+    path
 }
 
 /// "C00".."C29", "T1", "T2".
@@ -283,36 +452,221 @@ fn find_shape(shapes: &[Arc<Shape>], id: ObjectId) -> Option<&Arc<Shape>> {
     None
 }
 
-fn append_world_polylines(shape: &Shape, parent: Affine, tol_mm: f64, out: &mut Vec<Polyline>) -> Result<(), openlaser_geom::Error> {
-    let xform = parent * shape.xform;
+/// `parent * xform`, refused when the composition is not finite (deep groups of large scales overflow).
+fn compose(parent: Affine, xform: Affine) -> Result<Affine, GeomError> {
+    let world = parent * xform;
+    if world.as_coeffs().iter().all(|v| v.is_finite()) { Ok(world) } else { Err(GeomError::NonFinite) }
+}
+
+fn finite_point(p: Point) -> Result<Point, GeomError> {
+    if p.x.is_finite() && p.y.is_finite() { Ok(p) } else { Err(GeomError::NonFinite) }
+}
+
+fn append_world_polylines(shape: &Shape, parent: Affine, tol: f64, budget: &mut PointBudget, out: &mut Vec<Polyline>) -> Result<(), GeomError> {
+    let xform = compose(parent, shape.xform)?;
     match &shape.geom {
         Geom::Group(children) => {
             for child in children {
-                append_world_polylines(child, xform, tol_mm, out)?;
+                append_world_polylines(child, xform, tol, budget, out)?;
             }
         }
-        geom => out.extend(flatten(&geom.to_bez(), tol_mm)?.into_iter().map(|poly| poly.transformed(&xform))),
+        Geom::Path(path) => {
+            // Flatten in world space so the tolerance holds after scaling.
+            let mut world = path.as_ref().clone();
+            world.apply_affine(xform);
+            for el in world.elements() {
+                for p in element_points(el) {
+                    finite_point(p)?;
+                }
+            }
+            out.extend(flatten_with_budget(&world, tol, budget)?);
+        }
+        geom => {
+            if let Some(pieces) = outline(geom) {
+                append_outline_polyline(&pieces, xform, tol, budget, out)?;
+            }
+        }
     }
     Ok(())
 }
 
-fn polygon_path(sides: u16, radius: f64) -> BezPath {
-    let mut path = BezPath::new();
-    if sides < 3 || !radius.is_finite() {
-        return path;
+fn element_points(el: &PathEl) -> Vec<Point> {
+    match *el {
+        PathEl::MoveTo(a) | PathEl::LineTo(a) => vec![a],
+        PathEl::QuadTo(a, b) => vec![a, b],
+        PathEl::CurveTo(a, b, c) => vec![a, b, c],
+        PathEl::ClosePath => Vec::new(),
     }
-    let radius = radius.abs();
-    for i in 0..sides {
-        let angle = std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * f64::from(i) / f64::from(sides);
-        let point = Point::new(radius * angle.cos(), radius * angle.sin());
-        if i == 0 {
-            path.move_to(point);
-        } else {
-            path.line_to(point);
+}
+
+/// Largest singular value of the 2×2 matrix [[p, q], [r, s]], scaled first so the squares cannot overflow.
+fn spectral_norm(p: f64, q: f64, r: f64, s: f64) -> f64 {
+    let scale = p.abs().max(q.abs()).max(r.abs()).max(s.abs());
+    if scale == 0.0 || !scale.is_finite() {
+        return scale;
+    }
+    let (p, q, r, s) = (p / scale, q / scale, r / scale, s / scale);
+    scale * ((p + s).hypot(r - q) + (p - s).hypot(r + q)) / 2.0
+}
+
+/// Chords per quarter turn of the world image of an axis-aligned ellipse arc (`rx`, `ry`) under `xform`, so that
+/// no chord is more than `tol` from the arc. The world arc is P(θ) = W + L·(rx cos θ, ry sin θ); |P''| is at most
+/// R = σ_max(L·diag(rx, ry)), and a chord over a parameter step h is within R·h²/8 of the arc.
+fn world_chords_per_quarter(xform: Affine, rx: f64, ry: f64, tol: f64, budget: &PointBudget) -> Result<usize, GeomError> {
+    let [a, b, c, d, _, _] = xform.as_coeffs();
+    let r = spectral_norm(a * rx, c * ry, b * rx, d * ry);
+    if r.is_nan() {
+        return Err(GeomError::NonFinite);
+    }
+    let m = (FRAC_PI_2 * (r / (8.0 * tol)).sqrt()).ceil().max(1.0);
+    // `m` is infinite when R is: refused like any other count above the allowance.
+    if m <= budget.remaining() as f64 { Ok(m as usize) } else { Err(GeomError::TooManyPoints(budget.limit())) }
+}
+
+fn push_world(points: &mut Vec<[f64; 2]>, p: Point) -> Result<(), GeomError> {
+    let p = finite_point(p)?;
+    let p = [p.x, p.y];
+    if points.last() != Some(&p) {
+        points.push(p);
+    }
+    Ok(())
+}
+
+/// One closed polyline: corners exactly, quarter arcs sampled on the true arc in world space.
+fn append_outline_polyline(pieces: &[Piece], xform: Affine, tol: f64, budget: &mut PointBudget, out: &mut Vec<Polyline>) -> Result<(), GeomError> {
+    if pieces.is_empty() {
+        return Ok(());
+    }
+    // Count first, take the allowance, then build.
+    let mut chords = Vec::with_capacity(pieces.len());
+    let mut total = 1usize; // the closing point
+    for piece in pieces {
+        let (m, n) = match *piece {
+            Piece::Corner(_) => (0, 1),
+            Piece::Quarter { rx, ry, .. } => {
+                let m = world_chords_per_quarter(xform, rx, ry, tol, budget)?;
+                (m, m.saturating_add(1))
+            }
+        };
+        chords.push(m);
+        total = total.checked_add(n).ok_or(GeomError::TooManyPoints(budget.limit()))?;
+    }
+    budget.take(total)?;
+    let mut points = Vec::with_capacity(total);
+    for (piece, m) in pieces.iter().zip(chords) {
+        match *piece {
+            Piece::Corner(p) => push_world(&mut points, xform * p)?,
+            Piece::Quarter { center, rx, ry, q } => {
+                for j in 0..=m {
+                    push_world(&mut points, xform * on_quarter(center, rx, ry, q, unit_at(j, m)))?;
+                }
+            }
         }
     }
-    path.close_path();
-    path
+    if let Some(&first) = points.first()
+        && (points.len() == 1 || points.last() != Some(&first))
+    {
+        points.push(first);
+    }
+    out.push(Polyline(points));
+    Ok(())
+}
+
+fn include(acc: &mut Option<Bounds>, p: Point) -> Result<(), GeomError> {
+    let p = finite_point(p)?;
+    *acc = Some(match *acc {
+        None => Bounds { min: [p.x, p.y], max: [p.x, p.y] },
+        Some(b) => Bounds { min: [b.min[0].min(p.x), b.min[1].min(p.y)], max: [b.max[0].max(p.x), b.max[1].max(p.y)] },
+    });
+    Ok(())
+}
+
+fn include_rect(acc: &mut Option<Bounds>, r: Rect) -> Result<(), GeomError> {
+    include(acc, Point::new(r.x0, r.y0))?;
+    include(acc, Point::new(r.x1, r.y1))
+}
+
+fn append_world_bounds(shape: &Shape, parent: Affine, acc: &mut Option<Bounds>) -> Result<(), GeomError> {
+    let xform = compose(parent, shape.xform)?;
+    match &shape.geom {
+        Geom::Group(children) => {
+            for child in children {
+                append_world_bounds(child, xform, acc)?;
+            }
+        }
+        Geom::Path(path) => path_bounds(path, xform, acc)?,
+        geom => {
+            for piece in outline(geom).unwrap_or_default() {
+                match piece {
+                    Piece::Corner(p) => include(acc, xform * p)?,
+                    Piece::Quarter { center, rx, ry, q } => quarter_bounds(center, rx, ry, q, xform, acc)?,
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Exact extents of a world quarter arc: its ends, plus the angles where x or y is extreme when they fall
+/// inside the quarter.
+fn quarter_bounds(center: Point, rx: f64, ry: f64, q: u8, xform: Affine, acc: &mut Option<Bounds>) -> Result<(), GeomError> {
+    include(acc, xform * on_quarter(center, rx, ry, q, (1.0, 0.0)))?;
+    include(acc, xform * on_quarter(center, rx, ry, q, (0.0, 1.0)))?;
+    let [a, b, c, d, _, _] = xform.as_coeffs();
+    // World P(θ) = W + U cos θ + V sin θ with U = L·(rx, 0), V = L·(0, ry); a coordinate u cos θ + v sin θ is
+    // extreme at θ = atan2(v, u) and that + π.
+    let lo = FRAC_PI_2 * f64::from(q % 4);
+    for (u, v) in [(a * rx, c * ry), (b * rx, d * ry)] {
+        let theta = v.atan2(u);
+        for t in [theta, theta + std::f64::consts::PI] {
+            let t = t.rem_euclid(std::f64::consts::TAU);
+            if t >= lo && t <= lo + FRAC_PI_2 {
+                include(acc, xform * Point::new(center.x + rx * t.cos(), center.y + ry * t.sin()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Bounds of what [`openlaser_geom::flatten`] draws for the world path: bare `MoveTo`s add nothing, `M p Z` adds
+/// `p`, curves add their exact extrema.
+fn path_bounds(path: &BezPath, xform: Affine, acc: &mut Option<Bounds>) -> Result<(), GeomError> {
+    let mut last: Option<Point> = None;
+    let mut start: Option<Point> = None;
+    for el in path.elements() {
+        match *el {
+            PathEl::MoveTo(p) => {
+                let p = finite_point(xform * p)?;
+                last = Some(p);
+                start = Some(p);
+            }
+            PathEl::LineTo(p) => {
+                let p = xform * p;
+                include(acc, last.or(start).unwrap_or(p))?;
+                include(acc, p)?;
+                last = Some(p);
+            }
+            PathEl::QuadTo(p1, p2) => {
+                let (p1, p2) = (finite_point(xform * p1)?, finite_point(xform * p2)?);
+                let p0 = finite_point(last.or(start).unwrap_or(p2))?;
+                include_rect(acc, QuadBez::new(p0, p1, p2).bounding_box())?;
+                last = Some(p2);
+            }
+            PathEl::CurveTo(p1, p2, p3) => {
+                let (p1, p2, p3) = (finite_point(xform * p1)?, finite_point(xform * p2)?, finite_point(xform * p3)?);
+                let p0 = finite_point(last.or(start).unwrap_or(p3))?;
+                include_rect(acc, CubicBez::new(p0, p1, p2, p3).bounding_box())?;
+                last = Some(p3);
+            }
+            PathEl::ClosePath => {
+                if let Some(s) = start {
+                    include(acc, s)?;
+                }
+                last = start;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -393,11 +747,313 @@ mod tests {
         assert!(project.shape(ObjectId(2)).is_some());
     }
 
+    fn leaf(id: u64, xform: Affine, geom: Geom) -> Arc<Shape> {
+        Arc::new(Shape {
+            id: ObjectId(id),
+            name: None,
+            layer: LayerKey::Color(0),
+            xform,
+            geom,
+            locked: false,
+            power_scale: Percent::new(100.0).unwrap(),
+            priority: 0,
+        })
+    }
+
+    fn mm(v: f64) -> Mm {
+        Mm::new(v).unwrap()
+    }
+
+    fn ellipse(rx: f64, ry: f64) -> Geom {
+        Geom::Ellipse { rx: mm(rx), ry: mm(ry) }
+    }
+
+    fn project_with(shapes: Vec<Arc<Shape>>) -> Project {
+        let mut project = Project::new(workspace(), &defaults());
+        project.shapes = shapes;
+        project
+    }
+
+    fn bez_is_finite(path: &BezPath) -> bool {
+        path.elements().iter().flat_map(element_points).all(|p| p.x.is_finite() && p.y.is_finite())
+    }
+
+    fn dist_to_polylines(polys: &[Polyline], p: Point) -> f64 {
+        let mut best = f64::INFINITY;
+        for poly in polys {
+            for w in poly.0.windows(2) {
+                let (a, b) = (Point::new(w[0][0], w[0][1]), Point::new(w[1][0], w[1][1]));
+                let d = b - a;
+                let len2 = d.hypot2();
+                let t = if len2 > 0.0 { ((p - a).dot(d) / len2).clamp(0.0, 1.0) } else { 0.0 };
+                best = best.min(p.distance(a + d * t));
+            }
+        }
+        best
+    }
+
+    /// Points on the true world outline of an ellipse or rounded rectangle (corner arcs and straight edges).
+    fn true_outline(geom: &Geom, xform: Affine, samples: usize) -> Vec<Point> {
+        let mut out = Vec::new();
+        let pieces = outline(geom).unwrap();
+        for (i, piece) in pieces.iter().enumerate() {
+            if let Piece::Quarter { center, rx, ry, q } = *piece {
+                for j in 0..=samples {
+                    let t = FRAC_PI_2 * (f64::from(q) + j as f64 / samples as f64);
+                    out.push(xform * Point::new(center.x + rx * t.cos(), center.y + ry * t.sin()));
+                }
+            }
+            let end = match *piece {
+                Piece::Corner(p) => p,
+                Piece::Quarter { center, rx, ry, q } => on_quarter(center, rx, ry, q, (0.0, 1.0)),
+            };
+            let next = pieces[(i + 1) % pieces.len()].start();
+            for j in 0..=samples {
+                out.push(xform * end.lerp(next, j as f64 / samples as f64));
+            }
+        }
+        out
+    }
+
     #[test]
-    fn enormous_ellipse_path_has_bounded_element_count() {
-        let ellipse = Geom::Ellipse { rx: Mm::new(1e200).unwrap(), ry: Mm::new(1e200).unwrap() };
-        let path = ellipse.to_bez();
-        assert!(path.elements().len() <= 32, "unexpected {} ellipse path elements", path.elements().len());
+    fn spectral_norm_is_the_largest_singular_value() {
+        let m = Affine::rotate(0.7) * Affine::scale_non_uniform(3.0, 2.0);
+        let [a, b, c, d, _, _] = m.as_coeffs();
+        assert!((spectral_norm(a, c, b, d) - 3.0).abs() < 1e-12);
+        assert!((spectral_norm(0.0, 5.0, 0.0, 0.0) - 5.0).abs() < 1e-12);
+        assert_eq!(spectral_norm(0.0, 0.0, 0.0, 0.0), 0.0);
+        let big = f64::MAX / 4.0;
+        assert_eq!(spectral_norm(big, big, big, big), 2.0 * big);
+        assert_eq!(spectral_norm(f64::MAX, f64::MAX, f64::MAX, f64::MAX), f64::INFINITY);
+        assert!(spectral_norm(f64::NAN, 1.0, 0.0, 0.0).is_nan());
+    }
+
+    #[test]
+    fn enormous_unequal_ellipse_path_has_bounded_element_count() {
+        // kurbo's own `Ellipse` derives its radii through an SVD that squares them: unequal radii above ~1e77
+        // overflow to (inf, NaN) and ask its arc iterator for usize::MAX segments.
+        for (rx, ry) in [(1e78, 1.0), (1.0, 1e78), (f64::MAX, f64::MIN_POSITIVE), (f64::MIN_POSITIVE, f64::MAX), (-f64::MAX, f64::MAX), (1e200, 1e200)] {
+            let path = ellipse(rx, ry).to_bez();
+            assert!(path.elements().len() <= 64, "{} elements for ({rx}, {ry})", path.elements().len());
+            assert!(bez_is_finite(&path), "non-finite ellipse path for ({rx}, {ry})");
+        }
+    }
+
+    #[test]
+    fn to_bez_keeps_shape_points_and_order() {
+        // Plain rectangle: kurbo's Rect order from the bottom-left corner.
+        let rect = Geom::Rect { w: mm(4.0), h: mm(-2.0), corner_radius: mm(0.0) }.to_bez();
+        let pts: Vec<PathEl> = rect.elements().to_vec();
+        assert_eq!(
+            pts,
+            vec![
+                PathEl::MoveTo(Point::new(-2.0, -1.0)),
+                PathEl::LineTo(Point::new(2.0, -1.0)),
+                PathEl::LineTo(Point::new(2.0, 1.0)),
+                PathEl::LineTo(Point::new(-2.0, 1.0)),
+                PathEl::ClosePath
+            ]
+        );
+        // The ellipse starts at (rx, 0), runs counter-clockwise through exact quarter points and stays within tolerance.
+        let path = ellipse(30.0, 10.0).to_bez();
+        assert_eq!(path.elements().first(), Some(&PathEl::MoveTo(Point::new(30.0, 0.0))));
+        let ends: Vec<Point> = path.elements().iter().filter_map(|el| if let PathEl::CurveTo(_, _, p) = el { Some(*p) } else { None }).collect();
+        assert!(ends.contains(&Point::new(0.0, 10.0)) && ends.contains(&Point::new(-30.0, 0.0)) && ends.contains(&Point::new(0.0, -10.0)));
+        assert_eq!(ends.last(), Some(&Point::new(30.0, 0.0)));
+        let polys = openlaser_geom::flatten(&path, 0.001).unwrap();
+        for p in true_outline(&ellipse(30.0, 10.0), Affine::IDENTITY, 200) {
+            assert!(dist_to_polylines(&polys, p) <= DEFAULT_FLATTEN_TOL_MM + 0.001, "{p:?}");
+        }
+        let polygon = Geom::Polygon { sides: 5, radius: mm(-10.0) }.to_bez();
+        assert_eq!(polygon.elements().len(), 6);
+        assert_eq!(polygon.elements().first(), Some(&PathEl::MoveTo(Point::new(10.0 * FRAC_PI_2.cos(), 10.0))));
+        assert!(Geom::Polygon { sides: 2, radius: mm(10.0) }.to_bez().elements().is_empty());
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        /// Whatever finite dimensions a parametric shape has, its path is small and finite.
+        #[test]
+        fn prop_parametric_to_bez_is_bounded_and_finite(
+            rx in finite_any(), ry in finite_any(), w in finite_any(), h in finite_any(), corner in finite_any(),
+            sides in 0u16..2000, radius in finite_any(),
+        ) {
+            for geom in [ellipse(rx, ry), Geom::Rect { w: mm(w), h: mm(h), corner_radius: mm(corner) }] {
+                let path = geom.to_bez();
+                proptest::prop_assert!(path.elements().len() <= 64, "{} elements for {geom:?}", path.elements().len());
+                proptest::prop_assert!(bez_is_finite(&path), "non-finite path for {geom:?}");
+            }
+            let polygon = Geom::Polygon { sides, radius: mm(radius) }.to_bez();
+            proptest::prop_assert_eq!(polygon.elements().len(), if sides < 3 { 0 } else { usize::from(sides) + 1 });
+            proptest::prop_assert!(bez_is_finite(&polygon));
+        }
+
+        /// The output tolerance holds in world space under scale, rotation and shear, and ellipse vertices lie on
+        /// the true ellipse.
+        #[test]
+        fn prop_world_polylines_within_tolerance(
+            sx in 0.05f64..60.0, sy in 0.05f64..60.0, rot in 0.0f64..6.3, shear in -1.0f64..1.0,
+            rx in 0.1f64..15.0, ry in 0.1f64..15.0, corner in 0.0f64..1.0, tol_exp in -2.5f64..-1.0, rounded in proptest::prelude::any::<bool>(),
+        ) {
+            let tol = 10f64.powf(tol_exp);
+            let xform = Affine::translate((3.0, -7.0)) * Affine::rotate(rot) * Affine::new([1.0, 0.0, shear, 1.0, 0.0, 0.0]) * Affine::scale_non_uniform(sx, sy);
+            let geom = if rounded { Geom::Rect { w: mm(2.0 * rx), h: mm(2.0 * ry), corner_radius: mm(corner * rx.min(ry)) } } else { ellipse(rx, ry) };
+            let project = project_with(vec![leaf(1, xform, geom.clone())]);
+            let polys = project.world_polylines(ObjectId(1), tol).unwrap();
+            proptest::prop_assert_eq!(polys.len(), 1);
+            for p in true_outline(&geom, xform, 300) {
+                let d = dist_to_polylines(&polys, p);
+                proptest::prop_assert!(d <= tol * (1.0 + 1e-6) + 1e-9, "outline point {p:?} is {d} from the polylines (tol {tol})");
+            }
+            if !rounded {
+                let inverse = xform.inverse();
+                for v in &polys[0].0 {
+                    let o = inverse * Point::new(v[0], v[1]);
+                    let r = (o.x / rx).hypot(o.y / ry);
+                    proptest::prop_assert!((r - 1.0).abs() < 1e-9, "vertex {v:?} is off the ellipse ({r})");
+                }
+            }
+            let b = project.bounds(&[ObjectId(1)]).unwrap().unwrap();
+            for v in polys.iter().flat_map(|p| p.0.iter()) {
+                proptest::prop_assert!(v[0] >= b.min[0] - 1e-9 && v[0] <= b.max[0] + 1e-9 && v[1] >= b.min[1] - 1e-9 && v[1] <= b.max[1] + 1e-9);
+            }
+        }
+    }
+
+    fn finite_any() -> impl proptest::strategy::Strategy<Value = f64> {
+        use proptest::num::f64::{NEGATIVE, NORMAL, POSITIVE, SUBNORMAL, ZERO};
+        proptest::prop_oneof![
+            POSITIVE | NEGATIVE | NORMAL | SUBNORMAL | ZERO,
+            proptest::strategy::Just(f64::MAX),
+            proptest::strategy::Just(-f64::MAX),
+            proptest::strategy::Just(f64::MIN_POSITIVE),
+            1e70f64..1e80,
+            -1e6f64..1e6,
+        ]
+    }
+
+    #[test]
+    fn world_tolerance_holds_for_scaled_shapes() {
+        // An r = 1 ellipse scaled ×100: flattening in object space and then scaling deviated ~0.5 mm at 0.01 mm.
+        let xform = Affine::scale(100.0);
+        let tol = 0.01;
+        let mut curve = BezPath::new();
+        curve.move_to((0.0, 0.0));
+        curve.curve_to((0.0, 1.0), (1.0, 1.0), (1.0, 0.0));
+        let project = project_with(vec![
+            leaf(1, xform, ellipse(1.0, 1.0)),
+            leaf(2, xform, Geom::Rect { w: mm(2.0), h: mm(2.0), corner_radius: mm(0.5) }),
+            leaf(3, xform, Geom::Path(Arc::new(curve))),
+        ]);
+        for id in [1, 2] {
+            let polys = project.world_polylines(ObjectId(id), tol).unwrap();
+            let geom = &project.shape(ObjectId(id)).unwrap().geom;
+            let worst = true_outline(geom, xform, 2000).into_iter().map(|p| dist_to_polylines(&polys, p)).fold(0.0, f64::max);
+            assert!(worst <= tol * (1.0 + 1e-6), "shape {id}: worst deviation {worst} mm at tolerance {tol}");
+        }
+        let polys = project.world_polylines(ObjectId(3), tol).unwrap();
+        let cubic = CubicBez::new((0.0, 0.0), (0.0, 100.0), (100.0, 100.0), (100.0, 0.0));
+        let worst = (0..=4000).map(|i| dist_to_polylines(&polys, kurbo::ParamCurve::eval(&cubic, f64::from(i) / 4000.0))).fold(0.0, f64::max);
+        assert!(worst <= tol * (1.0 + 1e-6), "path: worst deviation {worst} mm at tolerance {tol}");
+    }
+
+    #[test]
+    fn world_polylines_refuse_bad_tolerance() {
+        let project = project_with(vec![leaf(1, Affine::IDENTITY, ellipse(5.0, 5.0))]);
+        for tol in [0.0, -0.01, f64::NAN, f64::INFINITY, 1e-9] {
+            assert!(matches!(project.world_polylines(ObjectId(1), tol), Err(GeomError::BadTolerance(_))), "tolerance {tol}");
+            assert!(matches!(project.world_polylines(ObjectId(99), tol), Err(GeomError::BadTolerance(_))), "tolerance {tol}, unknown id");
+        }
+    }
+
+    /// `depth` nested groups, each scaling by `scale`, around one leaf.
+    fn nested(depth: u64, scale: f64, geom: Geom) -> Arc<Shape> {
+        let mut shape = leaf(depth + 1, Affine::IDENTITY, geom);
+        for id in (1..=depth).rev() {
+            shape = leaf(id, Affine::scale(scale), Geom::Group(vec![shape]));
+        }
+        shape
+    }
+
+    #[test]
+    fn non_finite_composition_is_refused() {
+        // 32 nested groups of ×1e10 overflow to infinity (and 0 × inf to NaN) long before the leaf.
+        for geom in
+            [ellipse(1.0, 2.0), Geom::Rect { w: mm(1.0), h: mm(1.0), corner_radius: mm(0.0) }, Geom::Rect { w: mm(0.0), h: mm(0.0), corner_radius: mm(0.0) }]
+        {
+            let project = project_with(vec![nested(32, 1e10, geom.clone())]);
+            assert_eq!(project.world_polylines(ObjectId(1), 0.01), Err(GeomError::NonFinite), "{geom:?}");
+            assert_eq!(project.bounds(&[ObjectId(1)]), Err(GeomError::NonFinite), "{geom:?}");
+        }
+        let mut curve = BezPath::new();
+        curve.move_to((0.0, 0.0));
+        curve.line_to((1.0, 1.0));
+        let project = project_with(vec![leaf(1, Affine::new([f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0]), Geom::Path(Arc::new(curve)))]);
+        assert_eq!(project.world_polylines(ObjectId(1), 0.01), Err(GeomError::NonFinite));
+        assert_eq!(project.bounds(&[ObjectId(1)]), Err(GeomError::NonFinite));
+        // Large but finite compositions still work.
+        let project = project_with(vec![nested(8, 10.0, ellipse(1e-6, 1e-6))]);
+        assert!(project.world_polylines(ObjectId(1), 0.01).is_ok());
+    }
+
+    #[test]
+    fn one_point_budget_covers_a_whole_group() {
+        // Each r = 10 km ellipse alone fits (~70 k points at 0.01 mm); sixteen of them in one group do not.
+        let children: Vec<Arc<Shape>> = (2..18).map(|id| leaf(id, Affine::translate((0.0, id as f64)), ellipse(1e7, 1e7))).collect();
+        let project = project_with(vec![leaf(1, Affine::IDENTITY, Geom::Group(children))]);
+        let single = project.world_polylines(ObjectId(2), 0.01).unwrap();
+        let points: usize = single.iter().map(Polyline::len).sum();
+        assert!(points > openlaser_geom::MAX_FLATTEN_POINTS / 16 && points < openlaser_geom::MAX_FLATTEN_POINTS / 8, "{points} points");
+        assert_eq!(project.world_polylines(ObjectId(1), 0.01), Err(GeomError::TooManyPoints(openlaser_geom::MAX_FLATTEN_POINTS)));
+        // Bounds never flatten, so the same group still has exact bounds.
+        let b = project.bounds(&[ObjectId(1)]).unwrap().unwrap();
+        assert_eq!(b.min, [-1e7, -1e7 + 2.0]);
+        assert_eq!(b.max, [1e7, 1e7 + 17.0]);
+    }
+
+    #[test]
+    fn bounds_are_exact_and_do_not_flatten() {
+        // A shape far too big to flatten at 0.01 mm still has bounds.
+        let project = project_with(vec![leaf(1, Affine::scale(1e3), ellipse(1e9, 1e9))]);
+        assert!(matches!(project.world_polylines(ObjectId(1), 0.01), Err(GeomError::TooManyPoints(_))));
+        assert_eq!(project.bounds(&[ObjectId(1)]), Ok(Some(Bounds { min: [-1e12, -1e12], max: [1e12, 1e12] })));
+        // A rotated ellipse: half-extents sqrt((rx cos)² + (ry sin)²) and sqrt((rx sin)² + (ry cos)²).
+        let a = 30f64.to_radians();
+        let project = project_with(vec![leaf(1, Affine::rotate(a), ellipse(10.0, 5.0))]);
+        let b = project.bounds(&[ObjectId(1)]).unwrap().unwrap();
+        let (ex, ey) = ((10.0 * a.cos()).hypot(5.0 * a.sin()), (10.0 * a.sin()).hypot(5.0 * a.cos()));
+        for (got, want) in [(b.max[0], ex), (b.max[1], ey), (-b.min[0], ex), (-b.min[1], ey)] {
+            assert!((got - want).abs() < 1e-12, "{got} vs {want}");
+        }
+        // Paths: exact cubic extrema; a bare MoveTo adds nothing; `M p Z` adds p.
+        let mut path = BezPath::new();
+        path.move_to((100.0, 100.0));
+        path.move_to((0.0, 0.0));
+        path.curve_to((0.0, 4.0), (4.0, 4.0), (4.0, 0.0));
+        path.move_to((-1.0, -2.0));
+        path.close_path();
+        path.move_to((50.0, 50.0));
+        let project = project_with(vec![leaf(1, Affine::IDENTITY, Geom::Path(Arc::new(path)))]);
+        assert_eq!(project.bounds(&[ObjectId(1)]), Ok(Some(Bounds { min: [-1.0, -2.0], max: [4.0, 3.0] })));
+        assert_eq!(project.bounds(&[ObjectId(42)]), Ok(None));
+    }
+
+    #[test]
+    fn alloc_id_refuses_instead_of_repeating_ids() {
+        let mut project = Project::new(workspace(), &defaults());
+        assert_eq!(project.alloc_id(), Ok(ObjectId(1)));
+        assert_eq!(project.next_id, 2);
+        project.next_id = MAX_NEXT_ID - 1;
+        assert_eq!(project.alloc_id(), Ok(ObjectId(MAX_NEXT_ID - 1)));
+        assert_eq!(project.next_id, MAX_NEXT_ID);
+        assert_eq!(project.alloc_id(), Err(Error::IdsExhausted { next_id: MAX_NEXT_ID }));
+        assert_eq!(project.next_id, MAX_NEXT_ID);
+        for next_id in [u64::MAX, u64::MAX - 1, 0] {
+            project.next_id = next_id;
+            assert_eq!(project.alloc_id(), Err(Error::IdsExhausted { next_id }));
+            assert_eq!(project.next_id, next_id);
+        }
     }
 
     #[test]

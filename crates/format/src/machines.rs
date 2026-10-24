@@ -98,7 +98,7 @@ impl ProfileStore for DirProfileStore {
 fn validate_id(id: &str) -> Result<(), String> {
     let lowercase = id.to_ascii_lowercase();
     let reserved = matches!(lowercase.as_str(), "con" | "nul" | "aux" | "prn")
-        || ["com", "lpt"].iter().any(|prefix| (1..=9).any(|number| lowercase == format!("{prefix}{number}")));
+        || ["com", "lpt"].iter().any(|prefix| (0..=9).any(|number| lowercase == format!("{prefix}{number}")));
     if !reserved && (1..=64).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-') {
         Ok(())
     } else {
@@ -135,8 +135,11 @@ mod tests {
 
     #[test]
     fn profile_loader_checks_id_filename_and_windows_reserved_names() {
-        for reserved in ["con", "nul", "aux", "prn", "com1", "com9", "lpt1", "lpt9"] {
+        for reserved in ["con", "nul", "aux", "prn", "com0", "com1", "com9", "lpt0", "lpt1", "lpt9"] {
             assert!(validate_id(reserved).is_err(), "accepted reserved id {reserved}");
+        }
+        for fine in ["com10", "lpt", "console", "jpt-m7-200"] {
+            assert!(validate_id(fine).is_ok(), "refused id {fine}");
         }
         let dir = tempfile::tempdir().unwrap();
         let profile = jpt_m7_200_sim();
@@ -145,5 +148,32 @@ mod tests {
         let (_, messages) = load_all(Some(dir.path()));
         assert_eq!(messages.len(), 1);
         assert!(messages[0].contains("does not match id"));
+    }
+
+    /// A file whose stem matches its id is still refused when the id itself is not allowed.
+    fn loads_with_id(id: &str) -> (Vec<MachineProfile>, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut profile = jpt_m7_200_sim();
+        profile.id = MachineId(id.to_owned());
+        fs::write(dir.path().join(format!("{id}.json")), serde_json::to_vec(&profile).unwrap()).unwrap();
+        load_all(Some(dir.path()))
+    }
+
+    #[test]
+    fn profile_loader_refuses_invalid_ids_even_when_the_stem_matches() {
+        let (all, messages) = loads_with_id("Bad_Id");
+        assert_eq!(all.len(), 5, "{messages:?}");
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("[a-z0-9-]"), "{messages:?}");
+    }
+
+    /// Windows cannot create `con.json` at all; elsewhere the loader must still refuse the reserved id.
+    #[cfg(not(windows))]
+    #[test]
+    fn profile_loader_refuses_reserved_ids() {
+        let (all, messages) = loads_with_id("con");
+        assert_eq!(all.len(), 5, "{messages:?}");
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("[a-z0-9-]"), "{messages:?}");
     }
 }
