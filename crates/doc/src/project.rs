@@ -34,7 +34,8 @@ pub struct Shape {
     pub id: ObjectId,
     pub name: Option<String>,
     pub layer: LayerKey,
-    /// Object space → design mm.
+    /// Object space → parent space (design mm at the top level; the parent group's object space inside a
+    /// `Geom::Group`). [`Project::world_transform`] gives the full ancestor composition.
     pub xform: Affine,
     pub geom: Geom,
     pub locked: bool,
