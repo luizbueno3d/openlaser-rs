@@ -1,7 +1,9 @@
 //! The GUI-thread control dispatcher (SPEC §4.5). Requests from the loopback control server arrive here on the UI
 //! thread; `machine.stop` is also answered on the transport thread by the app's fast path.
 //!
-//! Fences, in order: (1) only the exact §4.5 method table is routed (anything else: `unknown method`); (2) any
+//! Fences, in order: (1) only the exact §4.5 method table is routed (anything else: `unknown method`); (1b) a
+//! request carrying both command-identifying fields (`command` and `id`) is refused as ambiguous (`conflicting
+//! command identifiers`); (2) any
 //! human-only command id anywhere in the params, through `engine.execute`, `ui.menu.invoke` or a batch, is refused
 //! (`human-only:`); (3) while a machine is framing, running or stopping, or a human-only surface (the ARM dialog) is
 //! open, every mutating method is refused (`machine_busy` / `human_confirmation_open`); reads, `ui.screenshot` and
@@ -104,10 +106,28 @@ pub const READS: &[&str] = &[
     "ui.screenshot",
 ];
 
+/// The one command id a request names. `engine.execute` and `ui.menu.invoke` accept `command` or `id`;
+/// a request that carries both is ambiguous — whichever field a check read, the other could be the one that
+/// executes — so it is refused and authorization and execution always see the same single resolved id.
+fn command_id(params: &serde_json::Value) -> Result<Option<&str>, String> {
+    let mut resolved: Option<&str> = None;
+    for key in ["command", "id"] {
+        if params.get(key).is_some() {
+            if resolved.is_some() {
+                return Err("conflicting command identifiers: send only one of `command` or `id`".to_owned());
+            }
+            resolved = Some(params.get(key).and_then(serde_json::Value::as_str).unwrap_or_default());
+        }
+    }
+    Ok(resolved)
+}
+
 /// Does this request change anything? `engine.execute` / `ui.menu.invoke` of a Query or Stop command does not.
+/// A conflicting identifier fails closed (mutating); `handle` refuses it before this is consulted anyway.
 pub fn mutates(method: &str, params: &serde_json::Value) -> bool {
     if matches!(method, "engine.execute" | "ui.menu.invoke") {
-        let id = params.get("command").or_else(|| params.get("id")).and_then(serde_json::Value::as_str).unwrap_or_default();
+        let Ok(id) = command_id(params) else { return true };
+        let id = id.unwrap_or_default();
         return !openlaser_engine::registry().find(id).is_some_and(|spec| matches!(spec.kind, openlaser_engine::Kind::Query) || spec.access == Access::Stop);
     }
     !READS.contains(&method)
@@ -120,6 +140,16 @@ pub fn handle(app: &mut OpenLaserApp, ctx: &egui::Context, req: ControlRequest) 
     if !ROUTES.contains(&method) {
         return Outcome::Done(error_reply(id, &format!("unknown method `{method}`")));
     }
+    // Resolve the single command id up front: a request naming both `command` and `id` is refused, and the
+    // resolved id below is the only one authorization and execution ever see.
+    let command = if matches!(method, "engine.execute" | "ui.menu.invoke") {
+        match command_id(params) {
+            Ok(command) => command.unwrap_or_default(),
+            Err(error) => return Outcome::Done(error_reply(id, &error)),
+        }
+    } else {
+        ""
+    };
     if matches!(method, "engine.execute" | "ui.menu.invoke") && contains_human_command(params) {
         return Outcome::Done(error_reply(id, "human-only: hardware actions are started by a person in the OpenLaser window; ask the operator"));
     }
@@ -159,11 +189,8 @@ pub fn handle(app: &mut OpenLaserApp, ctx: &egui::Context, req: ControlRequest) 
                 "params": r.panel.map(|panel| serde_json::json!({ "panel": panel, "visible": true })),
             })).collect::<Vec<_>>()
         })),
-        "ui.menu.invoke" => menu_invoke(app, params),
-        "engine.execute" => {
-            let command = params.get("command").and_then(serde_json::Value::as_str).unwrap_or_default();
-            execute_command(app, command, params.get("params").cloned().unwrap_or(serde_json::Value::Null))
-        }
+        "ui.menu.invoke" => menu_invoke(app, command, params),
+        "engine.execute" => execute_command(app, command, params.get("params").cloned().unwrap_or(serde_json::Value::Null)),
         "engine.commands" => Ok(serde_json::json!({ "commands": app.session().command_list(Origin::Synthetic, &Default::default()) })),
         "engine.schema" => app.session().command_schema(params.get("id").and_then(serde_json::Value::as_str).unwrap_or_default()).map_err(|e| e.to_string()),
         "machine.list" => Ok(serde_json::json!({
@@ -308,8 +335,7 @@ fn elements(app: &OpenLaserApp, params: &serde_json::Value) -> serde_json::Value
     serde_json::json!({ "elements": items, "total": app.last_frame_elements().len() })
 }
 
-fn menu_invoke(app: &mut OpenLaserApp, params: &serde_json::Value) -> Result<serde_json::Value, String> {
-    let command = params.get("id").or_else(|| params.get("command")).and_then(serde_json::Value::as_str).unwrap_or_default();
+fn menu_invoke(app: &mut OpenLaserApp, command: &str, params: &serde_json::Value) -> Result<serde_json::Value, String> {
     let Some(row) = crate::menu_catalog::CATALOG.iter().find(|row| row.id == command || crate::menu_catalog::native_id(row) == command) else {
         return Err(format!("unknown menu command `{command}`"));
     };

@@ -241,12 +241,14 @@ impl OpenLaserApp {
                     button = button.shortcut_text(crate::shortcuts::pretty(shortcut));
                 }
                 let response = ui.add_enabled(live && !blocked, button);
+                // The reason names the predicate that actually failed: `!live` before `blocked` (a row that
+                // is not in OpenLaser yet is not "blocked by an active machine").
                 let response = if menu_catalog::is_hw_row(row) {
                     response.on_disabled_hover_text("Hardware actions are human-only and live in the Laser panel.")
-                } else if blocked {
-                    response.on_disabled_hover_text(FILES_WHILE_ACTIVE)
-                } else {
+                } else if !live {
                     response.on_disabled_hover_text(NOT_YET)
+                } else {
+                    response.on_disabled_hover_text(FILES_WHILE_ACTIVE)
                 };
                 if response.clicked() {
                     self.invoke_menu_command(ui.ctx(), &menu_catalog::native_id(row));
@@ -1052,7 +1054,7 @@ impl OpenLaserApp {
 
     /// While a machine is active, a human-only surface is open, or any modal is up, STOP floats above everything.
     pub(crate) fn stop_overlay_needed(&self, ctx: &egui::Context) -> bool {
-        self.safety_active() || self.services.human.surface_open() || self.ui.cut_settings_open || ctx.memory(|m| m.top_modal_layer().is_some())
+        self.safety_active() || self.human_surface_open() || self.ui.cut_settings_open || ctx.memory(|m| m.top_modal_layer().is_some())
     }
 
     /// STOP at `Order::Tooltip`, drawn last, above every Modal (UI §7.1); never disabled.

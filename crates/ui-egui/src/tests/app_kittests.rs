@@ -1153,6 +1153,103 @@ fn ordinary_dialog_is_editable_but_never_a_human_surface() {
     assert_eq!(h.state().input_steps.len(), 4);
 }
 
+#[test]
+fn control_refuses_conflicting_command_identifiers() {
+    let mut h = with_human(NoSurface);
+    // Two command-identifying fields are refused even when they name the same command: nothing may be
+    // authorized against one id and executed as the other.
+    for params in [
+        serde_json::json!({ "id": "file.new", "command": "file.new" }),
+        serde_json::json!({ "id": "layer.setShow", "command": "file.new" }),
+        serde_json::json!({ "command": "file.new", "id": "layer.setShow" }),
+    ] {
+        for method in ["engine.execute", "ui.menu.invoke"] {
+            let error = control(&mut h, method, params.clone()).unwrap_err();
+            assert!(error.contains("conflicting command identifiers"), "{method} {params} → {error}");
+        }
+    }
+    // The dispatcher-bypass shape: a harmless `command` must not let a mutating `id` through while busy.
+    h.state_mut().seam.machine_state = Some(MachineState::Framing);
+    let error = control(&mut h, "ui.menu.invoke", serde_json::json!({ "command": "machine.status", "id": "file.new" })).unwrap_err();
+    assert!(error.contains("conflicting command identifiers"), "{error}");
+    // Single-field requests still reach the dispatcher.
+    let mut h = with_human(NoSurface);
+    let error = control(&mut h, "engine.execute", serde_json::json!({ "command": "file.new" })).unwrap_err();
+    assert!(!error.contains("conflicting"), "{error}");
+    let error = control(&mut h, "ui.menu.invoke", serde_json::json!({ "id": "window.show:console" })).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(error["panel"], "console");
+}
+
+// ---- Device Settings is a human-only surface --------------------------------------------------------------------------------
+
+#[test]
+fn device_settings_draft_is_untouchable_by_agents() {
+    // With the Device Settings window open, every mutating control method is refused and queued synthetic
+    // input is dropped: the draft is only ever mutated by this dialog's own widgets, driven by a person.
+    let mut h = with_human(SyntheticInjector);
+    h.state_mut().ui.device_settings_open = true;
+    h.run();
+    let draft = h.state().device_draft.clone().unwrap();
+    for (method, params) in [
+        ("engine.execute", serde_json::json!({ "command": "file.new" })),
+        ("ui.menu.invoke", serde_json::json!({ "id": "window.show:console" })),
+        ("ui.set", serde_json::json!({ "fields": { "tool": "Pan" } })),
+        ("ui.dialog.open", serde_json::json!({ "dialog": "cutSettings" })),
+        ("ui.dock.close", serde_json::json!({ "panel": "console" })),
+        ("app.quit", serde_json::json!({})),
+    ] {
+        let error = control(&mut h, method, params).unwrap_err();
+        assert!(error.starts_with("human_confirmation_open"), "{method}: {error}");
+    }
+    // ui.click on the draft's own widgets never reaches egui: raw_input_hook drops queued synthetic events
+    // while a human-only surface is open.
+    for label in ["Reverse X direction", "Reverse Y direction", "Galvo 1 is X Axis"] {
+        let center = h.get_by_label(label).rect().center();
+        for event in crate::control::input::events_for("ui.click", &serde_json::json!({ "x": center.x, "y": center.y })).unwrap() {
+            h.state_mut().queue_input(vec![event]);
+            hooked_step(&mut h, Vec::new());
+        }
+    }
+    h.run();
+    assert_eq!(h.state().device_draft.as_ref(), Some(&draft), "synthetic input reached the human-only draft");
+    // Reads are still served, and the surface is reported open.
+    let inspect = control(&mut h, "ui.inspect", serde_json::json!({})).unwrap();
+    assert_eq!(inspect["humanSurfaces"]["open"], true);
+}
+
+#[test]
+fn device_settings_draft_reloads_when_the_profile_changes() {
+    let mut h = with_human(NoSurface);
+    h.state_mut().ui.device_settings_open = true;
+    h.run();
+    assert!(h.state().device_draft.is_some());
+    // The profile changes under the open draft (an agent-side device command, another device selected): it
+    // is reloaded with a visible notice, so a person's later Save cannot persist an edit they did not make.
+    let mut changed = openlaser_machine::jpt_m7_200_sim();
+    if let openlaser_machine::Kinematics::Galvo(g) = &mut changed.kind {
+        g.cal.negate = [true, true];
+    }
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
+    h.state_mut().session = Session::new(SessionConfig {
+        origin: Origin::Human,
+        window: true,
+        devices: DeviceAccess::None,
+        machines: vec![changed.clone()],
+        profiles: None,
+        files: FsAuthority::Denied,
+        clock,
+    });
+    h.run();
+    assert_eq!(h.state().device_draft.as_ref(), Some(&changed), "the stale draft must be discarded and reloaded");
+    assert!(h.state().ui.status_message.contains("reloaded"), "the reload must be visible: {}", h.state().ui.status_message);
+    // Closing drops both draft and source; reopening clones a fresh draft.
+    h.state_mut().ui.device_settings_open = false;
+    h.run();
+    h.state_mut().ui.device_settings_open = true;
+    h.run();
+    assert_eq!(h.state().device_draft.as_ref(), Some(&changed));
+}
+
 // ---- menus -----------------------------------------------------------------------------------------------------------------
 
 #[test]
@@ -1180,6 +1277,37 @@ fn in_window_menu_flag_is_respected_on_both_platforms() {
     h.state_mut().set_in_window_menus(true);
     h.run();
     assert!(h.query_by_label("Laser Tools").is_some(), "--in-window-menus draws the menu bar on every platform");
+}
+
+/// The disabled reason must name the predicate that actually failed in `live && !blocked`, not a catch-all.
+#[test]
+fn disabled_menu_items_name_the_predicate_that_failed() {
+    fn item<'h>(h: &'h mut H, menu: &str, text: &'h str) -> egui_kittest::Node<'h> {
+        if h.query_all_by_label_contains(text).next().is_none() {
+            h.get_by_label(menu).click();
+            h.run();
+        }
+        h.query_all_by_label_contains(text).next().unwrap_or_else(|| panic!("{menu} has no row {text}"))
+    }
+    let mut h = with_human(NoSurface);
+    h.state_mut().seam.machine_state = Some(MachineState::Framing);
+    h.run();
+    for (menu, text, reason) in [
+        // `Save As…` is not implemented and files are blocked: the honest reason is "not in OpenLaser yet".
+        ("File", "Save As…", "Not in OpenLaser yet"),
+        // `Import…` is implemented: an active machine is the actual blocker.
+        ("File", "Import…", "Stop the active frame or job"),
+        // A hardware row keeps its human-only reason.
+        ("Tools", "Position Laser", "Hardware actions are human-only"),
+    ] {
+        let node = item(&mut h, menu, text);
+        assert!(node.accesskit_node().is_disabled(), "{text} must be disabled");
+        node.hover();
+        h.run_steps(20);
+        assert!(has_prefix(&h, reason), "hovering `{text}` did not show `{reason}`");
+        h.hover_at(egui::pos2(1.0, 1.0));
+        h.run_steps(5);
+    }
 }
 
 // ---- accessibility, canvas, dock ---------------------------------------------------------------------------------------

@@ -160,6 +160,10 @@ pub struct OpenLaserApp {
     pub(crate) last_layer_click: Option<(LayerKey, f64)>,
     pub(crate) cut_draft: Option<crate::cut_editor::Draft>,
     pub(crate) device_draft: Option<openlaser_engine::MachineProfile>,
+    /// The profile `device_draft` was cloned from. If the session's profile no longer matches (it changed under
+    /// the open dialog), the draft is discarded and reloaded with a visible notice, so a human's Save never
+    /// persists a change the person did not make.
+    pub(crate) device_draft_source: Option<openlaser_engine::MachineProfile>,
     pub(crate) frame_synthetic: bool,
     pub(crate) dock: crate::dock::DockLayout,
     pub(crate) view: crate::view::CanvasView,
@@ -199,6 +203,7 @@ impl OpenLaserApp {
             last_layer_click: None,
             cut_draft: None,
             device_draft: None,
+            device_draft_source: None,
             frame_synthetic: true,
             view: crate::view::CanvasView::default(),
             plan_cache: None,
@@ -286,7 +291,10 @@ impl OpenLaserApp {
     }
 
     pub(crate) fn human_surface_open(&self) -> bool {
-        self.services.human.surface_open()
+        // The Device Settings draft is human-only too: while its window is open the dispatcher refuses
+        // mutating methods and queued synthetic input is dropped, so an agent can never edit the draft a
+        // person may later save (§4.6).
+        self.services.human.surface_open() || self.ui.device_settings_open
     }
 
     /// STOP: latch every machine first (the engine voids `PendingArm` and stale submissions), then remember which
@@ -696,7 +704,7 @@ impl eframe::App for OpenLaserApp {
             self.stop();
             raw.events.retain(|e| !matches!(e, egui::Event::Key { key: egui::Key::Escape, .. }));
         }
-        if self.services.human.surface_open() {
+        if self.human_surface_open() {
             self.synthetic_input.clear();
             self.input_steps.clear();
         }

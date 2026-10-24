@@ -20,6 +20,7 @@ impl OpenLaserApp {
             self.device_settings_window(ctx);
         } else {
             self.device_draft = None;
+            self.device_draft_source = None;
         }
         if self.ui.live_framing_open {
             self.live_framing_window(ctx);
@@ -172,8 +173,17 @@ impl OpenLaserApp {
     }
 
     fn device_settings_window(&mut self, ctx: &egui::Context) {
-        if self.device_draft.is_none() {
-            self.device_draft = self.active_machine().cloned();
+        // The draft is only ever mutated by this window's widgets, driven by a person's input: Device
+        // Settings is a human-only surface, so synthetic input is dropped while it is open (§4.6). If the
+        // profile changed under the open draft (an agent-side device command, a different device selected),
+        // the draft is reloaded so Save can never persist something the person did not type.
+        let live = self.active_machine().cloned();
+        if live != self.device_draft_source {
+            if self.device_draft.is_some() {
+                self.set_status("The device profile changed; the Device Settings draft was reloaded. Review it before saving.");
+            }
+            self.device_draft = live;
+            self.device_draft_source = self.device_draft.clone();
         }
         let mut open = true;
         let mut save = false;
