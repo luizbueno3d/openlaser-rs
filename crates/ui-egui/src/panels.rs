@@ -451,6 +451,9 @@ impl OpenLaserApp {
                 if r.clicked() {
                     if *id == "tools.select" {
                         self.invoke_menu_command(ui.ctx(), id);
+                    } else if crate::view::DRAW_TOOLS.iter().any(|(d, _)| d == id) {
+                        // Draw tools only arm: the canvas drag or clicks produce the command's mm parameters.
+                        self.ui.selected_tool = label;
                     } else {
                         self.ui.selected_tool = label;
                         self.frame_synthetic = self.services.human.frame_is_synthetic(ui.ctx());

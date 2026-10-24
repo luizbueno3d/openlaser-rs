@@ -460,6 +460,12 @@ impl OpenLaserApp {
                 self.ui.selected_tool = "Select";
                 self.execute_widget(id, serde_json::json!({}));
             }
+            _ if crate::view::DRAW_TOOLS.iter().any(|(d, _)| *d == id) => {
+                // A draw tool is only armed; the canvas drag or clicks produce the command's mm parameters.
+                if let Some((_, label)) = crate::view::DRAW_TOOLS.iter().find(|(d, _)| *d == id) {
+                    self.ui.selected_tool = label;
+                }
+            }
             "window.resetLayout" => self.dock = crate::dock::default_layout(),
             _ => self.execute_widget(id, serde_json::Value::Null),
         }

@@ -14,6 +14,10 @@ pub(crate) const ZOOM_MAX: f64 = 5000.0;
 /// Fit leaves a 5 % margin around the field (UI §5.1).
 const FIT_MARGIN: f64 = 1.05;
 
+/// The draw tools: (command id, tool label). Clicking the toolbar button or menu row only ARMS the tool; the
+/// canvas drag or clicks produce the command's parameters, like LightBurn.
+pub(crate) const DRAW_TOOLS: [(&str, &str); 3] = [("tools.rectangle", "Rectangle"), ("tools.ellipse", "Ellipse"), ("tools.drawLines", "Draw Lines")];
+
 #[derive(Default)]
 pub(crate) struct CanvasView {
     /// None = a fit is pending (first frame, Zoom to Page).
@@ -23,6 +27,10 @@ pub(crate) struct CanvasView {
     /// The zoom a fit gives for the current canvas, for zoom buttons pressed before the first paint.
     pub last_fit: f64,
     pub marquee_from: Option<egui::Pos2>,
+    /// A Rectangle/Ellipse drag in progress (screen space, like the marquee).
+    pub draw_from: Option<egui::Pos2>,
+    /// Draw Lines points placed so far (world mm, so a mid-draw pan keeps them anchored).
+    pub draw_points: Vec<[f64; 2]>,
 }
 
 impl CanvasView {
@@ -264,6 +272,7 @@ impl OpenLaserApp {
         }
 
         self.canvas_selection(ui, &response, &view);
+        self.canvas_draw(ui, &response, &view, hover);
         self.paint_rulers(ui, full, canvas, &view, hover, &colors);
 
         // Zoom to fit, at the canvas corner.
@@ -272,6 +281,113 @@ impl OpenLaserApp {
         self.labeled(&fit_response, egui::WidgetType::Button, "Zoom to fit", false);
         if fit_response.on_hover_text("Zoom to fit (frame the field)").clicked() {
             self.view.fit();
+        }
+    }
+
+    /// The draw tools (UI §5): Rectangle and Ellipse drag out a shape, Draw Lines clicks points and finishes on
+    /// double-click, Enter or right-click (clicking the first point closes the path). Esc cancels a draw in
+    /// progress and returns to Select; a placed shape does too, as LightBurn does. The command runs only once the
+    /// drag or clicks produced real millimetre parameters — a bare tool click never fires it.
+    fn canvas_draw(&mut self, ui: &egui::Ui, response: &egui::Response, view: &ViewXform, hover: Option<egui::Pos2>) {
+        let armed = DRAW_TOOLS.iter().any(|(_, label)| *label == self.ui.selected_tool);
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) && armed {
+            self.ui.selected_tool = "Select";
+            self.view.draw_from = None;
+            self.view.draw_points.clear();
+            return;
+        }
+        if !armed {
+            self.view.draw_from = None;
+            self.view.draw_points.clear();
+            return;
+        }
+        if hover.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+        let painter = ui.painter().with_clip_rect(view.rect);
+        let ghost = egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 150, 255));
+        let finish = |app: &mut Self| {
+            app.ui.selected_tool = "Select";
+            app.view.draw_from = None;
+            app.view.draw_points.clear();
+        };
+        match self.ui.selected_tool {
+            "Rectangle" | "Ellipse" => {
+                if response.drag_started_by(egui::PointerButton::Primary) {
+                    // The press position, not the pointer's spot when the drag crossed its threshold.
+                    self.view.draw_from = ui.input(|i| i.pointer.press_origin()).or_else(|| response.interact_pointer_pos());
+                }
+                let Some(from) = self.view.draw_from else { return };
+                let Some(to) = response.interact_pointer_pos() else {
+                    self.view.draw_from = None;
+                    return;
+                };
+                let rect = egui::Rect::from_two_pos(from, to);
+                if self.ui.selected_tool == "Rectangle" {
+                    painter.add(egui::Shape::dashed_line(
+                        &[rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom(), rect.left_top()],
+                        ghost,
+                        4.0,
+                        3.0,
+                    ));
+                } else {
+                    painter.add(egui::Shape::ellipse_stroke(rect.center(), rect.size() / 2.0, ghost));
+                }
+                if !response.drag_stopped() {
+                    return;
+                }
+                let (a, b) = (view.screen_to_world(from), view.screen_to_world(to));
+                let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
+                let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
+                let (w, h) = (x1 - x0, y1 - y0);
+                if w >= 0.01 && h >= 0.01 {
+                    if self.ui.selected_tool == "Rectangle" {
+                        self.execute_widget("tools.rectangle", serde_json::json!({ "xMm": x0, "yMm": y0, "wMm": w, "hMm": h }));
+                    } else {
+                        self.execute_widget("tools.ellipse", serde_json::json!({ "cxMm": (x0 + x1) / 2.0, "cyMm": (y0 + y1) / 2.0, "wMm": w, "hMm": h }));
+                    }
+                }
+                finish(self);
+            }
+            "Draw Lines" => {
+                // The ghost: placed points plus a rubber segment to the pointer.
+                let mut pts: Vec<egui::Pos2> = self.view.draw_points.iter().map(|p| view.world_to_screen(*p)).collect();
+                if pts.last().is_some()
+                    && let Some(now) = response.hover_pos()
+                {
+                    pts.push(now);
+                }
+                if pts.len() >= 2 {
+                    painter.extend(egui::Shape::dashed_line(&pts, ghost, 4.0, 3.0));
+                }
+                let close = self.view.draw_points.len() >= 3
+                    && response.clicked_by(egui::PointerButton::Primary)
+                    && response
+                        .interact_pointer_pos()
+                        .zip(self.view.draw_points.first().map(|p| view.world_to_screen(*p)))
+                        .is_some_and(|(pos, first)| pos.distance(first) < 6.0);
+                if close {
+                    let points = std::mem::take(&mut self.view.draw_points);
+                    self.execute_widget("tools.drawLines", serde_json::json!({ "pointsMm": points, "closed": true }));
+                    finish(self);
+                } else if response.double_clicked_by(egui::PointerButton::Primary)
+                    || response.secondary_clicked()
+                    || ui.input(|i| i.key_pressed(egui::Key::Enter))
+                {
+                    if self.view.draw_points.len() >= 2 {
+                        let points = std::mem::take(&mut self.view.draw_points);
+                        self.execute_widget("tools.drawLines", serde_json::json!({ "pointsMm": points, "closed": false }));
+                    } else {
+                        self.view.draw_points.clear();
+                    }
+                    finish(self);
+                } else if response.clicked_by(egui::PointerButton::Primary)
+                    && let Some(pos) = response.interact_pointer_pos()
+                {
+                    self.view.draw_points.push(view.screen_to_world(pos));
+                }
+            }
+            _ => {}
         }
     }
 

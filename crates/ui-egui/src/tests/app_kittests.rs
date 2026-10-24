@@ -977,6 +977,55 @@ fn quit_refused_when_the_stop_is_not_confirmed_and_idle_close_is_not_held() {
 }
 
 #[test]
+fn draw_tools_arm_then_the_canvas_dispatch_mm_params() {
+    // Regression: a tool click used to run the command with no parameters ("tools.rectangle: missing field 'xMm'").
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let fit = h.get_by_label("Zoom to fit").rect();
+    let a = egui::pos2(fit.left() - 400.0, fit.top() - 300.0);
+    let b = a + egui::vec2(80.0, 60.0);
+    // Arming the tool never dispatches; the drag does, with real millimetres, then the tool is Select again.
+    h.get_by_label("Rectangle").click();
+    h.run();
+    assert_eq!(h.state().ui.selected_tool, "Rectangle");
+    assert!(h.state().seam.dispatched.iter().all(|(_, id, _)| id != "tools.rectangle"), "arming must not run the command");
+    h.event(egui::Event::PointerButton { pos: a, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    h.event(egui::Event::PointerMoved(b));
+    h.step();
+    h.event(egui::Event::PointerButton { pos: b, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run();
+    let (_, id, params) = h.state().seam.dispatched.last().cloned().unwrap();
+    assert_eq!(id, "tools.rectangle");
+    assert!(params["wMm"].as_f64().is_some_and(|w| w > 1.0) && params["hMm"].as_f64().is_some_and(|v| v > 1.0), "{params}");
+    assert!(params["xMm"].as_f64().is_some() && params["yMm"].as_f64().is_some(), "{params}");
+    assert_eq!(h.state().ui.selected_tool, "Select", "a placed shape returns to Select");
+    // Draw Lines: clicks collect points (no dispatch yet), Enter finishes open.
+    h.get_by_label("Draw Lines").click();
+    h.run();
+    for p in [a, b, a + egui::vec2(120.0, 0.0)] {
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.step();
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    assert!(h.state().seam.dispatched.iter().all(|(_, id, _)| id != "tools.drawLines"), "no dispatch before finish");
+    h.event(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.run();
+    let (_, id, params) = h.state().seam.dispatched.last().cloned().unwrap();
+    assert_eq!(id, "tools.drawLines");
+    assert_eq!(params["pointsMm"].as_array().map(|p| p.len()), Some(3), "{params}");
+    assert_eq!(params["closed"], serde_json::Value::Bool(false));
+    // Esc while armed cancels and returns to Select.
+    h.get_by_label("Ellipse").click();
+    h.run();
+    h.event(egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.run();
+    assert_eq!(h.state().ui.selected_tool, "Select");
+}
+
+#[test]
 fn hidden_window_still_polls_while_active() {
     let mut h = harness();
     h.state_mut().seam.machine_state = Some(MachineState::Framing);
