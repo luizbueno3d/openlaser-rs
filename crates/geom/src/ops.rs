@@ -8,9 +8,10 @@ use std::collections::{HashMap, VecDeque};
 
 use kurbo::{BezPath, PathEl, Point};
 
-use crate::{Bounds, DEFAULT_FLATTEN_TOL_MM, P2, Polyline};
+use crate::{Bounds, P2, Polyline};
 
-/// The smallest flattening tolerance honoured (mm). Smaller requests use this value.
+/// The smallest flattening tolerance accepted (mm). A smaller, zero, negative or non-finite tolerance is refused
+/// with [`crate::Error::BadTolerance`]; it is never replaced by another value.
 pub const MIN_FLATTEN_TOL_MM: f64 = 1e-6;
 
 /// Curves whose control polygon is longer than this many tolerances are not subdivided adaptively; they are
@@ -20,22 +21,78 @@ const MAX_LENGTH_OVER_TOL: f64 = 1e9;
 
 /// Line segments one oversized curve is split into (see [`MAX_LENGTH_OVER_TOL`]).
 pub const MAX_CURVE_SEGMENTS: usize = 1 << 16;
+/// Maximum number of points one flatten result may hold: one [`flatten`] call, or every call that shares one
+/// [`PointBudget`] (one `Project::world_polylines` query, groups included).
+pub const MAX_FLATTEN_POINTS: usize = 1_000_000;
 
 /// Backstop for the adaptive split (2^20 segments); `MAX_LENGTH_OVER_TOL` keeps real curves far below it.
 const MAX_SPLIT_DEPTH: u32 = 20;
+
+/// A point allowance shared by every flatten call that builds one result, so a group of many shapes cannot
+/// multiply the per-call limit. Points are taken before they are stored; a refused take leaves it unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointBudget {
+    limit: usize,
+    used: usize,
+}
+
+impl PointBudget {
+    pub const fn new(limit: usize) -> Self {
+        Self { limit, used: 0 }
+    }
+
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.limit.saturating_sub(self.used)
+    }
+
+    /// Takes `n` points, or refuses with [`crate::Error::TooManyPoints`] (taking nothing).
+    pub fn take(&mut self, n: usize) -> Result<(), crate::Error> {
+        match self.used.checked_add(n) {
+            Some(used) if used <= self.limit => {
+                self.used = used;
+                Ok(())
+            }
+            _ => Err(crate::Error::TooManyPoints(self.limit)),
+        }
+    }
+}
+
+impl Default for PointBudget {
+    /// [`MAX_FLATTEN_POINTS`].
+    fn default() -> Self {
+        Self::new(MAX_FLATTEN_POINTS)
+    }
+}
+
+/// Returns `tol_mm` when it is a usable flattening tolerance (finite and at least [`MIN_FLATTEN_TOL_MM`]); refuses
+/// anything else with [`crate::Error::BadTolerance`].
+pub fn check_tolerance(tol_mm: f64) -> Result<f64, crate::Error> {
+    if tol_mm.is_finite() && tol_mm >= MIN_FLATTEN_TOL_MM { Ok(tol_mm) } else { Err(crate::Error::BadTolerance(tol_mm)) }
+}
 
 /// One polyline per subpath; ClosePath repeats the first point. Tolerance in mm.
 ///
 /// - Lines are copied exactly; quadratic and cubic segments are split adaptively with a guaranteed bound: every
 ///   point of the curve is within `tol_mm` of the polyline and every vertex lies on the curve.
-/// - A tolerance that is not finite or not positive means [`DEFAULT_FLATTEN_TOL_MM`]; below
-///   [`MIN_FLATTEN_TOL_MM`] it is raised to that floor.
+/// - A tolerance that is not finite or below [`MIN_FLATTEN_TOL_MM`] (zero and negative included) is refused with
+///   [`crate::Error::BadTolerance`].
+/// - At most [`MAX_FLATTEN_POINTS`] points; more is refused with [`crate::Error::TooManyPoints`]. Use
+///   [`flatten_with_budget`] to share one allowance between several paths.
 /// - A subpath that is only a `MoveTo` (nothing drawn) yields no polyline; `M p Z` yields `[p, p]`. A drawing
 ///   element after `ClosePath` without a `MoveTo` starts a new subpath at the closed subpath's start (SVG).
 /// - Non-finite coordinates are copied through (never dropped), so `Polyline::all_finite` can refuse them
 ///   downstream.
-pub fn flatten(path: &BezPath, tol_mm: f64) -> Vec<Polyline> {
-    let tol = effective_tolerance(tol_mm);
+pub fn flatten(path: &BezPath, tol_mm: f64) -> Result<Vec<Polyline>, crate::Error> {
+    flatten_with_budget(path, tol_mm, &mut PointBudget::default())
+}
+
+/// [`flatten`], taking every emitted point (bare `MoveTo` points included) from `budget`.
+pub fn flatten_with_budget(path: &BezPath, tol_mm: f64, budget: &mut PointBudget) -> Result<Vec<Polyline>, crate::Error> {
+    let tol = check_tolerance(tol_mm)?;
     let mut out = Vec::new();
     let mut current: Vec<P2> = Vec::new();
     // The current point and the start of the current subpath.
@@ -46,30 +103,30 @@ pub fn flatten(path: &BezPath, tol_mm: f64) -> Vec<Polyline> {
         match *el {
             PathEl::MoveTo(p) => {
                 finish(&mut current, &mut out);
-                current.push([p.x, p.y]);
+                push_point(&mut current, [p.x, p.y], budget)?;
                 last = Some(p);
                 start = Some(p);
             }
             PathEl::LineTo(p) => {
-                begin_segment(&mut current, last, start, p);
-                current.push([p.x, p.y]);
+                begin_segment(&mut current, last, start, p, budget)?;
+                push_point(&mut current, [p.x, p.y], budget)?;
                 last = Some(p);
             }
             PathEl::QuadTo(p1, p2) => {
-                let p0 = begin_segment(&mut current, last, start, p2);
-                flatten_curve(&[p0, p1, p2], tol, &mut current);
+                let p0 = begin_segment(&mut current, last, start, p2, budget)?;
+                flatten_curve(&[p0, p1, p2], tol, &mut current, budget)?;
                 last = Some(p2);
             }
             PathEl::CurveTo(p1, p2, p3) => {
-                let p0 = begin_segment(&mut current, last, start, p3);
-                flatten_curve(&[p0, p1, p2, p3], tol, &mut current);
+                let p0 = begin_segment(&mut current, last, start, p3, budget)?;
+                flatten_curve(&[p0, p1, p2, p3], tol, &mut current, budget)?;
                 last = Some(p3);
             }
             PathEl::ClosePath => {
                 if let (Some(&first), Some(&end)) = (current.first(), current.last())
                     && (first != end || current.len() == 1)
                 {
-                    current.push(first);
+                    push_point(&mut current, first, budget)?;
                 }
                 finish(&mut current, &mut out);
                 last = start;
@@ -77,7 +134,13 @@ pub fn flatten(path: &BezPath, tol_mm: f64) -> Vec<Polyline> {
         }
     }
     finish(&mut current, &mut out);
-    out
+    Ok(out)
+}
+
+fn push_point(current: &mut Vec<P2>, point: P2, budget: &mut PointBudget) -> Result<(), crate::Error> {
+    budget.take(1)?;
+    current.push(point);
+    Ok(())
 }
 
 fn finish(current: &mut Vec<P2>, out: &mut Vec<Polyline>) {
@@ -90,16 +153,12 @@ fn finish(current: &mut Vec<P2>, out: &mut Vec<Polyline>) {
 
 /// Makes sure `current` holds the segment's start point and returns it. A segment with no current point
 /// (a path that does not begin with `MoveTo`) starts at its own end point.
-fn begin_segment(current: &mut Vec<P2>, last: Option<Point>, start: Option<Point>, end: Point) -> Point {
+fn begin_segment(current: &mut Vec<P2>, last: Option<Point>, start: Option<Point>, end: Point, budget: &mut PointBudget) -> Result<Point, crate::Error> {
     let p0 = last.or(start).unwrap_or(end);
     if current.is_empty() {
-        current.push([p0.x, p0.y]);
+        push_point(current, [p0.x, p0.y], budget)?;
     }
-    p0
-}
-
-fn effective_tolerance(tol_mm: f64) -> f64 {
-    if tol_mm.is_finite() && tol_mm > 0.0 { tol_mm.max(MIN_FLATTEN_TOL_MM) } else { DEFAULT_FLATTEN_TOL_MM }
+    Ok(p0)
 }
 
 /// Appends the flattened points of one curve (excluding its start point, which `current` already holds).
@@ -108,24 +167,22 @@ fn effective_tolerance(tol_mm: f64) -> f64 {
 /// point lies within `tol` of that chord (as a segment). The curve lies inside its control points' convex hull,
 /// and distance to a segment is convex, so the whole piece is then within `tol` of the chord. kurbo's own
 /// flattener only estimates the error (measured up to 2x over), so it is not used.
-fn flatten_curve(ctrl: &[Point], tol: f64, current: &mut Vec<P2>) {
+fn flatten_curve(ctrl: &[Point], tol: f64, current: &mut Vec<P2>, budget: &mut PointBudget) -> Result<(), crate::Error> {
     let end = ctrl.last().copied().unwrap_or(Point::ORIGIN);
     if !ctrl.iter().all(|p| p.x.is_finite() && p.y.is_finite()) {
         // Copy the end point through: downstream refuses non-finite geometry; it is never dropped here.
-        current.push([end.x, end.y]);
-        return;
+        return push_point(current, [end.x, end.y], budget);
     }
     let polygon_len: f64 = ctrl.windows(2).filter_map(|w| Some(w.first()?.distance(*w.get(1)?))).sum();
     if !polygon_len.is_finite() || polygon_len / tol > MAX_LENGTH_OVER_TOL {
-        uniform_steps(ctrl, current);
-        return;
+        return uniform_steps(ctrl, current, budget);
     }
     let mut stack: Vec<(Vec<Point>, u32)> = vec![(ctrl.to_vec(), 0)];
     while let Some((piece, depth)) = stack.pop() {
         let (Some(&a), Some(&b)) = (piece.first(), piece.last()) else { continue };
         let inner = piece.get(1..piece.len().saturating_sub(1)).unwrap_or(&[]);
         if depth >= MAX_SPLIT_DEPTH || inner.iter().all(|&p| dist_to_segment(p, a, b) <= tol) {
-            current.push([b.x, b.y]);
+            push_point(current, [b.x, b.y], budget)?;
             continue;
         }
         let (left, right) = split_half(&piece);
@@ -133,6 +190,7 @@ fn flatten_curve(ctrl: &[Point], tol: f64, current: &mut Vec<P2>) {
         stack.push((right, depth + 1));
         stack.push((left, depth + 1));
     }
+    Ok(())
 }
 
 fn dist_to_segment(p: Point, a: Point, b: Point) -> f64 {
@@ -161,7 +219,10 @@ fn split_half(ctrl: &[Point]) -> (Vec<Point>, Vec<Point>) {
 }
 
 /// De Casteljau evaluation at [`MAX_CURVE_SEGMENTS`] equal steps in t (oversized curves only).
-fn uniform_steps(ctrl: &[Point], current: &mut Vec<P2>) {
+fn uniform_steps(ctrl: &[Point], current: &mut Vec<P2>, budget: &mut PointBudget) -> Result<(), crate::Error> {
+    if budget.remaining() < MAX_CURVE_SEGMENTS {
+        return Err(crate::Error::TooManyPoints(budget.limit()));
+    }
     let n = MAX_CURVE_SEGMENTS as f64;
     let mut scratch: Vec<Point> = Vec::with_capacity(ctrl.len());
     for i in 1..=MAX_CURVE_SEGMENTS {
@@ -178,9 +239,10 @@ fn uniform_steps(ctrl: &[Point], current: &mut Vec<P2>) {
             }
         }
         if let Some(p) = scratch.first() {
-            current.push([p.x, p.y]);
+            push_point(current, [p.x, p.y], budget)?;
         }
     }
+    Ok(())
 }
 
 pub fn bounds_of(polys: &[Polyline]) -> Option<Bounds> {
@@ -457,7 +519,7 @@ mod tests {
         p.close_path();
         p.move_to((20.0, 20.0));
         p.line_to((30.0, 20.0));
-        let out = flatten(&p, 0.01);
+        let out = flatten(&p, 0.01).unwrap();
         assert_eq!(out, vec![pl(&[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 0.0]]), pl(&[[20.0, 20.0], [30.0, 20.0]])]);
     }
 
@@ -470,7 +532,7 @@ mod tests {
         p.close_path();
         p.move_to((3.0, 3.0));
         p.close_path();
-        assert_eq!(flatten(&p, 0.01), vec![pl(&[[0.0, 0.0], [10.0, 0.0], [0.0, 0.0]]), pl(&[[3.0, 3.0], [3.0, 3.0]])]);
+        assert_eq!(flatten(&p, 0.01).unwrap(), vec![pl(&[[0.0, 0.0], [10.0, 0.0], [0.0, 0.0]]), pl(&[[3.0, 3.0], [3.0, 3.0]])]);
     }
 
     #[test]
@@ -480,7 +542,7 @@ mod tests {
         p.line_to((2.0, 1.0));
         p.close_path();
         p.line_to((1.0, 5.0));
-        let out = flatten(&p, 0.01);
+        let out = flatten(&p, 0.01).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[1], pl(&[[1.0, 1.0], [1.0, 5.0]]));
     }
@@ -491,7 +553,7 @@ mod tests {
         p.move_to((5.0, 5.0));
         p.move_to((0.0, 0.0));
         p.curve_to((0.0, 10.0), (10.0, 10.0), (10.0, 0.0));
-        let out = flatten(&p, 0.01);
+        let out = flatten(&p, 0.01).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0.first(), Some(&[0.0, 0.0]));
         assert_eq!(out[0].0.last(), Some(&[10.0, 0.0]));
@@ -505,11 +567,51 @@ mod tests {
         p.curve_to((0.0, 1e300), (1e300, 1e300), (1e300, 0.0));
         p.move_to((0.0, 0.0));
         p.quad_to((f64::NAN, 1.0), (2.0, 0.0));
-        let out = flatten(&p, 1e-300);
+        let out = flatten(&p, MIN_FLATTEN_TOL_MM).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].len(), MAX_CURVE_SEGMENTS + 1);
         assert_eq!(out[0].0.last(), Some(&[1e300, 0.0]));
         assert_eq!(out[1].0, vec![[0.0, 0.0], [2.0, 0.0]]);
+    }
+
+    #[test]
+    fn flatten_refuses_output_over_point_budget() {
+        let mut path = BezPath::new();
+        for _ in 0..=MAX_FLATTEN_POINTS {
+            path.move_to((0.0, 0.0));
+        }
+        assert!(matches!(flatten(&path, 0.01), Err(crate::Error::TooManyPoints(MAX_FLATTEN_POINTS))));
+    }
+
+    #[test]
+    fn flatten_refuses_bad_tolerance() {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.curve_to((0.0, 10.0), (10.0, 10.0), (10.0, 0.0));
+        for tol in [0.0, -0.0, -0.01, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e-300, MIN_FLATTEN_TOL_MM / 2.0] {
+            assert!(matches!(flatten(&path, tol), Err(crate::Error::BadTolerance(_))), "tolerance {tol} was accepted");
+        }
+        assert!(flatten(&path, MIN_FLATTEN_TOL_MM).is_ok());
+    }
+
+    #[test]
+    fn flatten_budget_is_shared_between_calls() {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        for i in 1..600_000 {
+            path.line_to((f64::from(i), 0.0));
+        }
+        // One path fits the allowance; the same path twice against one shared budget does not.
+        assert_eq!(flatten(&path, 0.01).unwrap()[0].len(), 600_000);
+        let mut budget = PointBudget::default();
+        assert!(flatten_with_budget(&path, 0.01, &mut budget).is_ok());
+        assert_eq!(budget.remaining(), MAX_FLATTEN_POINTS - 600_000);
+        assert!(matches!(flatten_with_budget(&path, 0.01, &mut budget), Err(crate::Error::TooManyPoints(MAX_FLATTEN_POINTS))));
+        let mut small = PointBudget::new(3);
+        assert!(matches!(small.take(4), Err(crate::Error::TooManyPoints(3))));
+        assert_eq!(small.remaining(), 3);
+        assert!(small.take(3).is_ok());
+        assert_eq!(small.remaining(), 0);
     }
 
     #[test]

@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 pub use hatch::{HATCH_OM_MAX_LINES, HatchParams, HatchResult, OmHatch, hatch, hatch_om, inside_even_odd};
 pub use hit::{HIT_MAX_COORD_MM, HitIndex};
 pub use openlaser_types::ids::ObjectId;
-pub use ops::{JoinReport, MAX_CURVE_SEGMENTS, MIN_FLATTEN_TOL_MM, bounds_of, close_paths, duplicates, flatten, join_lines, join_lines_report};
+pub use ops::{
+    JoinReport, MAX_CURVE_SEGMENTS, MAX_FLATTEN_POINTS, MIN_FLATTEN_TOL_MM, PointBudget, bounds_of, check_tolerance, close_paths, duplicates, flatten,
+    flatten_with_budget, join_lines, join_lines_report,
+};
 
 pub type P2 = [f64; 2];
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -81,6 +84,12 @@ pub enum Error {
     BadInterval(f64),
     #[error("non-finite coordinate")]
     NonFinite,
+    #[error("flattened path exceeds the {0} point limit")]
+    TooManyPoints(usize),
+    /// WP1 addition: a flattening tolerance that is not finite or below `MIN_FLATTEN_TOL_MM` (zero and negative
+    /// included). Refused, never replaced by a default.
+    #[error("flattening tolerance must be a finite number of at least 1e-6 mm (got {0})")]
+    BadTolerance(f64),
     #[error("hatch would produce {0} lines, above the {1} limit")]
     TooManyLines(usize, usize),
     #[error("not implemented: {0}")]

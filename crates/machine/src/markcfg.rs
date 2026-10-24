@@ -62,7 +62,11 @@ pub fn apply(cfg: &MarkCfg, base: &MachineProfile) -> Result<(MachineProfile, Ap
             "FIELDSIZE" => {
                 let field = positive_f64(key, raw)?;
                 galvo.encoding_field = Mm::new(field).map_err(|e| Error::InvalidMarkCfg(e.to_string()))?;
-                galvo.work_area = crate::FieldRect { min: [-field / 2.0, -field / 2.0], max: [field / 2.0, field / 2.0] };
+                let half = field / 2.0;
+                galvo.work_area.min[0] = galvo.work_area.min[0].max(-half);
+                galvo.work_area.min[1] = galvo.work_area.min[1].max(-half);
+                galvo.work_area.max[0] = galvo.work_area.max[0].min(half);
+                galvo.work_area.max[1] = galvo.work_area.max[1].min(half);
                 true
             }
             "MINPWMFREQ" => {

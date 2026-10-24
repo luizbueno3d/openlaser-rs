@@ -49,9 +49,27 @@ mod tests {
         assert_eq!(galvo.field_f(), [236.68, 236.68]);
         assert_eq!(galvo.source.freq_khz, [1.0, 4000.0]);
         assert_eq!(galvo.source.pulse_table_ns, openlaser_types::galvo::JPT_M7_PULSES_NS);
+        assert_eq!(galvo.jump_speed.get(), 3000.0);
+        assert_eq!(galvo.light_speed.get(), 3000.0);
         assert_eq!(galvo.max_speed.get(), 6000.0);
+        assert_eq!(galvo.mo_settle.get(), 8000.0);
+        assert_eq!(galvo.timings.laser_on_us, 100.0);
+        assert_eq!(galvo.timings.laser_off_us, 100.0);
+        assert_eq!(galvo.timings.polygon_us, 100.0);
+        assert_eq!(galvo.timings.jump_delay_short_us, 8.0);
+        assert_eq!(galvo.timings.jump_delay_long_us, 200.0);
         assert_eq!(galvo.first_jump.delay_us, 200.0);
         assert_eq!(galvo.first_jump.settle_10us, 100);
+        assert_eq!(galvo.run_ahead.max_packets, 3);
+        assert_eq!(galvo.run_ahead.max_emission_s, 2.0);
+        assert_eq!(galvo.run_ahead.watchdog_factor, 1.5);
+        assert_eq!(galvo.run_ahead.watchdog_slack_s, 2.0);
+        assert_eq!(galvo.ports.laser_bit, 0);
+        assert_eq!(galvo.ports.red_bit, 8);
+        assert_eq!(galvo.transfer_timeout_ms, 250);
+        assert!(!galvo.usb_set_configuration);
+        assert_eq!(galvo.work_area.min, [-100.0, -100.0]);
+        assert_eq!(galvo.work_area.max, [100.0, 100.0]);
         assert!(validate_profile(&profile).is_ok());
     }
 
@@ -92,6 +110,28 @@ mod tests {
         let mut profile = jpt_m7_200();
         profile.checklist.clear();
         assert!(validate_profile(&profile).is_err());
+    }
+
+    #[test]
+    fn om_gantries_all_validate() {
+        let profiles = om_gantries();
+        assert_eq!(profiles.len(), 3);
+        for profile in profiles {
+            assert!(validate_profile(&profile).is_ok(), "{}", profile.id.0);
+        }
+    }
+
+    #[test]
+    fn markcfg_fieldsize_keeps_user_shrunk_work_area() {
+        let mut base = jpt_m7_200();
+        let Kinematics::Galvo(galvo) = &mut base.kind else { panic!("expected galvo profile") };
+        galvo.work_area.min = [-50.0, -40.0];
+        galvo.work_area.max = [50.0, 40.0];
+        let cfg = markcfg::parse(b"[LMC_CFG]\nFIELDSIZE=200\n").unwrap();
+        let (applied, _) = markcfg::apply(&cfg, &base).unwrap();
+        let Kinematics::Galvo(galvo) = applied.kind else { panic!("expected galvo profile") };
+        assert_eq!(galvo.work_area.min, [-50.0, -40.0]);
+        assert_eq!(galvo.work_area.max, [50.0, 40.0]);
     }
 
     #[test]
