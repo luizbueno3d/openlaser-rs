@@ -385,7 +385,22 @@ pub fn is_live(row: &Row) -> bool {
 pub fn is_shell_row(row: &Row) -> bool {
     match row.id {
         "window.show" => row.panel.is_some_and(|p| crate::dock::PANELS.contains(&p)),
-        "file.open" | "file.import" | "file.exit" | "preview.open" | "edit.settings" | "edit.deviceSettings" | "device.settings" | "laser.liveFraming" => true,
+        // Handled by the shell itself (`OpenLaserApp::invoke_ui_action`): dialogs, windows, view and the Select tool.
+        "file.open"
+        | "file.import"
+        | "file.exit"
+        | "preview.open"
+        | "edit.settings"
+        | "edit.deviceSettings"
+        | "device.settings"
+        | "device.manage"
+        | "laser.liveFraming"
+        | "view.zoomIn"
+        | "view.zoomOut"
+        | "view.zoomPage"
+        | "view.pan"
+        | "tools.select"
+        | "window.resetLayout" => true,
         _ => false,
     }
 }

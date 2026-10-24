@@ -4,7 +4,7 @@
 use openlaser_engine::Registry;
 
 /// Current live engine and shell menu rows. This floor only rises.
-pub const FLOOR: usize = 13;
+pub const FLOOR: usize = 20;
 
 /// (live, catalogued). WP0 stub: nothing is live.
 pub fn live_count(reg: &Registry) -> (usize, usize) {
