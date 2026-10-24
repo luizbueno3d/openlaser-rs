@@ -124,7 +124,10 @@ fn select(s: &mut Session, p: SelectParams) -> Result<Value, EngineError> {
         }
         let tol = s.prefs().curve_tolerance_mm();
         let project = &s.doc()?.project;
-        let polys: Vec<(ObjectId, Vec<Polyline>)> = project.shapes.iter().map(|sh| (sh.id, project.world_polylines(sh.id, tol))).collect();
+        let mut polys: Vec<(ObjectId, Vec<Polyline>)> = Vec::with_capacity(project.shapes.len());
+        for sh in &project.shapes {
+            polys.push((sh.id, project.world_polylines(sh.id, tol).map_err(geomx::geom_error)?));
+        }
         let index = HitIndex::build(polys.iter().map(|(id, p)| (*id, p.as_slice())));
         for id in index.in_rect(Bounds { min: [x0, y0], max: [x1, y1] }, p.crossing.unwrap_or(false)) {
             if !picked.contains(&id) {
@@ -162,7 +165,7 @@ fn duplicate(s: &mut Session, p: IdsParams) -> Result<Created, EngineError> {
         let originals: Vec<Arc<Shape>> = project.shapes.iter().filter(|sh| ids.contains(&sh.id)).cloned().collect();
         let mut fresh = Vec::with_capacity(originals.len());
         for o in originals {
-            let copy = geomx::duplicate(project, &o);
+            let copy = geomx::duplicate(project, &o)?;
             fresh.push(copy.id);
             project.shapes.push(Arc::new(copy));
         }
@@ -255,7 +258,7 @@ fn auto_join(s: &mut Session, p: ToleranceParams) -> Result<Value, EngineError> 
         for sh in project.shapes.iter().filter(|sh| ids.contains(&sh.id) && !sh.locked && matches!(sh.geom, Geom::Path(_) | Geom::Group(_))) {
             let entry = per_layer.entry(sh.layer).or_default();
             entry.0.push(sh.id);
-            entry.1.extend(project.world_polylines(sh.id, flat_tol));
+            entry.1.extend(project.world_polylines(sh.id, flat_tol).map_err(geomx::geom_error)?);
         }
         let mut created = Vec::new();
         let mut joined = 0usize;
@@ -266,7 +269,7 @@ fn auto_join(s: &mut Session, p: ToleranceParams) -> Result<Value, EngineError> 
             }
             joined += polys.len() - out.len();
             project.shapes.retain(|sh| !owners.contains(&sh.id));
-            let id = project.alloc_id();
+            let id = project.alloc_id().map_err(geomx::doc_error)?;
             project.shapes.push(Arc::new(Shape {
                 id,
                 name: None,
@@ -302,7 +305,7 @@ fn delete_duplicates(s: &mut Session, p: IdsParams) -> Result<Changed, EngineErr
         let mut owners = Vec::new();
         let mut polys = Vec::new();
         for id in &ids {
-            for pl in project.world_polylines(*id, tol) {
+            for pl in project.world_polylines(*id, tol).map_err(geomx::geom_error)? {
                 owners.push(*id);
                 polys.push(pl);
             }

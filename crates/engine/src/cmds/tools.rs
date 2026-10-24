@@ -113,7 +113,7 @@ fn add_centred(s: &mut Session, label: &'static str, layer: LayerKey, geom: Geom
     };
     let ids = s.edit(Label::new(label), None, move |project, sel| {
         let mut shape = probe;
-        shape.id = project.alloc_id();
+        shape.id = project.alloc_id().map_err(geomx::doc_error)?;
         shape.xform = Affine::translate(offset);
         let id = shape.id;
         project.shapes.push(Arc::new(shape));
@@ -204,7 +204,7 @@ fn draw_lines(s: &mut Session, p: DrawLinesParams) -> Result<Value, EngineError>
     };
     let layer = layer_or_current(s, p.layer)?;
     let ids = s.edit(Label::new("Draw Lines"), None, move |project, sel| {
-        let id = project.alloc_id();
+        let id = project.alloc_id().map_err(geomx::doc_error)?;
         project.shapes.push(Arc::new(Shape {
             id,
             name: None,

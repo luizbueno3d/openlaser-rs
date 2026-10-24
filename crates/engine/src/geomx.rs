@@ -4,8 +4,30 @@
 use std::sync::Arc;
 
 use openlaser_doc::{Geom, Project, Shape};
-use openlaser_geom::{Affine, BezPath, PathEl, Point, Polyline};
-use openlaser_types::{Bounds, ObjectId};
+use openlaser_geom::{Affine, BezPath, PathEl, Point};
+use openlaser_types::{Bounds, ObjectId, RefusalCode};
+
+use crate::command::EngineError;
+
+/// A geometry-kernel refusal as a command error. The kernel's own message already names the value and the limit;
+/// the operation is refused (inside `Session::edit` the project is unchanged), never clamped or defaulted.
+pub(crate) fn geom_error(e: openlaser_geom::Error) -> EngineError {
+    match e {
+        openlaser_geom::Error::NonFinite => EngineError::refused(RefusalCode::NonFinite, e.to_string()),
+        openlaser_geom::Error::TooManyPoints(_) => EngineError::refused(RefusalCode::TooManyPointsPerPath, e.to_string()),
+        other => EngineError::refused(RefusalCode::UnsupportedMode, other.to_string()),
+    }
+}
+
+/// A model (`doc`) refusal as a command error: an exhausted id space is a document limit, a zero-pass layer is a
+/// job the planner refuses too — both refuse the command, they are never worked around.
+pub(crate) fn doc_error(e: openlaser_doc::Error) -> EngineError {
+    match e {
+        openlaser_doc::Error::IdsExhausted { .. } => EngineError::refused(RefusalCode::TooManyPaths, e.to_string()),
+        openlaser_doc::Error::NotImplemented(m) => EngineError::NotImplemented(m),
+        other => EngineError::refused(RefusalCode::UnsupportedMode, other.to_string()),
+    }
+}
 
 fn extend(acc: &mut Option<Bounds>, p: Point) {
     if !(p.x.is_finite() && p.y.is_finite()) {
@@ -77,22 +99,31 @@ pub(crate) fn el_finite(el: &PathEl) -> bool {
 }
 
 /// Design-mm bounds of objects: the model's exact bounds, else their flattened polylines, else their control
-/// points (a conservative hull for curves).
-pub(crate) fn bounds(project: &Project, ids: &[ObjectId], tol_mm: f64) -> Option<Bounds> {
-    if let Some(b) = project.bounds(ids) {
-        return Some(b);
+/// points (a conservative hull for curves). A shape the kernel cannot measure (a non-finite transform or
+/// coordinate) refuses the command rather than report bounds where the shape is not drawn.
+pub(crate) fn bounds(project: &Project, ids: &[ObjectId], tol_mm: f64) -> Result<Option<Bounds>, EngineError> {
+    if let Some(b) = project.bounds(ids).map_err(geom_error)? {
+        return Ok(Some(b));
     }
-    let polys: Vec<Polyline> = ids.iter().flat_map(|id| project.world_polylines(*id, tol_mm)).collect();
+    let mut polys = Vec::new();
+    for id in ids {
+        polys.extend(project.world_polylines(*id, tol_mm).map_err(geom_error)?);
+    }
     if let Some(b) = openlaser_geom::bounds_of(&polys) {
-        return Some(b);
+        return Ok(Some(b));
     }
+    // The control-point hull for shapes nothing else measured (e.g. a lone MoveTo). `world_transform` carries the
+    // ancestors; stripping the shape's own xform lets `control_bounds` compose the same chain.
     let mut acc = None;
     for id in ids {
         if let Some(s) = project.shape(*id) {
-            control_bounds(s, Affine::IDENTITY, &mut acc);
+            let world = project.world_transform(*id).map_err(geom_error)?.unwrap_or(Affine::IDENTITY);
+            let mut bare = (**s).clone();
+            bare.xform = Affine::IDENTITY;
+            control_bounds(&bare, world, &mut acc);
         }
     }
-    acc
+    Ok(acc)
 }
 
 /// Pre-multiplies `m` onto the transform of every unlocked object in `ids`; returns how many moved.
@@ -109,26 +140,32 @@ pub(crate) fn apply(project: &mut Project, ids: &[ObjectId], m: Affine) -> usize
     n
 }
 
-/// A copy of `shape` (groups deep) with fresh ids from `project`.
-pub(crate) fn duplicate(project: &mut Project, shape: &Shape) -> Shape {
+/// A copy of `shape` (groups deep) with fresh ids from `project`; an exhausted id space refuses the command.
+pub(crate) fn duplicate(project: &mut Project, shape: &Shape) -> Result<Shape, EngineError> {
     let mut s = shape.clone();
-    s.id = project.alloc_id();
+    s.id = project.alloc_id().map_err(doc_error)?;
     if let Geom::Group(children) = &shape.geom {
-        let copies: Vec<Arc<Shape>> = children.iter().map(|c| Arc::new(duplicate(project, c))).collect();
+        let mut copies = Vec::with_capacity(children.len());
+        for c in children {
+            copies.push(Arc::new(duplicate(project, c)?));
+        }
         s.geom = Geom::Group(copies);
     }
-    s
+    Ok(s)
 }
 
 /// Gives `shape` (groups deep) fresh ids from `project` (imported shapes arrive with id 0).
-pub(crate) fn assign_ids(project: &mut Project, shape: Shape) -> Shape {
+pub(crate) fn assign_ids(project: &mut Project, shape: Shape) -> Result<Shape, EngineError> {
     let mut s = shape;
-    s.id = project.alloc_id();
+    s.id = project.alloc_id().map_err(doc_error)?;
     if let Geom::Group(children) = &s.geom {
-        let fresh: Vec<Arc<Shape>> = children.iter().map(|c| Arc::new(assign_ids(project, (**c).clone()))).collect();
+        let mut fresh = Vec::with_capacity(children.len());
+        for c in children {
+            fresh.push(Arc::new(assign_ids(project, (**c).clone())?));
+        }
         s.geom = Geom::Group(fresh);
     }
-    s
+    Ok(s)
 }
 
 /// Sets the layer of `shape` and of every child.
@@ -187,14 +224,15 @@ pub(crate) fn close_subpaths(path: &BezPath, xform: Affine, tol_mm: f64) -> (Bez
 }
 
 /// Number of subpaths and whether all are closed (by ClosePath), for `doc_inspect` items without flattening.
-pub(crate) fn path_stats(project: &Project, id: ObjectId, tol_mm: f64) -> (usize, bool) {
-    let polys = project.world_polylines(id, tol_mm);
+/// A shape the kernel cannot flatten refuses the query rather than undercount.
+pub(crate) fn path_stats(project: &Project, id: ObjectId, tol_mm: f64) -> Result<(usize, bool), EngineError> {
+    let polys = project.world_polylines(id, tol_mm).map_err(geom_error)?;
     if !polys.is_empty() {
         let closed = polys.iter().all(|p| p.is_closed(openlaser_geom::CLOSURE_TOL_MM));
-        return (polys.len(), closed);
+        return Ok((polys.len(), closed));
     }
-    let Some(s) = project.shape(id) else { return (0, false) };
-    match &s.geom {
+    let Some(s) = project.shape(id) else { return Ok((0, false)) };
+    Ok(match &s.geom {
         Geom::Path(p) => {
             let subpaths = p.elements().iter().filter(|e| matches!(e, PathEl::MoveTo(_))).count();
             let closes = p.elements().iter().filter(|e| matches!(e, PathEl::ClosePath)).count();
@@ -202,7 +240,7 @@ pub(crate) fn path_stats(project: &Project, id: ObjectId, tol_mm: f64) -> (usize
         }
         Geom::Rect { .. } | Geom::Ellipse { .. } | Geom::Polygon { .. } | Geom::Bitmap(_) => (1, true),
         Geom::Group(c) => (c.len(), false),
-    }
+    })
 }
 
 #[cfg(test)]

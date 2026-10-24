@@ -67,7 +67,7 @@ fn transform_with(
 ) -> Result<Changed, EngineError> {
     let targets = target_ids(s, id, ids)?;
     let tol = s.prefs().curve_tolerance_mm();
-    let b = geomx::bounds(&s.doc()?.project, &targets, tol).ok_or_else(|| EngineError::bad(id, "/ids", "the selection has no measurable geometry"))?;
+    let b = geomx::bounds(&s.doc()?.project, &targets, tol)?.ok_or_else(|| EngineError::bad(id, "/ids", "the selection has no measurable geometry"))?;
     let m = f(&b)?;
     if !m.as_coeffs().iter().all(|c| c.is_finite()) {
         return Err(EngineError::bad(id, "", "the transform is not finite"));

@@ -199,19 +199,19 @@ impl Session {
             .shapes
             .iter()
             .take(shown)
-            .map(|s| {
-                let (paths, closed) = crate::geomx::path_stats(p, s.id, tol);
-                json!({
+            .map(|s| -> Result<Value, EngineError> {
+                let (paths, closed) = crate::geomx::path_stats(p, s.id, tol)?;
+                Ok(json!({
                     "id": s.id.0,
                     "name": s.name,
                     "layer": s.layer.to_string(),
-                    "bounds": crate::geomx::bounds(p, &[s.id], tol).map(|b| bounds_json(&b)),
+                    "bounds": crate::geomx::bounds(p, &[s.id], tol)?.map(|b| bounds_json(&b)),
                     "paths": paths,
                     "closed": closed,
                     "locked": s.locked,
-                })
+                }))
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
         Ok(json!({
             "index": idx,
             "name": doc.display_name(),

@@ -360,7 +360,8 @@ impl OpenLaserApp {
 
     pub(crate) fn numeric_edits(&mut self, ui: &mut egui::Ui) {
         let selection = self.selection();
-        let bounds = self.project().and_then(|p| p.bounds(&selection));
+        // An unmeasurable selection (a non-finite transform) gives no bounds: the edits stay disabled.
+        let bounds = self.project().and_then(|p| p.bounds(&selection).unwrap_or_default());
         let enabled = bounds.is_some() && !self.ui.machine_active;
         let reason = if self.ui.machine_active { "Edits are locked while a machine is active." } else { "Select shapes to edit their position and size." };
         ui.horizontal(|ui| {
@@ -525,7 +526,7 @@ impl OpenLaserApp {
             ui.label(self.ui.pointer_mm.map(|[x, y]| format!("X {x:.2}  Y {y:.2} mm")).unwrap_or_else(|| "X —  Y — mm".into()));
             ui.separator();
             let selection = self.selection();
-            let summary = match self.project().and_then(|p| p.bounds(&selection)) {
+            let summary = match self.project().and_then(|p| p.bounds(&selection).unwrap_or_default()) {
                 Some(b) if !selection.is_empty() => format!("{} selected · {:.2} × {:.2} mm", selection.len(), b.max[0] - b.min[0], b.max[1] - b.min[1]),
                 _ => format!("{} shapes", self.project().map(|p| p.shapes.len()).unwrap_or(0)),
             };

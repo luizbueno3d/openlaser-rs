@@ -70,7 +70,10 @@ impl AutomationToggle for Automation {
             if let Some(server) = self.server.take() {
                 server.disconnect_all();
                 server.shutdown();
-                discovery::remove(&discovery::default_path());
+                // No configuration folder means no discovery file was ever written: nothing to remove.
+                if let Ok(path) = discovery::default_path() {
+                    discovery::remove(&path);
+                }
             }
             return Ok(None);
         }
@@ -103,7 +106,16 @@ impl AutomationToggle for Automation {
                 write: self.write_root.as_ref().map(|p| p.to_string_lossy().into_owned()),
             },
         };
-        if let Err(e) = discovery::write(&discovery::default_path(), &record) {
+        // Agents find the server through the discovery file; without a configuration folder it cannot be
+        // written, so the server is shut down rather than left listening undiscoverably.
+        let discovery_path = match discovery::default_path() {
+            Ok(path) => path,
+            Err(e) => {
+                server.shutdown();
+                return Err(e.to_string());
+            }
+        };
+        if let Err(e) = discovery::write(&discovery_path, &record) {
             server.shutdown();
             return Err(e.to_string());
         }

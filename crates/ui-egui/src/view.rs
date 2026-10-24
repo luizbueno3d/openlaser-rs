@@ -310,7 +310,8 @@ impl OpenLaserApp {
             let world = view.screen_to_world(position);
             let hit = self.project().and_then(|project| {
                 project.shapes.iter().rev().find_map(|shape| {
-                    let paths: Vec<Vec<[f64; 2]>> = project.world_polylines(shape.id, 0.02).into_iter().map(|line| line.0).collect();
+                    // A shape the kernel cannot flatten is not hit (there is nothing the user could have clicked).
+                    let paths: Vec<Vec<[f64; 2]>> = project.world_polylines(shape.id, 0.02).unwrap_or_default().into_iter().map(|line| line.0).collect();
                     crate::canvas::hit_test(&paths, world, 4.0 / view.zoom).map(|_| shape.id)
                 })
             });

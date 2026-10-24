@@ -167,7 +167,7 @@ pub(crate) fn apply_import(project: &mut Project, imported: Imported) -> Result<
     }
     let mut ids = Vec::with_capacity(imported.shapes.len());
     for shape in imported.shapes {
-        let s = geomx::assign_ids(project, shape);
+        let s = geomx::assign_ids(project, shape)?;
         ids.push(s.id);
         project.shapes.push(std::sync::Arc::new(s));
     }
