@@ -247,7 +247,8 @@ fn b2b_path_data_is_bounded() {
     assert_too_large(run(points), "points attribute");
 }
 
-/// usvg copies text, styles, dash arrays and gradient stops into every element `<use>` expands.
+/// usvg copies text, styles, dash arrays and gradient stops into every element `<use>` expands — and the importer's
+/// own `<use>` expansion is itself bounded (the markup it writes has a byte cap).
 #[test]
 fn b2b_copies_per_expanded_element_are_bounded() {
     let text = svg(&format!(
@@ -255,7 +256,7 @@ fn b2b_copies_per_expanded_element_are_bounded() {
         "x".repeat(1_000_000),
         r##"<use href="#t"/>"##.repeat(300)
     ));
-    assert_too_large(run(text), "bytes of attributes and text");
+    assert_too_large(run(text), "expand to more than");
     let dashes = svg(&format!(r##"<g stroke-dasharray="{}">{}</g>"##, "1 ".repeat(3_000), r##"<path d="M0 0L1 1" stroke="#000000"/>"##.repeat(12_000)));
     assert_too_large(run(dashes), "read or copy");
     let stops: String = (0..1_000).map(|i| format!(r##"<stop offset="{}" stop-color="#000000"/>"##, f64::from(i) / 1_000.0)).collect();
@@ -332,22 +333,27 @@ fn hidden_svg_geometry_is_skipped_with_a_notice() {
 /// file before usvg runs, and the viewport clip usvg adds for a `<symbol>` or a sized nested `<svg>` after.
 #[test]
 fn clipped_svg_geometry_is_refused() {
+    // <symbol> and a <use> cloning one are refused before usvg runs: the clone's viewport clip is a usvg transform a
+    // browser computes differently, not a clip-path the walk can refuse.
     let symbol = r##"<defs><symbol id="s" viewBox="0 0 10 10"><path d="M0 0L20 20" stroke="#000000"/></symbol></defs><use href="#s" width="10" height="10"/>"##;
-    assert_not_implemented(run(svg(symbol)), "viewport");
+    assert_not_implemented(run(svg(symbol)), "symbol");
     let nested = r##"<svg x="0" y="0" width="5" height="5"><path d="M0 0L20 20" stroke="#000000"/></svg>"##;
     assert_not_implemented(run(svg(nested)), "viewport");
     let visible_overflow = r##"<defs><symbol id="s" viewBox="0 0 10 10" overflow="visible"><path d="M0 0L20 20" stroke="#000000"/></symbol></defs><use href="#s" width="10" height="10"/>"##;
-    assert_eq!(run(svg(visible_overflow)).expect("an unclipped symbol imports").shapes.len(), 1);
+    assert_not_implemented(run(svg(visible_overflow)), "symbol");
     // A CSS filter function needs no reference but still changes what is shown.
     assert_not_implemented(run(svg(r##"<g filter="blur(2)"><path d="M0 0L20 20" stroke="#000000"/></g>"##)), "filter");
     // usvg does not clip a nested <svg> without both width and height, browsers do: refused before usvg runs.
-    for no_size in [
-        r##"<svg viewBox="0 0 10 10"><path d="M0 0L20 20" stroke="#000000"/></svg>"##,
-        r##"<svg width="10"><path d="M0 0L20 20" stroke="#000000"/></svg>"##,
-        r##"<defs><svg id="n" height="10"><path d="M0 0L20 20" stroke="#000000"/></svg></defs><use href="#n" width="5" height="5"/>"##,
-    ] {
+    for no_size in
+        [r##"<svg viewBox="0 0 10 10"><path d="M0 0L20 20" stroke="#000000"/></svg>"##, r##"<svg width="10"><path d="M0 0L20 20" stroke="#000000"/></svg>"##]
+    {
         assert_not_implemented(run(svg(no_size)), "nested SVG <svg> elements without both width and height");
     }
+    // A <use> cloning a nested <svg> gets the same viewport problem: refused while the references are expanded.
+    assert_not_implemented(
+        run(svg(r##"<defs><svg id="n" width="5" height="5"><path d="M0 0L20 20" stroke="#000000"/></svg></defs><use href="#n"/>"##)),
+        "cloning <svg>",
+    );
     let unclipped = r##"<svg width="10" height="10" overflow="visible"><path d="M0 0L20 20" stroke="#000000"/></svg>"##;
     assert_eq!(run(svg(unclipped)).expect("a nested svg with overflow visible is not clipped").shapes.len(), 1);
 }
@@ -425,7 +431,8 @@ fn b1_huge_stroke_widths_are_refused() {
     assert_eq!(run(svg(&ordinary)).expect("ordinary stroke widths import").shapes.len(), 3);
 }
 
-/// B2: usvg walks every child node of every element `<use>` clones, comments and text included.
+/// B2: every child node of a cloned element is written out by the `<use>` expansion, comments and text included —
+/// bounded by its own markup cap long before usvg would walk them.
 #[test]
 fn b2_child_nodes_amplified_by_use_are_bounded() {
     for filler in ["<!---->", "<?p?>", "<g/> "] {
@@ -434,22 +441,16 @@ fn b2_child_nodes_amplified_by_use_are_bounded() {
             filler.repeat(100_000),
             r##"<use href="#c"/>"##.repeat(2_000)
         ));
-        let result = run(doc);
-        if filler == "<g/> " {
-            // Elements are refused by the element bound first.
-            assert_too_large(result, "elements once <use> references are expanded");
-        } else {
-            assert_too_large(result, "XML nodes");
-        }
+        assert_too_large(run(doc), "expand to more than");
     }
 }
 
-/// B3: usvg looks up every attribute of every element `<use>` clones; empty values cost nothing in bytes.
+/// B3: every attribute of a cloned element is copied into the generated markup, and bounded by the same cap.
 #[test]
 fn b3_attributes_amplified_by_use_are_bounded() {
     let attributes: String = (0..1_000).map(|i| format!(r#" a{i}="""#)).collect();
     let doc = svg(&format!(r##"<defs><g id="a"{attributes}/></defs>{}<path d="M0 0L1 1" stroke="#000000"/>"##, r##"<use href="#a"/>"##.repeat(100_000)));
-    assert_too_large(run(doc), "bytes of attributes and text");
+    assert_too_large(run(doc), "expand to more than");
 }
 
 /// B4: roxmltree compares each attribute of a start tag with every one before it, before the guard sees the tree.
@@ -593,10 +594,8 @@ fn silently_dropped_svg_content_gets_notices() {
         <path requiredFeatures="http://www.w3.org/TR/SVG11/feature#Extensibility" d="M1 2L9 9" stroke="#000000"/>
         <g systemLanguage="fr"><path d="M1 3L9 9" stroke="#000000"/></g>
         <path requiredExtensions="http://example.org/x" d="M1 4L9 9" stroke="#000000"/>
-        <switch><path systemLanguage="fr" d="M1 5L9 9" stroke="#000000"/><path systemLanguage="en-GB" d="M1 6L9 9" stroke="#000000"/></switch>
         <path transform="scale(0)" d="M1 7L9 9" stroke="#000000"/>
-        <g style="transform: scale(0, 1)"><path d="M1 8L9 9" stroke="#000000"/></g>
-        <g style="transform: rotate(30) scale(0, 1)"><path d="M1 9L9 9" stroke="#000000"/></g>
+        <path transform="rotate(30) scale(0 1)" d="M1 8L9 9" stroke="#000000"/>
         <path transform="translate(1e39)" d="M2 1L9 9" stroke="#000000"/>
         <path d="M2 2L1e39 9" stroke="#000000"/>
         <rect width="1e39" height="1" stroke="#000000"/>
@@ -604,16 +603,20 @@ fn silently_dropped_svg_content_gets_notices() {
     );
     let imported = run(svg(&body)).expect("imports the visible paths");
     // A singular matrix whose scale factors are not zero (rotate, then flatten) is kept by usvg, as a line.
-    assert_eq!(imported.shapes.len(), 3, "the first path, the switch's English path and the flattened path: {:?}", imported.notices);
+    assert_eq!(imported.shapes.len(), 2, "the first path and the flattened path: {:?}", imported.notices);
     assert!(notice(&imported, "<foreignObject>").message.starts_with("1 SVG"));
     assert!(notice(&imported, "outside <switch>").message.starts_with("3 SVG elements"));
-    // scale(0), scale(0, 1) in a style, translate(1e39) and scale(1e-30) (its square underflows f32, as in tiny-skia).
-    assert!(notice(&imported, "scales to zero").message.starts_with("4 SVG elements"));
+    // scale(0), translate(1e39) and scale(1e-30) (its square underflows f32, as in tiny-skia).
+    assert!(notice(&imported, "scales to zero").message.starts_with("3 SVG elements"));
     assert!(notice(&imported, "beyond ±3.4e38").message.starts_with("2 SVG elements"));
     assert_eq!(imported.notices.iter().map(|n| n.n).collect::<Vec<_>>(), (1..=u32::try_from(imported.notices.len()).unwrap()).collect::<Vec<_>>());
-    let sheet = run(svg(&format!("<style>.z{{transform:scale(0)}}</style>{visible}<path class=\"z\" d=\"M0 0L1 1\" stroke=\"#000000\"/>"))).expect("imports");
-    assert_eq!(sheet.shapes.len(), 1);
-    notice(&sheet, "style sheet sets a transform");
+    // A <switch> and a CSS transform are refused outright: both are places a browser and the parser disagree.
+    assert_not_implemented(
+        run(svg(r##"<switch><path systemLanguage="fr" d="M1 5L9 9" stroke="#000000"/><path d="M1 6L9 9" stroke="#000000"/></switch>"##)),
+        "switch",
+    );
+    let sheet = run(svg(&format!("<style>.z{{transform:scale(0)}}</style>{visible}<path class=\"z\" d=\"M0 0L1 1\" stroke=\"#000000\"/>")));
+    assert!(matches!(&sheet, Err(Error::Malformed { message, .. }) if message.contains("CSS transform")), "{sheet:?}");
     let view_box = r##"<svg xmlns="http://www.w3.org/2000/svg" width="1mm" height="1mm" viewBox="0 0 1e39 1e39"><path d="M0 0L1 1" stroke="#000000"/></svg>"##;
     assert_too_large(run(view_box.to_owned()), "viewBox");
 }

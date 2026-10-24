@@ -36,8 +36,9 @@ use usvg::roxmltree::{self, Node, NodeId};
 
 use crate::{
     Error, MAX_ENTITY_POINTS, MAX_IMPORT_POINTS, MAX_SVG_ARC_CURVES, MAX_SVG_ATTRIBUTE_PAIRS, MAX_SVG_ATTRIBUTE_WORK, MAX_SVG_ATTRIBUTES, MAX_SVG_CSS_MATCHES,
-    MAX_SVG_DEPTH, MAX_SVG_ELEMENTS, MAX_SVG_EMPTY_SEGMENTS, MAX_SVG_EXPANDED_BYTES, MAX_SVG_EXPANDED_NODES, MAX_SVG_GRADIENT_COPIES, MAX_SVG_HREF_CHAIN,
-    MAX_SVG_NAME_BYTES, MAX_SVG_NAMESPACES, MAX_SVG_PATH_DATA_BYTES, MAX_SVG_STROKE_WIDTH, MAX_SVG_STYLE_BYTES, MAX_SVG_STYLE_SCAN, Result,
+    MAX_SVG_DEPTH, MAX_SVG_ELEMENTS, MAX_SVG_EMPTY_SEGMENTS, MAX_SVG_EXPANDED_BYTES, MAX_SVG_EXPANDED_NODES, MAX_SVG_EXPANDED_SOURCE_BYTES,
+    MAX_SVG_GRADIENT_COPIES, MAX_SVG_HREF_CHAIN, MAX_SVG_NAME_BYTES, MAX_SVG_NAMESPACES, MAX_SVG_PATH_DATA_BYTES, MAX_SVG_STROKE_WIDTH, MAX_SVG_STYLE_BYTES,
+    MAX_SVG_STYLE_SCAN, Result,
 };
 
 const SVG_NS: &str = "http://www.w3.org/2000/svg";
@@ -287,10 +288,8 @@ pub(crate) struct SvgFacts {
     pub failed_conditions: usize,
     /// Elements with a geometry number beyond f32 (usvg converts to f32 and drops what becomes infinite).
     pub f32_overflows: usize,
-    /// Elements whose `transform` (attribute or `style`) scales to zero or is not finite in f32: usvg drops them.
+    /// Elements whose `transform` attribute scales to zero or is not finite in f32: usvg drops them.
     pub degenerate_transforms: usize,
-    /// A `<style>` sheet sets such a transform.
-    pub sheet_degenerate_transform: bool,
 }
 
 /// Elements by id: `all` holds every element carrying an id usvg resolves `url(#…)` and gradient `href`s against
@@ -320,11 +319,58 @@ fn attribute_values<'a>(node: Node<'a, '_>, name: &'a str) -> impl Iterator<Item
     node.attributes().filter(move |a| a.name() == name && read_by_usvg(a)).map(|a| a.value())
 }
 
+/// Elements usvg turns into renderable content, containers or paint servers. Anything else in the SVG namespace
+/// (and any element in another namespace) makes usvg drop the whole subtree; browsers keep rendering SVG children
+/// below it, so such an element is only acceptable when it contains no SVG elements at all.
+const ALLOWED_ELEMENTS: [&str; 21] = [
+    "svg",
+    "g",
+    "a",
+    "defs",
+    "path",
+    "rect",
+    "circle",
+    "ellipse",
+    "line",
+    "polyline",
+    "polygon",
+    "use",
+    "text",
+    "tspan",
+    "textPath",
+    "image",
+    "foreignObject",
+    "linearGradient",
+    "radialGradient",
+    "stop",
+    "style",
+];
+
+/// Whether an element that usvg skips entirely (an unknown SVG element like `<font>`, `<title>` / `<desc>` /
+/// `<metadata>`, or anything in another namespace) hides SVG elements a browser would render.
+fn inert_check(node: Node<'_, '_>) -> Result<()> {
+    if node.descendants().any(|d| d.id() != node.id() && svg_element(d)) {
+        return Err(malformed(format!(
+            "an SVG <{}> element (in an unsupported namespace or an unsupported element) contains SVG content that is not imported; ungroup or delete it",
+            node.tag_name().name()
+        )));
+    }
+    Ok(())
+}
+
 /// Checks the parsed tree before usvg converts it (see the module docs).
 pub(crate) fn check(doc: &roxmltree::Document<'_>) -> Result<SvgFacts> {
     let root = doc.root_element();
     if root.tag_name().name() != "svg" {
         return Err(malformed(format!("the root element is <{}>, not <svg>", root.tag_name().name())));
+    }
+    for node in doc.descendants() {
+        // A browser loads the external sheet; usvg would apply only the internal ones — different geometry.
+        if node.is_pi() && node.pi().is_some_and(|pi| pi.target.eq_ignore_ascii_case("xml-stylesheet")) {
+            return Err(Error::NotImplemented(
+                "an <?xml-stylesheet?> processing instruction (an external style sheet); inline it as a <style> element or use presentation attributes",
+            ));
+        }
     }
     let mut ids = Ids { all: HashMap::new(), first_plain: HashMap::new() };
     for node in doc.descendants().filter(Node::is_element) {
@@ -339,17 +385,13 @@ pub(crate) fn check(doc: &roxmltree::Document<'_>) -> Result<SvgFacts> {
     let mut styles = Styles::default();
     for node in doc.descendants().filter(Node::is_element) {
         let svg = svg_element(node);
-        match node.tag_name().name() {
+        let name = node.tag_name().name();
+        match name {
             "image" => facts.images += 1,
             "text" => facts.texts += 1,
             "tref" => return Err(Error::NotImplemented("SVG <tref> elements (they copy text from elsewhere in the file); delete them")),
             "feImage" if attribute_values(node, "href").any(|href| href.trim_start().starts_with('#')) => {
                 return Err(Error::NotImplemented("SVG <feImage> elements that render another element; delete the filter"));
-            }
-            // usvg's pattern pass is quadratic even for patterns nothing uses, and a pattern paint renders arbitrary
-            // content per painted path.
-            "pattern" if svg => {
-                return Err(Error::NotImplemented("SVG <pattern> elements (pattern fills and strokes); convert them to plain colours before importing"));
             }
             "foreignObject" if svg => facts.foreign_objects += 1,
             // A nested <svg> without both sizes is clipped by browsers to its enclosing viewport but not by usvg (one
@@ -362,17 +404,90 @@ pub(crate) fn check(doc: &roxmltree::Document<'_>) -> Result<SvgFacts> {
                 ));
             }
             "style" => {
-                // usvg reads any element named `style` (whatever its namespace or `type`); each text is checked.
-                for text in node.descendants().filter(|t| t.is_text()).filter_map(|t| t.text()) {
-                    styles.sheet_bytes = styles.sheet_bytes.saturating_add(text.len());
-                    if styles.sheet_bytes > MAX_SVG_STYLE_BYTES {
-                        return Err(Error::TooLarge(format!("SVG style sheets hold more than {MAX_SVG_STYLE_BYTES} bytes")));
+                // usvg reads any element named `style` (whatever its namespace), but honours `type` exactly and
+                // ignores `media` and `disabled`, which a browser applies: they are refused where they diverge.
+                let mut parses_as_css = true;
+                for attribute in node.attributes().filter(|a| read_by_usvg(a)) {
+                    match attribute.name() {
+                        "media" => {
+                            let matches_screen =
+                                attribute.value().split(',').any(|query| matches!(query.trim().to_ascii_lowercase().as_str(), "" | "all" | "screen"));
+                            if !matches_screen {
+                                return Err(Error::NotImplemented(
+                                    "an SVG style sheet with a media condition that does not match on screen (media=\"…\"); a browser would not apply it but the parser would",
+                                ));
+                            }
+                        }
+                        "type" => {
+                            let value = attribute.value().trim();
+                            if value != "text/css" && value.eq_ignore_ascii_case("text/css") {
+                                return Err(Error::NotImplemented("a <style> type that is not exactly \"text/css\"; the parser is case-sensitive here"));
+                            }
+                            parses_as_css &= value == "text/css";
+                        }
+                        "disabled" => {
+                            return Err(Error::NotImplemented("a disabled SVG style sheet (a browser would not apply it but the parser would)"));
+                        }
+                        // Titled style sheets are alternate sets in a browser (only one set applies); the parser
+                        // would apply them all.
+                        "title" if !attribute.value().is_empty() => {
+                            return Err(Error::NotImplemented("an SVG style sheet with a title (a browser treats it as an alternate set)"));
+                        }
+                        _ => {}
                     }
-                    styles.sheet_scan = styles.sheet_scan.saturating_add(css_rescans(text));
-                    styles.check_sheet(text)?;
+                }
+                if parses_as_css {
+                    for text in node.descendants().filter(|t| t.is_text()).filter_map(|t| t.text()) {
+                        styles.sheet_bytes = styles.sheet_bytes.saturating_add(text.len());
+                        if styles.sheet_bytes > MAX_SVG_STYLE_BYTES {
+                            return Err(Error::TooLarge(format!("SVG style sheets hold more than {MAX_SVG_STYLE_BYTES} bytes")));
+                        }
+                        styles.sheet_scan = styles.sheet_scan.saturating_add(css_rescans(text));
+                        styles.check_sheet(text)?;
+                    }
                 }
             }
             _ => {}
+        }
+        if svg {
+            match name {
+                // Rendered features the importer cannot reproduce (kept refused, named for the user).
+                "clipPath" | "mask" => {
+                    return Err(Error::NotImplemented("SVG <clipPath> and <mask> elements; release them in the editor before importing"));
+                }
+                "marker" => {
+                    return Err(Error::NotImplemented("SVG <marker> elements; convert them to paths before importing"));
+                }
+                "pattern" => {
+                    return Err(Error::NotImplemented("SVG <pattern> elements (pattern fills and strokes); convert them to plain colours before importing"));
+                }
+                "symbol" => {
+                    return Err(Error::NotImplemented("SVG <symbol> elements (viewport-scaled clones); ungroup them before importing"));
+                }
+                // Browsers evaluate <switch> conditions with the user's own language; a wrong branch could burn.
+                "switch" => {
+                    return Err(Error::NotImplemented("SVG <switch> conditional content; delete the branches that do not apply"));
+                }
+                "animate" | "animateColor" | "animateMotion" | "animateTransform" | "set" | "mpath" => {
+                    return Err(Error::NotImplemented("SVG animation elements (<animate>, <set>, …); export the static result"));
+                }
+                "script" | "handler" | "listener" | "discard" => {
+                    return Err(Error::NotImplemented("SVG scripting and event elements (<script>, <handler>, <listener>, <discard>); remove them"));
+                }
+                "link" => {
+                    return Err(Error::NotImplemented("SVG <link> elements (external style sheets); use a <style> element or presentation attributes"));
+                }
+                "filter" => {
+                    return Err(Error::NotImplemented("SVG <filter> elements (<feGaussianBlur>, <feImage>, …); delete the filter"));
+                }
+                _ if name.len() > 2 && name.starts_with("fe") && name.as_bytes().get(2).is_some_and(u8::is_ascii_uppercase) => {
+                    return Err(Error::NotImplemented("SVG filter elements (<feGaussianBlur>, <feImage>, …); delete the filter"));
+                }
+                _ if ALLOWED_ELEMENTS.contains(&name) => {}
+                _ => inert_check(node)?,
+            }
+        } else {
+            inert_check(node)?;
         }
         facts.failed_conditions +=
             usize::from(svg && condition_fails(node) && !node.parent_element().is_some_and(|p| svg_element(p) && p.tag_name().name() == "switch"));
@@ -386,18 +501,37 @@ pub(crate) fn check(doc: &roxmltree::Document<'_>) -> Result<SvgFacts> {
                     }
                     let declared = styles.check_declarations(value)?;
                     hidden |= declared.hides;
-                    degenerate |= declared.degenerate_transform;
                 }
                 "display" => hidden |= value.trim() == "none",
                 "d" | "points" if value.len() > MAX_SVG_PATH_DATA_BYTES => {
                     return Err(Error::TooLarge(format!("an SVG {name} attribute holds {} bytes; the limit is {MAX_SVG_PATH_DATA_BYTES}", value.len())));
                 }
+                "points" if !points_complete(value) => {
+                    return Err(malformed(format!(
+                        "an SVG points list stops parsing before its end (\"{}\"); a browser drops the whole element but the parser would keep the prefix — fix the list",
+                        value.get(..40).unwrap_or(value)
+                    )));
+                }
                 "transform" => degenerate |= degenerate_transform(value),
-                // usvg ignores a viewBox it cannot hold in f32 and would draw the content at the wrong scale.
-                "viewBox" if overflows_f32(value) => {
-                    return Err(Error::TooLarge("an SVG viewBox holds a number beyond ±3.4e38 (single precision)".to_owned()));
+                "transform-origin" | "transform-box" => {
+                    return Err(malformed(format!("the SVG {name} attribute (transform origins and boxes); use a plain transform")));
+                }
+                "viewBox" => {
+                    // usvg ignores a viewBox it cannot hold in f32 and would draw the content at the wrong scale.
+                    if overflows_f32(value) {
+                        return Err(Error::TooLarge("an SVG viewBox holds a number beyond ±3.4e38 (single precision)".to_owned()));
+                    }
+                    check_viewbox(value)?;
                 }
                 _ => styles.check_property(name, value)?,
+            }
+            if LENGTH_ATTRIBUTES.contains(&name) {
+                check_unit_suffixes(name, value)?;
+                if SINGLE_LENGTH_ATTRIBUTES.contains(&name) && value != value.trim_end() {
+                    return Err(malformed(format!(
+                        "an SVG {name} value of \"{value}\" ends in whitespace; a browser trims it but the parser drops the whole value — remove the whitespace"
+                    )));
+                }
             }
             overflow |= GEOMETRY_ATTRIBUTES.contains(&name) && overflows_f32(value);
         }
@@ -406,7 +540,6 @@ pub(crate) fn check(doc: &roxmltree::Document<'_>) -> Result<SvgFacts> {
         facts.f32_overflows += usize::from(svg && overflow);
     }
     facts.sheet_hides = styles.sheet_hides;
-    facts.sheet_degenerate_transform = styles.sheet_degenerate_transform;
     if styles.selector_parts > 0 {
         // simplecss compares every selector with every element's `class` and `id`: keep each comparison short.
         for node in doc.descendants().filter(Node::is_element) {
@@ -588,14 +721,12 @@ struct Styles<'a> {
     /// The most numbers any `stroke-dasharray` holds.
     dash_values: u64,
     sheet_hides: bool,
-    sheet_degenerate_transform: bool,
 }
 
 /// What a `style` attribute or sheet block declares that the import reports.
 #[derive(Default)]
 struct Declared {
     hides: bool,
-    degenerate_transform: bool,
 }
 
 /// Properties that clip or mask what an element shows (usvg reads `clip-path` and `mask`; browsers also honour the
@@ -632,8 +763,13 @@ impl<'a> Styles<'a> {
             p if CLIPPING_PROPERTIES.contains(&p) && !(value.trim().is_empty() || value.trim().eq_ignore_ascii_case("none")) => {
                 return Err(reference_refusal("clip-path"));
             }
-            "filter" | "marker" | "marker-start" | "marker-mid" | "marker-end" if url_count(value) > 0 => {
-                return Err(reference_refusal(property));
+            // A filter or marker with any value but none changes what a browser draws (CSS filter functions need no
+            // url(…) reference).
+            "filter" | "marker" | "marker-start" | "marker-mid" | "marker-end" => {
+                let value = value.trim();
+                if !(value.is_empty() || value.eq_ignore_ascii_case("none") || value.eq_ignore_ascii_case("inherit")) {
+                    return Err(reference_refusal(property));
+                }
             }
             _ => {}
         }
@@ -659,12 +795,29 @@ impl<'a> Styles<'a> {
             }
             let name = name.trim().to_ascii_lowercase();
             let value = value.trim();
-            let value = value.strip_suffix("!important").map_or(value, str::trim_end);
+            let value = strip_important(value);
             match name.as_str() {
                 "display" => declared.hides |= value == "none",
-                "transform" => declared.degenerate_transform |= degenerate_transform(value),
+                // A CSS transform is a different grammar than the transform attribute (units, translateX, 3-D); the
+                // parser reads only the SVG form, so anything a browser could interpret differently is refused.
+                "transform" | "translate" | "rotate" | "scale" | "transform-origin" | "transform-box" | "perspective" | "rotate3d" => {
+                    if !matches!(value, "" | "none" | "inherit" | "initial" | "unset" | "revert") {
+                        return Err(malformed(format!("a CSS transform ({name}:) in a style attribute or style sheet; move it to a transform attribute")));
+                    }
+                }
+                // SVG2 geometry properties: browsers apply them, the parser only reads the attributes.
+                _ if GEOMETRY_CSS_PROPERTIES.contains(&name.as_str()) => {
+                    return Err(malformed(format!("the CSS geometry property {name}: in a style attribute or style sheet; set it as an attribute")));
+                }
+                // Animation, transitions and motion move or hide geometry in a browser but not here.
+                _ if name.starts_with("animation") || name.starts_with("transition") || name.starts_with("offset") || name.starts_with("motion") => {
+                    return Err(malformed(format!("the CSS property {name}: (animation, transition or motion); export the static result")));
+                }
                 _ if url_count(value) > 0 && !matches!(name.as_str(), "fill" | "stroke") => return Err(reference_refusal(&name)),
-                _ => self.check_property(&name, value)?,
+                _ => {
+                    check_unit_suffixes(&name, value)?;
+                    self.check_property(&name, value)?;
+                }
             }
         }
         Ok(declared)
@@ -707,7 +860,6 @@ impl<'a> Styles<'a> {
             let declared = self.check_declarations(block)?;
             self.sheet_paints |= self.paints.len() > paints;
             self.sheet_hides |= declared.hides;
-            self.sheet_degenerate_transform |= declared.degenerate_transform;
             i = close + 1;
         }
     }
@@ -1087,6 +1239,285 @@ fn own_vertices(node: Node<'_, '_>) -> Result<u64> {
     })
 }
 
+// ---- <use> expansion (usvg applies a <use> transform twice; refs are expanded here instead) -------------------------
+
+/// Elements a `<use>` may clone (shapes, groups and the ignorable `<text>` / `<image>` / `<foreignObject>`). A nested
+/// `<svg>`, a `<symbol>` or a paint server / style element cannot be cloned: `<svg>` and `<symbol>` get a viewport
+/// clip a browser computes differently than the importer, and the others are not renderable.
+const USE_TARGETS: [&str; 14] = ["g", "a", "defs", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "text", "image", "use", "foreignObject"];
+
+fn is_use_element(node: Node<'_, '_>) -> bool {
+    svg_element(node) && node.tag_name().name() == "use"
+}
+
+/// `<use>` elements inside `node`, excluding children of other `<use>` elements (a `<use>`'s own children are
+/// fallback content: never rendered, so they vanish with their parent instead of being expanded).
+fn top_uses<'a, 'input>(node: Node<'a, 'input>, out: &mut Vec<Node<'a, 'input>>) {
+    for child in node.children().filter(|c| c.is_element()) {
+        if is_use_element(child) {
+            out.push(child);
+        } else {
+            top_uses(child, out);
+        }
+    }
+}
+
+/// Replaces every `<use>` element in the document with the `<g>` a browser instantiates (`transform` plus the `x`,`y`
+/// translation, then the referenced subtree cloned verbatim) and returns the rewritten markup; `None` when there is
+/// no `<use>`. usvg must never see a `<use>`: it composes the use element's `transform` into the absolute transform
+/// of the cloned content a second time (a translate lands twice as far as a browser puts it). The reference is
+/// resolved the way the browser does (first element with the id in document order), `x` and `y` become a `translate`
+/// appended to the use transform, every other attribute moves onto the group so the checks of [`check`] apply to it
+/// unchanged, and the clone keeps its markup byte for byte (with the namespace declarations of its original scope).
+pub(crate) fn expand_uses(doc: &roxmltree::Document<'_>, source: &str, dpi: f64) -> Result<Option<String>> {
+    let root = doc.root_element();
+    let mut uses = Vec::new();
+    top_uses(root, &mut uses);
+    if uses.is_empty() {
+        return Ok(None);
+    }
+    let mut first_plain: HashMap<&str, Node<'_, '_>> = HashMap::new();
+    for node in doc.descendants().filter(Node::is_element) {
+        if let Some(id) = node.attribute("id") {
+            first_plain.entry(id).or_insert(node);
+        }
+    }
+    let mut out = String::with_capacity(source.len().min(MAX_SVG_EXPANDED_SOURCE_BYTES).saturating_add(256));
+    let mut active = std::collections::HashSet::new();
+    emit_chunk(&mut out, source, 0, root.range().start)?;
+    emit_subtree(root, 1, source, &mut out, &first_plain, &mut active, dpi)?;
+    emit_chunk(&mut out, source, root.range().end, source.len())?;
+    Ok(Some(out))
+}
+
+/// Appends `source[from..to]` to `out`, bounded by [`MAX_SVG_EXPANDED_SOURCE_BYTES`].
+fn emit_chunk(out: &mut String, source: &str, from: usize, to: usize) -> Result<()> {
+    if out.len().saturating_add(to.saturating_sub(from)) > MAX_SVG_EXPANDED_SOURCE_BYTES {
+        return Err(Error::TooLarge(format!("the SVG's <use> elements expand to more than {} bytes of markup", MAX_SVG_EXPANDED_SOURCE_BYTES)));
+    }
+    out.push_str(source.get(from..to).unwrap_or_default());
+    Ok(())
+}
+
+/// Emits `source[node.range()]` with every `<use>` inside it replaced; `out_depth` is the depth `node` sits at in the
+/// emitted document (the root is 1, a `<use>`'s generated `<g>` puts the clone one level below it). `active` holds
+/// the ids of every element whose markup is currently being emitted: a `<use>` targeting one of them can never
+/// terminate (`<g id="a"><use href="#a"/></g>` or the mutual version).
+fn emit_subtree<'a, 'input>(
+    node: Node<'a, 'input>,
+    out_depth: usize,
+    source: &'a str,
+    out: &mut String,
+    first_plain: &HashMap<&str, Node<'a, 'input>>,
+    active: &mut std::collections::HashSet<NodeId>,
+    dpi: f64,
+) -> Result<()> {
+    if out_depth >= MAX_SVG_DEPTH {
+        return Err(too_deep(" once <use> references are expanded"));
+    }
+    active.insert(node.id());
+    let result = (|| {
+        if is_use_element(node) {
+            return emit_use(node, out_depth, source, out, first_plain, active, dpi);
+        }
+        let mut uses = Vec::new();
+        top_uses(node, &mut uses);
+        let mut pos = node.range().start;
+        for u in uses {
+            // `ancestors()` yields the node itself: u at out_depth + (elements between them, u counted).
+            let below = u.ancestors().take_while(|a| a.id() != node.id()).count();
+            emit_chunk(out, source, pos, u.range().start)?;
+            emit_use(u, out_depth.saturating_add(below), source, out, first_plain, active, dpi)?;
+            pos = u.range().end;
+        }
+        emit_chunk(out, source, pos, node.range().end)
+    })();
+    active.remove(&node.id());
+    result
+}
+
+/// Emits `<g …>clone</g>` for one `<use>`, or nothing where the reference resolves to nothing (the browser renders
+/// nothing there either).
+fn emit_use<'a, 'input>(
+    u: Node<'a, 'input>,
+    out_depth: usize,
+    source: &'a str,
+    out: &mut String,
+    first_plain: &HashMap<&str, Node<'a, 'input>>,
+    active: &mut std::collections::HashSet<NodeId>,
+    dpi: f64,
+) -> Result<()> {
+    // Collect the use's own values; everything else is carried onto the generated group verbatim so that the guard's
+    // attribute checks (and style inheritance) see exactly the same document a browser renders.
+    let mut ids: Vec<&str> = Vec::new();
+    let mut transform: Option<&str> = None;
+    let (mut x, mut y) = (0.0f64, 0.0f64);
+    for attribute in u.attributes() {
+        let (name, value) = (attribute.name(), attribute.value());
+        if !read_by_usvg(&attribute) {
+            continue;
+        }
+        match name {
+            "href" => {
+                if !value.trim_start().starts_with('#') {
+                    return Err(Error::NotImplemented(
+                        "an SVG <use> with an external reference (an href that does not start with '#'); place the referenced element inside the file",
+                    ));
+                }
+                for key in iri_keys(value).into_iter().flatten() {
+                    if !ids.contains(&key) {
+                        ids.push(key);
+                    }
+                }
+            }
+            "x" | "y" => {
+                let user_units = absolute_length(value).ok_or(Error::NotImplemented("SVG <use> x or y in %, em or ex; use absolute units"))? * dpi / 96.0;
+                if name == "x" {
+                    x = user_units;
+                } else {
+                    y = user_units;
+                }
+            }
+            "transform" => {
+                if transform.is_none() {
+                    transform = Some(value);
+                }
+            }
+            // Only matter for <svg>/<symbol> targets, which are refused below: dropped like the browser drops them.
+            "width" | "height" => {}
+            _ => {}
+        }
+    }
+    if ids.len() > 1 {
+        return Err(Error::NotImplemented("an SVG <use> with conflicting href and xlink:href attributes"));
+    }
+    let Some(target) = ids.first().and_then(|id| first_plain.get(id)) else {
+        return Ok(());
+    };
+    if !svg_element(*target) {
+        return Err(Error::NotImplemented("an SVG <use> cloning an element that is not in the SVG namespace"));
+    }
+    let name = target.tag_name().name();
+    if matches!(name, "svg" | "symbol") {
+        return Err(Error::NotImplemented(
+            "SVG <use> elements cloning <svg> or <symbol> (the clone gets a viewport clip computed differently); ungroup or link to plain shapes",
+        ));
+    }
+    if !USE_TARGETS.contains(&name) {
+        return Err(malformed(format!("an SVG <use> element cloning <{name}>; only shapes and groups can be cloned")));
+    }
+    if active.contains(&target.id()) {
+        return Err(recursive_use());
+    }
+    // The clone's markup is copied byte for byte, so it keeps the prefixes its scope gives it: every namespace
+    // declared on the target or an ancestor goes onto the generated group (innermost first, so shadowing wins).
+    let mut decls: Vec<(Option<String>, String)> = Vec::new();
+    for ancestor in target.ancestors() {
+        for ns in ancestor.namespaces() {
+            if !decls.iter().any(|(n, _)| n.as_deref() == ns.name()) {
+                decls.push((ns.name().map(str::to_owned), ns.uri().to_owned()));
+            }
+        }
+    }
+    // Attributes the generated group carries (everything but the consumed ones), with qualified names: a namespaced
+    // attribute needs a declared prefix — reuse the clone's scope prefix for the URI, else mint one.
+    let mut attrs: Vec<(String, &str)> = Vec::new();
+    for attribute in u.attributes().filter(|a| read_by_usvg(a)) {
+        let name = attribute.name();
+        if matches!(name, "href" | "x" | "y" | "width" | "height" | "transform") {
+            continue;
+        }
+        let qualified = match attribute.namespace() {
+            None => name.to_owned(),
+            Some(XML_NS) => format!("xml:{name}"),
+            Some(uri) => {
+                let existing = decls.iter().find(|(n, u)| u == uri && n.is_some()).and_then(|(n, _)| n.clone());
+                let prefix = existing.unwrap_or_else(|| {
+                    let p = mint_prefix(&decls);
+                    decls.push((Some(p.clone()), uri.to_owned()));
+                    p
+                });
+                format!("{prefix}:{name}")
+            }
+        };
+        attrs.push((qualified, attribute.value()));
+    }
+    // The generated group must land in the SVG namespace; when the clone's default namespace is another one the
+    // clone keeps it and the group gets a generated prefix instead.
+    let default_ns = decls.iter().find(|(n, _)| n.is_none()).map(|(_, u)| u.clone());
+    let svg_prefix = match default_ns.as_deref() {
+        Some(SVG_NS) => None,
+        Some(_) => Some(mint_prefix(&decls)),
+        // No default declaration in the clone's scope: declare the SVG namespace anyway — elements copied from a
+        // no-namespace scope are treated like SVG elements by usvg either way.
+        None => None,
+    };
+    let mut start = String::with_capacity(64);
+    start.push_str(&format!(" xmlns=\"{}\"", escape(default_ns.as_deref().unwrap_or(SVG_NS))));
+    if let Some(p) = &svg_prefix {
+        start.push_str(&format!(" xmlns:{p}=\"{SVG_NS}\""));
+    }
+    for (n, uri) in decls.iter().filter(|(n, _)| n.is_some()) {
+        start.push_str(&format!(" xmlns:{}=\"{}\"", n.as_deref().unwrap_or_default(), escape(uri)));
+    }
+    for (qualified, value) in &attrs {
+        start.push_str(&format!(" {qualified}=\"{}\"", escape(value)));
+    }
+    // translate(x, y) is appended to the use transform list (applied first), as browsers and the SVG spec compose it.
+    let mut merged = transform.map(String::from).unwrap_or_default();
+    if x != 0.0 || y != 0.0 {
+        if !merged.is_empty() {
+            merged.push(' ');
+        }
+        merged.push_str(&format!("translate({x} {y})"));
+    }
+    if !merged.is_empty() {
+        start.push_str(&format!(" transform=\"{}\"", escape(&merged)));
+    }
+    out.push('<');
+    if let Some(p) = &svg_prefix {
+        out.push_str(p);
+        out.push(':');
+    }
+    out.push('g');
+    out.push_str(&start);
+    out.push('>');
+    emit_subtree(*target, out_depth + 1, source, out, first_plain, active, dpi)?;
+    out.push_str("</");
+    if let Some(p) = &svg_prefix {
+        out.push_str(p);
+        out.push(':');
+    }
+    out.push_str("g>");
+    Ok(())
+}
+
+/// A fresh prefix not colliding with the clone's scope declarations.
+fn mint_prefix(decls: &[(Option<String>, String)]) -> String {
+    for i in 0..1000usize {
+        let candidate = format!("ons{i}");
+        if !decls.iter().any(|(n, _)| n.as_deref() == Some(candidate.as_str())) {
+            return candidate;
+        }
+    }
+    "onsX".to_owned()
+}
+
+/// `&`, `<`, `>` and `"` for an emitted attribute value or namespace URI.
+fn escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 // ---- path data (svgtypes 0.15 and kurbo 0.11 mirrors) -------------------------------------------------------------
 
 /// svgtypes' byte stream, as far as path data, point lists and lengths need it.
@@ -1236,6 +1667,167 @@ fn radius_px(value: &str) -> Result<f64> {
 
 /// Attributes whose numbers become geometry (`transform` is checked as a transform instead, `viewBox` refused).
 const GEOMETRY_ATTRIBUTES: [&str; 15] = ["d", "points", "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry", "width", "height"];
+
+/// The SVG2 geometry properties a `style` declaration could carry: browsers apply them, usvg reads only the
+/// attributes, so `style="cx:50"` would draw a circle at its attribute position while a browser moves it.
+const GEOMETRY_CSS_PROPERTIES: [&str; 14] = ["d", "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry", "width", "height"];
+
+/// Attribute values parsed as one length each by svgtypes (`!at_end()` after the unit fails the whole value):
+/// a trailing whitespace survives there but a browser trims it.
+const SINGLE_LENGTH_ATTRIBUTES: [&str; 28] = [
+    "x",
+    "y",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "cx",
+    "cy",
+    "r",
+    "rx",
+    "ry",
+    "fx",
+    "fy",
+    "fr",
+    "width",
+    "height",
+    "refX",
+    "refY",
+    "z",
+    "radius",
+    "azimuth",
+    "elevation",
+    "stroke-width",
+    "stroke-dashoffset",
+    "offset",
+    "startOffset",
+    "textLength",
+    "pathLength",
+];
+
+/// Attributes parsed as lengths or length/number lists: an ASCII letter right after a number must be a unit
+/// svgtypes reads (lower-case only), or the value is mis-scaled or dropped where a browser accepts it.
+const LENGTH_ATTRIBUTES: [&str; 38] = [
+    "x",
+    "y",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "cx",
+    "cy",
+    "r",
+    "rx",
+    "ry",
+    "fx",
+    "fy",
+    "fr",
+    "width",
+    "height",
+    "refX",
+    "refY",
+    "dx",
+    "dy",
+    "rotate",
+    "z",
+    "radius",
+    "azimuth",
+    "elevation",
+    "order",
+    "scale",
+    "kernelUnitLength",
+    "points",
+    "viewBox",
+    "stroke-width",
+    "stroke-dasharray",
+    "stroke-dashoffset",
+    "stroke-miterlimit",
+    "offset",
+    "startOffset",
+    "textLength",
+    "pathLength",
+];
+
+/// Units svgtypes parses after a number (the suffix must be exactly lower-case).
+const SVG_UNITS: [&str; 9] = ["em", "ex", "px", "in", "cm", "mm", "pt", "pc", "%"];
+
+/// Units a browser accepts but svgtypes does not (a value using one is mis-parsed, not just refused by both).
+const BROWSER_UNITS: [&str; 35] = [
+    "q", "rem", "ch", "cap", "ic", "lh", "rlh", "vw", "vh", "vi", "vb", "vmin", "vmax", "svw", "svh", "svi", "svb", "lvw", "lvh", "lvi", "lvb", "dvw", "dvh",
+    "dvi", "dvb", "deg", "grad", "rad", "turn", "s", "ms", "fr", "dpi", "dpcm", "dppx",
+];
+
+/// Scans `value` for `number + ASCII letters` where the letters spell a unit browsers know but in a form svgtypes
+/// does not accept (`100MM`, `1Q`, `2Deg`): usvg then drops or mis-scales what a browser honours.
+fn check_unit_suffixes(name: &str, value: &str) -> Result<()> {
+    let bytes = value.as_bytes();
+    let mut i = 0usize;
+    while let Some(&b) = bytes.get(i) {
+        if b.is_ascii_digit() || b == b'.' {
+            let mut s = Stream::new(value);
+            s.pos = i;
+            if s.number().is_some() {
+                let run_start = s.pos;
+                let mut j = run_start;
+                while bytes.get(j).is_some_and(u8::is_ascii_alphabetic) {
+                    j += 1;
+                }
+                if j > run_start {
+                    let unit = &value[run_start..j];
+                    if !SVG_UNITS.contains(&unit) && SVG_UNITS.iter().chain(BROWSER_UNITS.iter()).any(|u| unit.eq_ignore_ascii_case(u)) {
+                        return Err(malformed(format!(
+                            "an SVG {name} value with the unit \"{unit}\"; browsers accept unit spellings the parser does not — use lowercase px, mm, cm, in, pt or pc"
+                        )));
+                    }
+                }
+                i = s.pos.max(i + 1);
+                continue;
+            }
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+/// A `viewBox` must be exactly four numbers with a positive size: trailing junk is ignored by svgtypes but invalidates
+/// the attribute for a browser, and a non-positive size draws nothing in a browser while usvg would draw it.
+fn check_viewbox(value: &str) -> Result<()> {
+    let mut s = Stream::new(value);
+    let mut numbers = [0.0f64; 4];
+    for slot in &mut numbers {
+        let Some(n) = s.list_number() else { return Ok(()) };
+        *slot = n;
+    }
+    s.skip_spaces();
+    if s.pos < s.bytes.len() {
+        return Err(Error::NotImplemented("an SVG viewBox with content after its four numbers; a browser ignores the whole attribute"));
+    }
+    if numbers[2] <= 0.0 || numbers[3] <= 0.0 {
+        return Err(malformed("an SVG viewBox with a non-positive width or height (it disables rendering in browsers)"));
+    }
+    Ok(())
+}
+
+/// Whether a `points` list parses to its end: svgtypes stops at the first bad pair and usvg draws the prefix, while a
+/// browser drops the whole element.
+fn points_complete(points: &str) -> bool {
+    let mut s = Stream::new(points);
+    loop {
+        s.skip_spaces();
+        if s.pos >= s.bytes.len() {
+            return true;
+        }
+        if s.list::<2>().is_none() {
+            return false;
+        }
+    }
+}
+
+/// A declaration value with a trailing `!important` (any case) stripped.
+fn strip_important(value: &str) -> &str {
+    let value = value.trim_end();
+    if value.len() >= 10 && value[value.len() - 10..].eq_ignore_ascii_case("!important") { value[..value.len() - 10].trim_end() } else { value }
+}
 
 /// Whether a value holds a number that is finite in f64 but infinite in f32 (usvg parses f64, then converts; a path
 /// or shape with such a number is dropped).

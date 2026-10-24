@@ -310,8 +310,13 @@ fn svg_markers_are_refused() {
         let doc = svg_mm(&format!(r##"{marker}<path d="M0 0L5 5L9 1" stroke="#000000" {set}/>"##));
         assert!(matches!(import("arrow.svg", &doc, &ImportOptions::default()), Err(Error::NotImplemented(m)) if m.contains("marker")), "{set}");
     }
+    // The marker elements themselves are refused whether anything uses them.
     let unused = svg_mm(&format!(r##"{marker}<path d="M0 0L5 5L9 1" stroke="#000000" marker-mid="none"/>"##));
-    assert_eq!(import("unused.svg", &unused, &ImportOptions::default()).unwrap().shapes.len(), 1);
+    assert!(matches!(import("unused.svg", &unused, &ImportOptions::default()), Err(Error::NotImplemented(m)) if m.contains("marker")));
+    assert_eq!(
+        import("none.svg", &svg_mm(r##"<path d="M0 0L5 5L9 1" stroke="#000000" marker-mid="none"/>"##), &ImportOptions::default()).unwrap().shapes.len(),
+        1
+    );
 }
 
 /// Review item 3: `<image>` hrefs are never resolved, and the import says so. (That no file is read is proven on the

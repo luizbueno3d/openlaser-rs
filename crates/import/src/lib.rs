@@ -60,6 +60,9 @@ pub const MAX_SVG_EMPTY_SEGMENTS: usize = 256;
 /// Most bytes usvg may read or copy (attributes, text, style declarations, dash arrays, gradient stops) once `<use>`
 /// references are expanded.
 pub const MAX_SVG_EXPANDED_BYTES: u64 = 256 * 1024 * 1024;
+/// Largest markup the importer's own `<use>` expansion may write (usvg applies a `<use>` transform twice, so `<use>`
+/// elements are expanded into `<g>` clones before usvg ever sees them).
+pub const MAX_SVG_EXPANDED_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 /// Most style-sheet selector work usvg may do: simple-selector parts (`.a.b` is two) × the attributes each element
 /// match reads (one per element plus one per attribute), once `<use>` is expanded.
 pub const MAX_SVG_CSS_MATCHES: u64 = 1 << 26;
@@ -387,38 +390,61 @@ fn place_polylines(polylines: &mut [Polyline], unit_to_mm: f64, scale: f64, cent
 fn import_svg(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Imported> {
     let source = std::str::from_utf8(check_vector_size("SVG", bytes)?).map_err(|e| Error::Malformed { format: "SVG", message: e.to_string() })?;
     let source = svg_guard::prepare(source)?;
-    let xml_opts = roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: MAX_SVG_XML_NODES };
-    let doc = roxmltree::Document::parse_with_options(&source, xml_opts).map_err(|e| match e {
-        roxmltree::Error::NodesLimitReached => Error::TooLarge(format!("SVG has more than {MAX_SVG_XML_NODES} XML nodes")),
-        // No entity is ever declared (a DOCTYPE internal subset is refused), so any `&name;` is undefined: typically
-        // an older Illustrator file whose subset was deleted by hand.
-        roxmltree::Error::UnknownEntityReference(entity, pos) => Error::Malformed {
-            format: "SVG",
-            message: format!(
-                "the entity reference &{entity}; (line {}, column {}) is not defined (entity declarations, which SVGs saved by older Adobe Illustrator \
-                 versions rely on, are not supported); export the file again without entities (Illustrator: Save As SVG 1.1 with \"Preserve \
-                 Illustrator Editing Capabilities\" off, or File > Export > Export As SVG)",
-                pos.row, pos.col
-            ),
-        },
-        other => Error::Malformed { format: "SVG", message: other.to_string() },
-    })?;
-    let facts = svg_guard::check(&doc)?;
-    if opts.svg_units == SvgUnits::RequirePhysical && !svg_root_has_physical_size(doc.root_element()) {
-        return Err(Error::Unitless(name.to_owned()));
-    }
     let dpi: f32 = match opts.svg_units {
         SvgUnits::Px72 => 72.0,
         SvgUnits::RequirePhysical | SvgUnits::Px96 => 96.0,
     };
+    let doc = parse_svg_xml(source.as_ref())?;
+    // `<use>` elements are expanded into `<g>` clones before usvg sees them: usvg applies the use element's
+    // `transform` a second time when it computes the clone's absolute transform (a use-translated shape lands twice
+    // as far as a browser puts it). The expanded markup gets the same bounded parse and the same guard run.
+    match svg_guard::expand_uses(&doc, source.as_ref(), f64::from(dpi))? {
+        Some(markup) => {
+            let doc = parse_svg_xml(&markup)?;
+            import_svg_tree(name, &doc, opts, dpi)
+        }
+        None => import_svg_tree(name, &doc, opts, dpi),
+    }
+}
+
+/// Parses an SVG document with the bounded options, converting a panic inside roxmltree into an error (third-party
+/// parsers must never take the process down, never-crash).
+fn parse_svg_xml(source: &str) -> Result<roxmltree::Document<'_>> {
+    let xml_opts = roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: MAX_SVG_XML_NODES };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| roxmltree::Document::parse_with_options(source, xml_opts)))
+        .map_err(|_| Error::Malformed { format: "SVG", message: "the XML parser panicked on this file".to_owned() })?
+        .map_err(|e| match e {
+            roxmltree::Error::NodesLimitReached => Error::TooLarge(format!("SVG has more than {MAX_SVG_XML_NODES} XML nodes")),
+            // No entity is ever declared (a DOCTYPE internal subset is refused), so any `&name;` is undefined:
+            // typically an older Illustrator file whose subset was deleted by hand.
+            roxmltree::Error::UnknownEntityReference(entity, pos) => Error::Malformed {
+                format: "SVG",
+                message: format!(
+                    "the entity reference &{entity}; (line {}, column {}) is not defined (entity declarations, which SVGs saved by older Adobe Illustrator \
+                     versions rely on, are not supported); export the file again without entities (Illustrator: Save As SVG 1.1 with \"Preserve \
+                     Illustrator Editing Capabilities\" off, or File > Export > Export As SVG)",
+                    pos.row, pos.col
+                ),
+            },
+            other => Error::Malformed { format: "SVG", message: other.to_string() },
+        })
+}
+
+fn import_svg_tree(name: &str, doc: &roxmltree::Document<'_>, opts: &ImportOptions, dpi: f32) -> Result<Imported> {
+    let facts = svg_guard::check(doc)?;
+    if opts.svg_units == SvgUnits::RequirePhysical && !svg_root_has_physical_size(doc.root_element()) {
+        return Err(Error::Unitless(name.to_owned()));
+    }
     let refused_images = Arc::new(AtomicUsize::new(0));
     let parser_opts = svg_parser_options(dpi, Arc::clone(&refused_images));
-    let tree = usvg::Tree::from_xmltree(&doc, &parser_opts).map_err(|e| match e {
-        usvg::Error::ElementsLimitReached | usvg::Error::ParsingFailed(roxmltree::Error::NodesLimitReached) => {
-            Error::TooLarge("SVG nesting or <use> expansion is too large".to_owned())
-        }
-        other => Error::Malformed { format: "SVG", message: other.to_string() },
-    })?;
+    let tree = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| usvg::Tree::from_xmltree(doc, &parser_opts)))
+        .map_err(|_| Error::Malformed { format: "SVG", message: "the SVG parser panicked on this file".to_owned() })?
+        .map_err(|e| match e {
+            usvg::Error::ElementsLimitReached | usvg::Error::ParsingFailed(roxmltree::Error::NodesLimitReached) => {
+                Error::TooLarge("SVG nesting or <use> expansion is too large".to_owned())
+            }
+            other => Error::Malformed { format: "SVG", message: other.to_string() },
+        })?;
     let mm_per_px = 25.4 / f64::from(dpi);
     let mut shapes = Vec::new();
     let mut budget = Budget::new();
@@ -516,13 +542,6 @@ fn import_svg(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Imported
             None,
         );
     }
-    if facts.sheet_degenerate_transform {
-        notices.push(
-            NoticeCode::ImportEntitySkipped,
-            "the SVG style sheet sets a transform that scales to zero or is not finite; the elements it matches were not imported".to_owned(),
-            None,
-        );
-    }
     if facts.f32_overflows > 0 {
         notices.push(
             NoticeCode::ImportEntitySkipped,
@@ -617,12 +636,32 @@ fn svg_bez_path(path: &usvg::Path, scale: f64) -> Result<BezPath> {
     use usvg::tiny_skia_path::PathSegment;
     let t = path.abs_transform();
     let mut bez = BezPath::new();
+    let mut started = false;
     for segment in path.data().segments() {
         match segment {
-            PathSegment::MoveTo(p) => bez.move_to(svg_point(p, t, scale)?),
-            PathSegment::LineTo(p) => bez.line_to(svg_point(p, t, scale)?),
-            PathSegment::QuadTo(p1, p2) => bez.quad_to(svg_point(p1, t, scale)?, svg_point(p2, t, scale)?),
-            PathSegment::CubicTo(p1, p2, p3) => bez.curve_to(svg_point(p1, t, scale)?, svg_point(p2, t, scale)?, svg_point(p3, t, scale)?),
+            PathSegment::MoveTo(p) => {
+                bez.move_to(svg_point(p, t, scale)?);
+                started = true;
+            }
+            PathSegment::LineTo(p) => {
+                if !started {
+                    // kurbo's BezPath push debug_asserts the path starts with a MoveTo.
+                    return Err(Error::Malformed { format: "SVG", message: "a path does not start with a moveto".to_owned() });
+                }
+                bez.line_to(svg_point(p, t, scale)?);
+            }
+            PathSegment::QuadTo(p1, p2) => {
+                if !started {
+                    return Err(Error::Malformed { format: "SVG", message: "a path does not start with a moveto".to_owned() });
+                }
+                bez.quad_to(svg_point(p1, t, scale)?, svg_point(p2, t, scale)?);
+            }
+            PathSegment::CubicTo(p1, p2, p3) => {
+                if !started {
+                    return Err(Error::Malformed { format: "SVG", message: "a path does not start with a moveto".to_owned() });
+                }
+                bez.curve_to(svg_point(p1, t, scale)?, svg_point(p2, t, scale)?, svg_point(p3, t, scale)?);
+            }
             PathSegment::Close => bez.close_path(),
         }
     }
