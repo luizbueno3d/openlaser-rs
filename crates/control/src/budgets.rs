@@ -28,9 +28,14 @@ pub const FRAME_REQUEST_TTL: Duration = Duration::from_secs(120);
 /// of the `MAX_CONNECTIONS`; past both, the auth is answered with an id-null "connection limit reached".
 pub const STOP_ONLY_RESERVE: usize = 4;
 /// Sockets accepted but not yet authenticated: a pool of their own, separate from the authenticated slots and the
-/// stop reserve. When it is full, the oldest pending socket is closed to admit the new one (never the newcomer
-/// refused), so silent sockets cannot keep an agent's stop out: a loopback auth takes about a millisecond.
+/// stop reserve. When it is full, the oldest pending socket that has sent nothing yet is closed to admit the new one
+/// (the oldest of all only when every pending socket has spoken; never the newcomer refused), so a flood of silent
+/// sockets cannot push out a client whose auth frame has arrived, however late its thread is scheduled.
 pub const MAX_PENDING_AUTH: usize = 32;
+/// How long a client keeps trying to deliver one `machine.stop`, reconnects and resends included (the bridge's
+/// `StopHandle`). The server's promise is stated against this budget, not against one connection attempt: a client
+/// whose bytes had not arrived yet can lose its pending slot to a churning flood, and its retry gets through.
+pub const STOP_DELIVERY_BUDGET: Duration = Duration::from_secs(2);
 /// The auth frame (and an optional `hello` before it) must arrive within this deadline of `accept`, and the whole
 /// pre-auth exchange is bounded by it (not per read), so a silent or trickling socket cannot hold a thread for long.
 pub const AUTH_DEADLINE: Duration = Duration::from_secs(2);

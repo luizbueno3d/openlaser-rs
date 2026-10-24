@@ -13,6 +13,16 @@
 //!   `STOP_DELIVERY_BUDGET` runs out; the GUI's report is passed through unchanged, never fabricated, and a report
 //!   that latched nothing is an error.
 //!
+//! Stop delivery contract: AT-LEAST-ONCE, with a truthful report. A stop sent on a connection the GUI has just
+//! closed may still reach it (Windows delivers bytes to a read already waiting on a socket shut down under it) while
+//! the client sees only the close, so the client resends on a fresh connection and the GUI's FastStop runs twice,
+//! both times for the same machine (or for every machine). That is safe: the latch is idempotent, and nothing the
+//! agent can do in between could re-arm a machine (arming needs a human). No stop id is sent to deduplicate: a resend
+//! is never suppressed, so a delivery that tripped nothing cannot hide behind one that did. The report returned to
+//! the agent is the GUI's own answer to the delivery that was answered (matched by request id on its connection),
+//! unchanged; an unanswered delivery never contributes to it, and with no answer at all the stop is reported as not
+//! confirmed.
+//!
 //! The server answers a connection it will not serve (no slot left, a thread it cannot start) with an id-null error
 //! and closes it; that reply is surfaced as such ("connection limit reached"), never as a lost auth.
 //!
@@ -38,8 +48,8 @@ use crate::{BridgeTarget, TokenSource};
 
 /// Connecting and authenticating the call connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// The whole stop exchange, reconnects and resends included.
-pub(crate) const STOP_DELIVERY_BUDGET: Duration = Duration::from_secs(2);
+/// The whole stop exchange, reconnects and resends included (the control server's tests hold it to the same budget).
+pub(crate) use openlaser_control::budgets::STOP_DELIVERY_BUDGET;
 /// A stop connection is local: anything slower than this is a dead GUI.
 const STOP_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 /// The GUI waits ≤ STOP_WAIT for the driver's StopReport before it answers.
@@ -390,6 +400,10 @@ impl StopHandle {
     /// idle-dropped, refused or never-opened connection is replaced and the stop resent (it is idempotent), with a
     /// short backoff between failed attempts, until `STOP_DELIVERY_BUDGET` runs out; the GUI itself waits
     /// ≤ STOP_WAIT for the StopReport before it answers.
+    ///
+    /// At-least-once (module docs): an attempt whose reply was lost may still have tripped the GUI, so one call can
+    /// reach FastStop more than once, every time with these same params. The report returned is the answered
+    /// delivery's, unchanged.
     pub fn stop(&self, machine: Option<&str>) -> ToolOutput {
         let deadline = Instant::now() + STOP_DELIVERY_BUDGET;
         let params = machine.map_or_else(|| json!({}), |m| json!({"machine": m}));
@@ -717,6 +731,9 @@ mod tests {
         StopOnly,
         /// Auth, then an over-budget reply to the first request, then silence.
         Oversized,
+        /// Auth, then the first machine.stop is taken (FastStop runs) and the connection closed without an answer:
+        /// what a client sees when the GUI drops a connection its stop still reached (Windows does this).
+        Swallow,
     }
 
     /// A scripted GUI on a real socket: `treat(n)` decides connection n (0-based); it counts what it saw.
@@ -725,6 +742,8 @@ mod tests {
         connections: Arc<AtomicUsize>,
         pings: Arc<AtomicUsize>,
         stops: Arc<AtomicUsize>,
+        /// The `machine` param of every machine.stop that reached it, in order (null for every machine).
+        machines: Arc<Mutex<Vec<Value>>>,
     }
 
     impl FakeGui {
@@ -732,16 +751,17 @@ mod tests {
             let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
             let addr = listener.local_addr().unwrap();
             let (connections, pings, stops) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-            let (seen, pinged, stopped) = (Arc::clone(&connections), Arc::clone(&pings), Arc::clone(&stops));
+            let machines = Arc::new(Mutex::new(Vec::new()));
+            let (seen, pinged, stopped, stopped_for) = (Arc::clone(&connections), Arc::clone(&pings), Arc::clone(&stops), Arc::clone(&machines));
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(stream) = stream else { return };
                     let how = treat(seen.fetch_add(1, Ordering::SeqCst));
-                    let (pinged, stopped) = (Arc::clone(&pinged), Arc::clone(&stopped));
-                    std::thread::spawn(move || serve_fake(stream, how, &pinged, &stopped));
+                    let (pinged, stopped, stopped_for) = (Arc::clone(&pinged), Arc::clone(&stopped), Arc::clone(&stopped_for));
+                    std::thread::spawn(move || serve_fake(stream, how, &pinged, &stopped, &stopped_for));
                 }
             });
-            FakeGui { addr, connections, pings, stops }
+            FakeGui { addr, connections, pings, stops, machines }
         }
 
         fn target(&self) -> BridgeTarget {
@@ -753,7 +773,7 @@ mod tests {
         }
     }
 
-    fn serve_fake(stream: TcpStream, how: Treat, pings: &AtomicUsize, stops: &AtomicUsize) {
+    fn serve_fake(stream: TcpStream, how: Treat, pings: &AtomicUsize, stops: &AtomicUsize, machines: &Mutex<Vec<Value>>) {
         let mut writer = stream.try_clone().unwrap();
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
@@ -774,8 +794,13 @@ mod tests {
                     json!({"pong": true})
                 }
                 "machine.stop" => {
-                    stops.fetch_add(1, Ordering::SeqCst);
-                    json!({"latched": true, "confirmed": true})
+                    let machine = request.params.get("machine").cloned().unwrap_or(Value::Null);
+                    machines.lock().unwrap().push(machine.clone());
+                    let delivery = stops.fetch_add(1, Ordering::SeqCst) + 1;
+                    if how == Treat::Swallow {
+                        return; // tripped, and the connection closes before any answer
+                    }
+                    json!({"latched": true, "confirmed": true, "delivery": delivery, "machine": machine})
                 }
                 _ => json!("done"),
             };
@@ -824,16 +849,60 @@ mod tests {
         assert_eq!(gui.stops.load(Ordering::SeqCst), 1);
     }
 
+    /// The at-least-once contract, deterministically on every OS (CI saw it on Windows through a real GUI drop): the
+    /// first delivery trips the GUI but its connection closes before any answer, so the handle resends on a fresh
+    /// connection. FastStop runs twice, both times for the requested machine, and the agent gets exactly the report
+    /// of the delivery that was answered (the second), unchanged, never one made up for the first.
+    #[test]
+    fn stop_is_delivered_at_least_once_and_reports_the_answered_delivery() {
+        let gui = FakeGui::start(|n| if n == 0 { Treat::Swallow } else { Treat::Serve });
+        let handle = StopHandle::lazy(Link::new(gui.target(), info()));
+        let outcome = handle.stop(Some("m1"));
+        let ToolOutput::Json(report) = &outcome else { panic!("a stop answered on the resend was not reported: {}", stop_text(&outcome)) };
+        assert_eq!(*report, json!({"latched": true, "confirmed": true, "delivery": 2, "machine": "m1"}));
+        assert_eq!(*gui.machines.lock().unwrap(), [json!("m1"), json!("m1")]);
+        assert_eq!(gui.connections(), 2);
+        // Every machine: the resend says every machine too.
+        let gui = FakeGui::start(|n| if n == 0 { Treat::Swallow } else { Treat::Serve });
+        let handle = StopHandle::lazy(Link::new(gui.target(), info()));
+        assert!(matches!(handle.stop(None), ToolOutput::Json(report) if report["delivery"] == json!(2)));
+        assert_eq!(*gui.machines.lock().unwrap(), [Value::Null, Value::Null]);
+        // A delivery that is never answered is never reported as a stop: with every connection swallowing it, the
+        // budget runs out and the agent is told the stop was not confirmed, however many deliveries tripped.
+        let gui = FakeGui::start(|_| Treat::Swallow);
+        let handle = StopHandle::lazy(Link::new(gui.target(), info()));
+        let outcome = handle.stop(Some("m1"));
+        assert!(matches!(&outcome, ToolOutput::Error { message, .. } if message.starts_with("transport:")), "{}", stop_text(&outcome));
+        assert!(gui.stops.load(Ordering::SeqCst) >= 2);
+        assert!(gui.machines.lock().unwrap().iter().all(|m| *m == json!("m1")));
+    }
+
+    /// Waits until the keep-alive has just put the stop connection back after a ping, so a stop made now does not
+    /// land while the ping has it out (by design such a stop opens a fresh connection rather than wait).
+    fn just_pinged(handle: &StopHandle) -> bool {
+        let until = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < until {
+            let fresh = handle.inner.conn.lock().unwrap().as_ref().is_some_and(|conn| conn.last_used.elapsed() < Duration::from_millis(10));
+            if fresh {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        false
+    }
+
     /// X1 (3): once open, the stop connection is kept warm with pings, so the next stop needs no new connection
-    /// (here with a 100 ms keep-alive and a 300 ms reconnect threshold standing in for 10 s and 25 s).
+    /// (here with a 100 ms keep-alive and a 500 ms reconnect threshold standing in for 10 s and 25 s; the idle time is
+    /// over twice the threshold, so only the pings can have kept the connection).
     #[test]
     fn stop_connection_is_kept_warm() {
         let gui = FakeGui::start(|_| Treat::Serve);
-        let handle = StopHandle::tuned(Link::new(gui.target(), info()), Duration::from_millis(100), Duration::from_millis(300));
+        let handle = StopHandle::tuned(Link::new(gui.target(), info()), Duration::from_millis(100), Duration::from_millis(500));
         assert!(matches!(handle.stop(None), ToolOutput::Json(_)));
         assert_eq!(gui.connections(), 1);
-        std::thread::sleep(Duration::from_millis(1000));
+        std::thread::sleep(Duration::from_millis(1200));
         assert!(gui.pings.load(Ordering::SeqCst) >= 3, "{} pings", gui.pings.load(Ordering::SeqCst));
+        assert!(just_pinged(&handle), "the keep-alive did not keep the connection");
         assert!(matches!(handle.stop(None), ToolOutput::Json(_)));
         assert_eq!(gui.connections(), 1, "the stop after an idle second opened a new connection");
         assert_eq!(gui.stops.load(Ordering::SeqCst), 2);

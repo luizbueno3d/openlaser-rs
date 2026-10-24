@@ -1,10 +1,14 @@
 //! The loopback control server (std::net on 127.0.0.1 only).
 //!
 //! Limits (AUT A9/A10, B10, review B7/X1): three separate pools.
-//! - Pending: accepted, not yet authenticated, at most `MAX_PENDING_AUTH`. When it is full the OLDEST pending socket
-//!   is closed to admit the new one, so a flood of silent sockets can neither refuse a newcomer nor hold a slot an
-//!   agent needs: an agent's loopback auth completes in about a millisecond, long before it becomes the oldest.
-//!   Each pending socket has `AUTH_DEADLINE` (one deadline, not per read) and `AUTH_MAX_BYTES` to authenticate.
+//! - Pending: accepted, not yet authenticated, at most `MAX_PENDING_AUTH`. When it is full the oldest pending socket
+//!   that has SENT NOTHING is closed to admit the new one (the oldest of all only if every pending socket has spoken),
+//!   so a flood of silent sockets can neither refuse a newcomer nor hold a slot an agent needs, nor push out a client
+//!   whose auth frame has already arrived but whose thread the OS has not run yet (bytes are looked for at accept,
+//!   before that thread exists). A client whose bytes had not arrived yet can still lose its pending slot to a fast
+//!   enough churn: the promise is that a stop gets through within `STOP_DELIVERY_BUDGET` by retrying, as the bridge's
+//!   `StopHandle` does. Each pending socket has `AUTH_DEADLINE` (one deadline, not per read) and `AUTH_MAX_BYTES` to
+//!   authenticate.
 //! - Full service: up to `MAX_CONNECTIONS` authenticated connections.
 //! - Stop-only: the next `STOP_ONLY_RESERVE` authenticated connections, each for exactly one `machine.stop`
 //!   exchange within `AUTH_DEADLINE`. Past both, the auth gets an id-null "connection limit reached" and a close.
@@ -12,6 +16,17 @@
 //! Only a token holder takes a full or stop-only slot. A request line stops being read at `MAX_REQUEST_BYTES + 1`, so
 //! a silent, trickling or endless client cannot hold a slot or a thread. `machine.stop` and `ping` are answered on
 //! the connection's own thread and never touch the UI queue.
+//!
+//! Closing a connection (eviction, `disconnect_all`, `shutdown`) sets its flag before shutting the socket down, and
+//! every read waits in `CLOSE_POLL` steps that look at the flag: on Windows, shutting a socket down from another
+//! thread does not wake a read already waiting on it, and bytes sent afterwards are still delivered to that read. A
+//! frame read on a closed connection is not served, except `machine.stop`, which is never refused once read.
+//!
+//! Stop delivery is AT-LEAST-ONCE. A client that gets no reply (its connection was closed under it, the reply was
+//! lost) resends the stop on a fresh connection, so one stop request can reach FastStop more than once, every time
+//! for the same machine. That is safe because the latch is idempotent (a second trip only latches again), and the
+//! report a client receives is the one FastStop produced for the delivery it answers: never a cached, merged or
+//! made-up one.
 
 use std::collections::VecDeque;
 use std::io::{BufReader, Read};
@@ -53,7 +68,9 @@ impl Dispatch {
     }
 }
 
-/// `machine.stop` is answered on the transport thread through this, before anything touches the UI queue.
+/// `machine.stop` is answered on the transport thread through this, before anything touches the UI queue. It may be
+/// called more than once for one client stop (delivery is at-least-once, see the module docs), so it must be
+/// idempotent and report each call truthfully.
 pub type FastStop = Arc<dyn Fn(Option<&str>) -> serde_json::Value + Send + Sync>;
 
 pub struct ServerConfig {
@@ -67,24 +84,43 @@ pub struct ServerConfig {
 /// One socket, shared by its reader, its writer and the handles that close it (one file descriptor per connection).
 type Socket = Arc<TcpStream>;
 
-/// How often a pending connection's read looks up to see whether it was evicted. Closing the socket wakes a
-/// blocked read on macOS and Linux; this bounds an evicted thread's life on any platform where it might not.
-const PENDING_POLL: Duration = Duration::from_millis(100);
+/// How often a waiting read looks up to see whether its connection was closed (evicted, `disconnect_all`,
+/// `shutdown`). Shutting the socket down wakes a blocked read on macOS and Linux; on Windows it does not, and this
+/// bounds a closed connection's thread there (instead of the 30 s idle timeout).
+const CLOSE_POLL: Duration = Duration::from_millis(100);
 
-/// A pending connection as the pools see it: its id, its socket, and the flag that tells its thread it was evicted.
-struct Pending {
-    conn: u64,
+/// What the server holds to close a connection: its socket, and the flag its thread looks at.
+#[derive(Clone)]
+struct Closer {
     socket: Socket,
-    evicted: Arc<AtomicBool>,
+    closed: Arc<AtomicBool>,
 }
 
-impl Pending {
-    fn evict(&self) {
-        self.evicted.store(true, Ordering::Release);
+impl Closer {
+    /// The flag first, so the thread stops waiting within `CLOSE_POLL` wherever the shutdown does not wake it.
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
         let _ = self.socket.shutdown(Shutdown::Both);
     }
 }
-type Clients = Arc<Mutex<Vec<(u64, String, Socket)>>>;
+
+/// A pending connection as the pools see it.
+struct Pending {
+    conn: u64,
+    closer: Closer,
+    /// Bytes have arrived on it (seen at accept, or read since): it is closed to make room only when no pending
+    /// socket is left that has sent nothing.
+    spoke: Arc<AtomicBool>,
+}
+
+/// An authenticated full-service connection, as `clients()` and `disconnect_all` see it.
+struct Client {
+    conn: u64,
+    name: String,
+    closer: Closer,
+}
+
+type Clients = Arc<Mutex<Vec<Client>>>;
 
 /// Which pool a connection counts in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,7 +133,7 @@ enum Class {
 /// Why an authenticated connection gets no slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NoSlot {
-    /// It was the oldest pending socket when the pool was full, and has been closed.
+    /// It was closed to make room in the pending pool (or by `disconnect_all`) while it authenticated.
     Evicted,
     /// Every full and stop-only slot is held by an authenticated connection.
     Full,
@@ -112,11 +148,13 @@ struct Pools {
 }
 
 impl Pools {
-    /// Admits a freshly accepted socket, closing the oldest pending ones to make room (never refusing the newcomer).
+    /// Admits a freshly accepted socket, never refusing it: while the pool is full, the oldest pending socket that
+    /// has sent nothing is closed, or, when every one of them has spoken, the oldest.
     fn add_pending(&mut self, pending: Pending) {
         while self.pending.len() >= budgets::MAX_PENDING_AUTH.max(1) {
-            match self.pending.pop_front() {
-                Some(oldest) => oldest.evict(),
+            let index = self.pending.iter().position(|p| !p.spoke.load(Ordering::Acquire)).unwrap_or(0);
+            match self.pending.remove(index) {
+                Some(victim) => victim.closer.close(),
                 None => break,
             }
         }
@@ -174,6 +212,12 @@ impl Drop for Slot {
     }
 }
 
+/// True when the client has already sent something (typically its auth frame, written right after connecting),
+/// looked at without consuming it. Leaves the socket non-blocking: the caller sets the mode it needs next.
+fn has_spoken(stream: &TcpStream) -> bool {
+    stream.set_nonblocking(true).is_ok() && matches!(stream.peek(&mut [0_u8; 1]), Ok(n) if n > 0)
+}
+
 /// std::net on 127.0.0.1 only; ≤ 16 connections (+ a stop-only reserve, + a pool of pending sockets of its own);
 /// 30 s idle; first frame must be {"method":"auth","params":{"token","client":{"name","version"}}} (an optional
 /// `hello` may come first, answered with the server's pid so a client can check the discovery file before it sends
@@ -194,7 +238,7 @@ struct Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        self.clients.lock().unwrap_or_else(PoisonError::into_inner).retain(|(id, _, _)| *id != self.conn);
+        self.clients.lock().unwrap_or_else(PoisonError::into_inner).retain(|client| client.conn != self.conn);
     }
 }
 
@@ -216,6 +260,9 @@ impl ControlServer {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, peer)) if peer.ip().is_loopback() => {
+                        // Looked at here, before the connection's thread exists, so whether the pool spares it does
+                        // not depend on how soon the OS runs that thread.
+                        let spoke = Arc::new(AtomicBool::new(has_spoken(&stream)));
                         if stream.set_nonblocking(false).is_err() {
                             let _ = stream.shutdown(Shutdown::Both);
                             continue;
@@ -223,13 +270,14 @@ impl ControlServer {
                         let socket: Socket = Arc::new(stream);
                         let id = next_conn;
                         next_conn = next_conn.saturating_add(1);
-                        // Never refused for capacity here: the oldest pending socket makes room instead.
-                        let evicted = Arc::new(AtomicBool::new(false));
-                        lock_pools(&thread_pools).add_pending(Pending { conn: id, socket: Arc::clone(&socket), evicted: Arc::clone(&evicted) });
+                        let closer = Closer { socket: Arc::clone(&socket), closed: Arc::new(AtomicBool::new(false)) };
+                        // Never refused for capacity here: a silent pending socket (or the oldest) makes room instead.
+                        lock_pools(&thread_pools).add_pending(Pending { conn: id, closer: closer.clone(), spoke: Arc::clone(&spoke) });
                         let slot = Slot { pools: Arc::clone(&thread_pools), conn: id, class: Class::Pending };
                         let context = ConnectionContext {
                             conn: id,
-                            evicted,
+                            closed: closer.closed,
+                            spoke,
                             shared: Arc::clone(&shared),
                             tx: tx.clone(),
                             clients: Arc::clone(&thread_clients),
@@ -261,7 +309,7 @@ impl ControlServer {
 
     /// Authenticated clients, "name version" each.
     pub fn clients(&self) -> Vec<String> {
-        self.clients.lock().unwrap_or_else(PoisonError::into_inner).iter().map(|(_, name, _)| name.clone()).collect()
+        self.clients.lock().unwrap_or_else(PoisonError::into_inner).iter().map(|client| client.name.clone()).collect()
     }
 
     /// Every live socket, authenticated or not (diagnostics and tests).
@@ -274,16 +322,18 @@ impl ControlServer {
         lock_pools(&self.pools).pending.len()
     }
 
-    /// Closes every agent connection, and every socket that has not authenticated yet.
+    /// Closes every agent connection, and every socket that has not authenticated yet: their threads stop within
+    /// `CLOSE_POLL` on every platform, and nothing read on them afterwards is served (a stop excepted).
     pub fn disconnect_all(&self) {
         let mut clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
-        for (_, _, stream) in clients.iter() {
-            let _ = stream.shutdown(Shutdown::Both);
+        for client in clients.iter() {
+            client.closer.close();
         }
         clients.clear();
         drop(clients);
-        for pending in &lock_pools(&self.pools).pending {
-            pending.evict();
+        // Out of the pool as well, so one whose auth frame was already read cannot take a slot.
+        for pending in lock_pools(&self.pools).pending.drain(..) {
+            pending.closer.close();
         }
     }
 
@@ -304,7 +354,8 @@ struct Shared {
 
 struct ConnectionContext {
     conn: u64,
-    evicted: Arc<AtomicBool>,
+    closed: Arc<AtomicBool>,
+    spoke: Arc<AtomicBool>,
     shared: Arc<Shared>,
     tx: std::sync::mpsc::Sender<ControlRequest>,
     clients: Clients,
@@ -326,30 +377,49 @@ fn error_reply(id: serde_json::Value, message: &str) -> wire::Reply {
 
 /// Reads through one deadline for the whole pre-auth exchange (a per-read timeout would let a client trickle a
 /// byte at a time forever); after a full-service authentication the deadline is cleared and the idle timeout
-/// applies per read, while a stop-only connection keeps a deadline for its one exchange.
+/// applies per read, while a stop-only connection keeps a deadline for its one exchange. Every wait is cut into
+/// `CLOSE_POLL` steps that look at the connection's flag and the server's.
 struct DeadlineStream {
     stream: Socket,
     deadline: Option<Instant>,
-    /// Set when the connection is evicted from the pending pool: the read gives up within `PENDING_POLL`.
-    evicted: Arc<AtomicBool>,
+    /// Set when the server closes this connection (eviction, `disconnect_all`).
+    closed: Arc<AtomicBool>,
+    /// Set when the server shuts down.
+    server_stop: Arc<AtomicBool>,
+    /// Set on the first byte read: the pending pool spares a socket that has spoken.
+    spoke: Arc<AtomicBool>,
+}
+
+impl DeadlineStream {
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire) || self.server_stop.load(Ordering::Acquire)
+    }
 }
 
 impl Read for DeadlineStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let mut stream: &TcpStream = &self.stream;
-        let Some(deadline) = self.deadline else { return stream.read(buf) };
+        let limit = self.deadline.unwrap_or_else(|| Instant::now() + budgets::IDLE_TIMEOUT);
         loop {
-            if self.evicted.load(Ordering::Acquire) {
-                return Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "closed to make room for a newer connection"));
+            // Before every wait: bytes that arrive on a closed connection are not read.
+            if self.is_closed() {
+                return Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "the server closed this connection"));
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = limit.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "authentication deadline passed"));
+                let what = if self.deadline.is_some() { "authentication deadline passed" } else { "idle timeout" };
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, what));
             }
-            self.stream.set_read_timeout(Some(remaining.min(PENDING_POLL)))?;
+            self.stream.set_read_timeout(Some(remaining.min(CLOSE_POLL)))?;
             match stream.read(buf) {
                 Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
-                other => return other,
+                Ok(n) => {
+                    if n > 0 {
+                        self.spoke.store(true, Ordering::Release);
+                    }
+                    return Ok(n);
+                }
+                Err(e) => return Err(e),
             }
         }
     }
@@ -395,11 +465,12 @@ fn sanitize(text: Option<&str>) -> String {
 }
 
 fn serve_connection(socket: &Socket, mut slot: Slot, context: ConnectionContext) {
-    let ConnectionContext { conn, evicted, shared, tx, clients, stop } = context;
+    let ConnectionContext { conn, closed, spoke, shared, tx, clients, stop } = context;
     let _ = socket.set_write_timeout(Some(budgets::IDLE_TIMEOUT));
     let mut stream: &TcpStream = socket;
     let deadline = Some(Instant::now() + budgets::AUTH_DEADLINE);
-    let mut reader = BufReader::new(DeadlineStream { stream: Arc::clone(socket), deadline, evicted });
+    let mut reader =
+        BufReader::new(DeadlineStream { stream: Arc::clone(socket), deadline, closed: Arc::clone(&closed), server_stop: Arc::clone(&stop), spoke });
 
     // ---- pre-auth: an optional `hello`, then `auth`, all within AUTH_DEADLINE and AUTH_MAX_BYTES per frame.
     let mut said_hello = false;
@@ -441,7 +512,7 @@ fn serve_connection(socket: &Socket, mut slot: Slot, context: ConnectionContext)
     // Only now, with the token proven, does the connection take a full or stop-only slot.
     let class = match lock_pools(&slot.pools).authenticate(conn) {
         Ok(class) => class,
-        // Closed as the oldest pending socket while it authenticated: nothing more to say on it.
+        // Closed to make room (or by disconnect_all) while it authenticated: nothing more to say on it.
         Err(NoSlot::Evicted) => return,
         Err(NoSlot::Full) => {
             let _ = wire::write_reply(&mut stream, &error_reply(serde_json::Value::Null, "connection limit reached"));
@@ -450,16 +521,12 @@ fn serve_connection(socket: &Socket, mut slot: Slot, context: ConnectionContext)
     };
     slot.class = class;
     let stop_only = class == Class::StopOnly;
-    if stop_only {
-        // One exchange, and promptly: a stop-only slot is not somewhere to wait.
-        reader.get_mut().deadline = Some(Instant::now() + budgets::AUTH_DEADLINE);
-    } else {
-        reader.get_mut().deadline = None;
-        let _ = socket.set_read_timeout(Some(budgets::IDLE_TIMEOUT));
-    }
+    // One exchange, and promptly, on a stop-only slot (it is not somewhere to wait); otherwise the idle timeout.
+    reader.get_mut().deadline = stop_only.then(|| Instant::now() + budgets::AUTH_DEADLINE);
     let _registration = Registration { clients: Arc::clone(&clients), conn };
     if !stop_only {
-        clients.lock().unwrap_or_else(PoisonError::into_inner).push((conn, client.clone(), Arc::clone(socket)));
+        let closer = Closer { socket: Arc::clone(socket), closed: Arc::clone(&closed) };
+        clients.lock().unwrap_or_else(PoisonError::into_inner).push(Client { conn, name: client.clone(), closer });
     }
     let authenticated = serde_json::json!({"authenticated":true, "stopOnly": stop_only});
     if wire::write_reply(&mut stream, &wire::Reply { id: auth_id, ok: true, result: Some(authenticated), error: None }).is_err() {
@@ -485,6 +552,10 @@ fn serve_connection(socket: &Socket, mut slot: Slot, context: ConnectionContext)
             }
             Frame::Closed => break,
         };
+        // Closed by the server while this frame arrived (Windows delivers bytes to a read that was already waiting
+        // when the socket was shut down): nothing more is served here, except a stop, which is never refused once
+        // read. Its reply cannot be delivered, so the client resends it elsewhere (at-least-once, module docs).
+        let closing = reader.get_ref().is_closed();
         if request.method == "machine.stop" {
             // A machine that is not a string means every machine: a stop is never refused for its params.
             let machine = request.params.get("machine").and_then(serde_json::Value::as_str);
@@ -492,10 +563,13 @@ fn serve_connection(socket: &Socket, mut slot: Slot, context: ConnectionContext)
                 Ok(value) => wire::Reply { id: request.id, ok: true, result: Some(value), error: None },
                 Err(_) => error_reply(request.id, "internal error: machine.stop panicked; the stop may not have reached the machine: use the E-stop"),
             };
-            if wire::write_reply(&mut stream, &reply).is_err() || stop_only {
+            if wire::write_reply(&mut stream, &reply).is_err() || stop_only || closing {
                 break;
             }
             continue;
+        }
+        if closing {
+            break;
         }
         if request.method == "auth" {
             if wire::write_reply(&mut stream, &error_reply(request.id, "already authenticated")).is_err() {
@@ -572,9 +646,11 @@ mod tests {
         stream.flush().unwrap();
     }
 
+    /// The next reply, or None when the connection is closed (or nothing comes within 5 s).
     fn recv(stream: &TcpStream) -> Option<wire::Reply> {
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        // macOS refuses socket options (EINVAL) on a socket the peer has already reset: nothing more will come.
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+        let mut reader = BufReader::new(stream.try_clone().ok()?);
         let mut line = String::new();
         match reader.read_line(&mut line) {
             Ok(0) | Err(_) => None,
@@ -614,7 +690,10 @@ mod tests {
 
     /// True when the peer closed `stream` (EOF or reset) within `within`, without sending anything.
     fn closed_within(stream: &TcpStream, within: Duration) -> bool {
-        stream.set_read_timeout(Some(within)).unwrap();
+        // macOS refuses socket options (EINVAL) on a socket the peer has already reset: that is a closed socket.
+        if stream.set_read_timeout(Some(within)).is_err() {
+            return true;
+        }
         let mut byte = [0_u8; 1];
         let mut reader = stream;
         match reader.read(&mut byte) {
@@ -748,8 +827,10 @@ mod tests {
         assert_eq!(lock_pools(&server.pools).stop_only, n);
     }
 
-    /// X1 at the wire: 16 authenticated agents plus a flood of ≥ 40 silent sockets, reopened as they close; a fresh
-    /// connection still authenticates and stops, again and again.
+    /// X1 at the wire: 16 authenticated agents plus a flood of ≥ 40 silent sockets, reopened as they close. The
+    /// promise is the one `StopHandle` relies on: a stop gets through within STOP_DELIVERY_BUDGET, retrying as it
+    /// must (one connection attempt may lose its pending slot to the churn before its bytes arrive), round after
+    /// round. Delivery is at-least-once, so each round asserts at least one FastStop call, not exactly one.
     #[test]
     fn stop_gets_through_a_silent_socket_flood() {
         let stops = Arc::new(AtomicUsize::new(0));
@@ -763,17 +844,151 @@ mod tests {
         let flood = Flood::start(port, 48);
         flood.wait_saturated(&server);
         for round in 0..5_u64 {
+            let before = stops.load(Ordering::SeqCst);
             let started = Instant::now();
-            let (mut stream, reply) = try_connect(port, &token, "stopper");
-            assert!(reply.ok, "round {round}: {reply:?}");
-            send(&mut stream, round, "machine.stop", serde_json::json!({}));
-            assert!(recv(&stream).unwrap().ok, "round {round}");
-            assert!(started.elapsed() < budgets::STOP_WAIT, "round {round}: {:?}", started.elapsed());
+            if let Err(why) = stop_with_retry(port, &token, round) {
+                panic!("round {round}: {why}");
+            }
+            assert!(started.elapsed() < budgets::STOP_DELIVERY_BUDGET, "round {round}: {:?}", started.elapsed());
+            assert!(stops.load(Ordering::SeqCst) > before, "round {round}: answered, but FastStop was not called");
         }
-        assert_eq!(stops.load(Ordering::SeqCst), 5);
         assert!(flood.reopened() > 0, "the flood never churned");
         flood.finish();
         drop(agents);
+        server.shutdown();
+    }
+
+    /// What `StopHandle` does, at the wire: connect, auth, `machine.stop`; anything short of a reply (no answer to
+    /// the auth frame, a refusal, a closed socket) is retried after a short backoff until STOP_DELIVERY_BUDGET runs
+    /// out. Returns the number of attempts it took.
+    fn stop_with_retry(port: u16, token: &str, id: u64) -> Result<usize, String> {
+        let deadline = Instant::now() + budgets::STOP_DELIVERY_BUDGET;
+        let mut pause = Duration::from_millis(5);
+        let mut attempts = 0_usize;
+        let mut last = String::from("no attempt");
+        while Instant::now() < deadline {
+            attempts += 1;
+            match stop_once(port, token, id, deadline) {
+                Ok(()) => return Ok(attempts),
+                Err(why) => last = why,
+            }
+            thread::sleep(pause.min(deadline.saturating_duration_since(Instant::now())));
+            pause = (pause * 2).min(Duration::from_millis(50));
+        }
+        Err(format!("no stop got through within {:?} ({attempts} attempts; last: {last})", budgets::STOP_DELIVERY_BUDGET))
+    }
+
+    fn stop_once(port: u16, token: &str, id: u64, deadline: Instant) -> Result<(), String> {
+        let wait = |stream: &TcpStream| {
+            let left = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
+            stream.set_read_timeout(Some(left.min(Duration::from_millis(500)))).map_err(|e| e.to_string())
+        };
+        let mut stream = TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, port)), Duration::from_millis(250)).map_err(|e| e.to_string())?;
+        let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+        let mut exchange = |stream: &mut TcpStream, request: serde_json::Value| -> Result<wire::Reply, String> {
+            wait(&*stream)?;
+            writeln!(stream, "{request}").map_err(|e| format!("send: {e}"))?;
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => Err("closed without an answer".to_owned()),
+                Ok(_) => serde_json::from_str(&line).map_err(|e| e.to_string()),
+                Err(e) => Err(format!("no answer: {e}")),
+            }
+        };
+        let auth = exchange(&mut stream, serde_json::json!({"id":0,"method":"auth","params":{"token":token,"client":{"name":"stopper","version":"test"}}}))?;
+        if !auth.ok {
+            return Err(format!("auth: {auth:?}"));
+        }
+        let stop = exchange(&mut stream, serde_json::json!({"id":id,"method":"machine.stop","params":{}}))?;
+        if stop.ok && stop.id == serde_json::json!(id) { Ok(()) } else { Err(format!("stop: {stop:?}")) }
+    }
+
+    /// The pending pool spares a socket that has spoken: when it is full, the oldest SILENT socket makes room, and
+    /// the oldest of all only once every pending socket has spoken.
+    #[test]
+    fn pending_pool_evicts_the_oldest_silent_socket_first() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut keep = Vec::new();
+        let mut pending = |conn: u64, spoke: bool| {
+            keep.push(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+            let (accepted, _) = listener.accept().unwrap();
+            let closer = Closer { socket: Arc::new(accepted), closed: Arc::new(AtomicBool::new(false)) };
+            Pending { conn, closer, spoke: Arc::new(AtomicBool::new(spoke)) }
+        };
+        let mut pools = Pools::default();
+        let max = budgets::MAX_PENDING_AUTH as u64;
+        // conn 1 (the oldest) has spoken; conns 2..=max have not.
+        for conn in 1..=max {
+            pools.add_pending(pending(conn, conn == 1));
+        }
+        let flags: Vec<(u64, Arc<AtomicBool>)> = pools.pending.iter().map(|p| (p.conn, Arc::clone(&p.closer.closed))).collect();
+        pools.add_pending(pending(max + 1, false));
+        pools.add_pending(pending(max + 2, false));
+        let conns: Vec<u64> = pools.pending.iter().map(|p| p.conn).collect();
+        assert_eq!(conns.len(), budgets::MAX_PENDING_AUTH);
+        assert_eq!(conns.first(), Some(&1), "the socket that had spoken was evicted for a silent one: {conns:?}");
+        assert!(!conns.contains(&2) && !conns.contains(&3), "the oldest silent sockets were not the ones evicted: {conns:?}");
+        let closed: Vec<u64> = flags.iter().filter(|(_, flag)| flag.load(Ordering::Acquire)).map(|(conn, _)| *conn).collect();
+        assert_eq!(closed, [2, 3], "only the evicted sockets are told so");
+        // Every pending socket has spoken: the oldest makes room.
+        for p in &pools.pending {
+            p.spoke.store(true, Ordering::Release);
+        }
+        pools.add_pending(pending(max + 3, false));
+        assert_eq!(pools.pending.front().map(|p| p.conn), Some(4));
+        assert_eq!(pools.pending.back().map(|p| p.conn), Some(max + 3));
+    }
+
+    /// X1 at the wire, without relying on thread scheduling: a client whose bytes have arrived (here half of its auth
+    /// frame, so it is still pending) is not pushed out by a flood of silent sockets that overflows the pending pool
+    /// many times over, and its auth, completed afterwards, is served.
+    #[test]
+    fn pending_socket_that_has_spoken_outlives_a_silent_flood() {
+        let (server, _receiver, token) = start(Arc::new(|_| serde_json::json!({"latched":true})));
+        let port = server.port();
+        let mut honest = silent(port);
+        let frame = format!("{}\n", serde_json::json!({"id":0,"method":"auth","params":{"token":token,"client":{"name":"slow","version":"1"}}}));
+        let (head, tail) = frame.split_at(frame.len() / 2);
+        honest.write_all(head.as_bytes()).unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        while !lock_pools(&server.pools).pending.iter().any(|p| p.spoke.load(Ordering::Acquire)) && Instant::now() < until {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(lock_pools(&server.pools).pending.iter().any(|p| p.spoke.load(Ordering::Acquire)), "the server never saw the bytes");
+        let flood: Vec<TcpStream> = (0..budgets::MAX_PENDING_AUTH * 3).map(|_| silent(port)).collect();
+        // With the honest socket spared, every silent socket but the newest MAX_PENDING_AUTH - 1 is evicted; the
+        // last of those evictions happens only once the whole flood has been accepted.
+        let last_evicted = &flood[flood.len() - budgets::MAX_PENDING_AUTH];
+        assert!(closed_within(last_evicted, Duration::from_secs(5)), "the flood was not accepted and evicted in full");
+        wait_pending(&server, budgets::MAX_PENDING_AUTH);
+        honest.write_all(tail.as_bytes()).unwrap();
+        let reply = recv(&honest).expect("the client that had spoken was evicted by silent sockets");
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(server.clients(), ["slow 1"]);
+        drop(flood);
+        server.shutdown();
+    }
+
+    /// `disconnect_all` (the GUI turning agent connections off) ends every connection's thread promptly on every
+    /// platform (Windows does not wake a read waiting on a socket shut down from another thread), and nothing sent
+    /// on a dropped connection afterwards reaches the UI queue.
+    #[test]
+    fn disconnect_all_ends_every_connection_and_serves_nothing_after() {
+        let (server, receiver, token) = start(Arc::new(|_| serde_json::json!({"latched":true})));
+        let mut agents: Vec<TcpStream> = (0..3).map(|index| connect(server.port(), &token, &format!("agent-{index}"))).collect();
+        let _pending = silent(server.port());
+        wait_live(&server, 4);
+        server.disconnect_all();
+        assert!(server.clients().is_empty());
+        for agent in &mut agents {
+            let line = format!("{}\n", serde_json::json!({"id":1,"method":"doc.inspect","params":{}}));
+            let _ = agent.write_all(line.as_bytes());
+        }
+        wait_live(&server, 0);
+        assert!(receiver.recv_timeout(Duration::from_millis(300)).is_err(), "a request on a dropped connection reached the UI queue");
+        for agent in &agents {
+            assert!(closed_within(agent, Duration::from_secs(5)), "a dropped connection was left open");
+        }
         server.shutdown();
     }
 
@@ -1054,24 +1269,47 @@ mod tests {
         server.shutdown();
     }
 
-    /// An evicted pending connection's read gives up within PENDING_POLL from the flag alone, so its thread ends
-    /// promptly even where closing the socket from another thread would not wake a blocked read.
+    /// A closed connection's read gives up within CLOSE_POLL from the flag alone, pending (under its auth deadline)
+    /// or authenticated (under the 30 s idle timeout), so its thread ends promptly even where shutting the socket
+    /// down from another thread does not wake a blocked read (Windows). The time is measured from the moment the
+    /// flag is set, so a late flag thread cannot fail it.
     #[test]
-    fn evicted_pending_read_gives_up_without_a_socket_close() {
+    fn closed_connection_read_gives_up_without_a_socket_close() {
+        for deadline in [Some(Instant::now() + Duration::from_secs(10)), None] {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (accepted, _) = listener.accept().unwrap();
+            let closed = Arc::new(AtomicBool::new(false));
+            let mut stream = DeadlineStream {
+                stream: Arc::new(accepted),
+                deadline,
+                closed: Arc::clone(&closed),
+                server_stop: Arc::new(AtomicBool::new(false)),
+                spoke: Arc::new(AtomicBool::new(false)),
+            };
+            let flag = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(50));
+                closed.store(true, Ordering::Release);
+                Instant::now()
+            });
+            let error = stream.read(&mut [0_u8; 8]).unwrap_err();
+            let returned = Instant::now();
+            let set = flag.join().unwrap();
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted, "{deadline:?}");
+            assert!(returned.saturating_duration_since(set) < CLOSE_POLL * 4, "{deadline:?}: {:?}", returned.saturating_duration_since(set));
+        }
+        // The server's own shutdown flag ends it too (stop-only connections are on no list).
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (accepted, _) = listener.accept().unwrap();
-        let evicted = Arc::new(AtomicBool::new(false));
-        let mut stream = DeadlineStream { stream: Arc::new(accepted), deadline: Some(Instant::now() + Duration::from_secs(10)), evicted: Arc::clone(&evicted) };
-        let flag = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(50));
-            evicted.store(true, Ordering::Release);
-        });
-        let started = Instant::now();
-        let error = stream.read(&mut [0_u8; 8]).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
-        assert!(started.elapsed() < PENDING_POLL * 4, "{:?}", started.elapsed());
-        flag.join().unwrap();
+        let mut stream = DeadlineStream {
+            stream: Arc::new(accepted),
+            deadline: None,
+            closed: Arc::new(AtomicBool::new(false)),
+            server_stop: Arc::new(AtomicBool::new(true)),
+            spoke: Arc::new(AtomicBool::new(false)),
+        };
+        assert_eq!(stream.read(&mut [0_u8; 8]).unwrap_err().kind(), std::io::ErrorKind::ConnectionAborted);
     }
 
     #[test]

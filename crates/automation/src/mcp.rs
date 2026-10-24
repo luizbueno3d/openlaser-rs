@@ -610,8 +610,27 @@ mod tests {
 
     const STOP_WITHIN: Duration = Duration::from_secs(3);
 
-    /// B1: the GUI drops the stop connection (its 30 s idle timeout); the next stop through the MCP loop reconnects,
-    /// resends, and reaches FastStop.
+    /// The stop delivery contract (bridge.rs module docs): at least one FastStop call since `before`, every one of them
+    /// for `machine`. Not exactly one: a stop whose connection is dropped under it may reach the GUI and still be
+    /// resent on a fresh connection (Windows delivers bytes to a read already waiting on a socket shut down under it).
+    fn assert_stopped_since(gui: &Gui, before: usize, machine: Option<&str>, context: &str) {
+        let seen = stops(gui);
+        let new = seen.get(before..).unwrap_or_default();
+        assert!(!new.is_empty(), "{context}: the stop never reached FastStop ({seen:?})");
+        assert!(new.iter().all(|m| m.as_deref() == machine), "{context}: a delivery was for another machine than {machine:?}: {seen:?}");
+    }
+
+    fn wait_live(gui: &Gui, n: usize) {
+        let until = Instant::now() + Duration::from_secs(5);
+        while gui.server.live_connections() != n && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(gui.server.live_connections(), n, "the GUI's connections did not end");
+    }
+
+    /// B1: the GUI drops the stop connection (its 30 s idle timeout, or every agent connection at once); the next stop
+    /// through the MCP loop reconnects, resends, reaches FastStop for the requested machine, and reports success.
+    /// Once with the stop sent while the drop is still under way, once after the dropped connection is gone.
     #[test]
     fn stop_reconnects_after_idle_drop() {
         let gui = gui();
@@ -619,13 +638,22 @@ mod tests {
         mcp.call(1, "stop", json!({}));
         let first = mcp.response(json!(1), STOP_WITHIN).unwrap();
         assert!(!is_error(&first), "{first}");
-        assert_eq!(stops(&gui).len(), 1);
-        gui.server.disconnect_all();
-        std::thread::sleep(Duration::from_millis(50));
-        mcp.call(2, "stop", json!({"machine":"jpt-m7-200-sim"}));
-        let second = mcp.response(json!(2), STOP_WITHIN).unwrap();
-        assert!(!is_error(&second), "the stop after an idle drop failed: {second}");
-        assert_eq!(stops(&gui), [None, Some("jpt-m7-200-sim".to_owned())]);
+        assert_eq!(stops(&gui), [None]);
+        let machine = "jpt-m7-200-sim";
+        for (id, settle) in [(2, false), (3, true)] {
+            gui.server.disconnect_all();
+            if settle {
+                // Every connection thread ends promptly on every OS, so the stop meets a connection that is gone.
+                wait_live(&gui, 0);
+            }
+            let before = stops(&gui).len();
+            mcp.call(id, "stop", json!({"machine": machine}));
+            let response = mcp.response(json!(id), STOP_WITHIN).unwrap();
+            assert!(!is_error(&response), "the stop after an idle drop failed (settled: {settle}): {response}");
+            let report: Value = serde_json::from_str(&text(&response)).unwrap();
+            assert_eq!(report["latched"], json!(true), "{response}");
+            assert_stopped_since(&gui, before, Some(machine), &format!("settled: {settle}"));
+        }
         mcp.finish().unwrap();
         gui.server.shutdown();
     }
@@ -791,21 +819,23 @@ mod tests {
         let mut mcp = Harness::start(bridge(&gui.target), false);
         let budget = crate::bridge::STOP_DELIVERY_BUDGET;
         let mut id = 0_u64;
-        let mut round = |mcp: &mut Harness, expected: usize| {
+        let mut round = |mcp: &mut Harness| {
             id += 1;
+            let before = stops(&gui).len();
             let started = Instant::now();
             mcp.call(id, "stop", json!({}));
             let response = mcp.response(json!(id), budget + Duration::from_millis(500)).expect("no answer to the stop");
             assert!(!is_error(&response), "round {id}: {response}");
-            assert!(started.elapsed() < budget, "round {id}: {:?}", started.elapsed());
-            assert_eq!(stops(&gui).len(), expected, "round {id}");
+            // The handle's own budget, plus the stdio pipe around it.
+            assert!(started.elapsed() < budget + Duration::from_millis(100), "round {id}: {:?}", started.elapsed());
+            assert_stopped_since(&gui, before, None, &format!("round {id}"));
         };
-        for expected in 1..=3 {
-            round(&mut mcp, expected);
+        for _ in 1..=3 {
+            round(&mut mcp);
         }
         drop(agents);
-        for expected in 4..=6 {
-            round(&mut mcp, expected);
+        for _ in 4..=6 {
+            round(&mut mcp);
         }
         assert!(flood.finish() > 0, "the flood never churned");
         mcp.finish().unwrap();
