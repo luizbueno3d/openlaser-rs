@@ -104,6 +104,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // `main` keeps `registry` for the post-run fail-safe stop; the app closure gets its own clone.
+    let registry_for_app = Arc::clone(&registry);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title("OpenLaser").with_inner_size([1440.0, 900.0]).with_min_inner_size([760.0, 480.0]),
         ..Default::default()
@@ -115,7 +117,7 @@ fn main() -> ExitCode {
             let settings = PersistentSettings::open();
             let in_window_menus = args.in_window_menus || settings.load().in_window_menus;
             let quit_ctx = cc.egui_ctx.clone();
-            let mut automation = openlaser::control_runtime::Automation::new(&args, Arc::clone(&registry), cc.egui_ctx.clone());
+            let mut automation = openlaser::control_runtime::Automation::new(&args, Arc::clone(&registry_for_app), cc.egui_ctx.clone());
             if args.control.is_some() {
                 automation.set(true).map_err(|e| std::io::Error::other(format!("--control: {e}")))?;
             }
@@ -143,13 +145,18 @@ fn main() -> ExitCode {
             }))
         }),
     );
-    match result {
+    let code = match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("openlaser: {error}");
             ExitCode::FAILURE
         }
-    }
+    };
+    // Fail-safe stop (UI §7.5): Dock Quit, logout and `terminate:` end the event loop through
+    // `applicationWillTerminate`, which bypasses `CloseRequested`, so the close guard never ran.
+    // A repeated stop on an already-stopped machine is a no-op.
+    let _ = openlaser::stop_all_bounded(&registry, openlaser::STOP_BUDGET);
+    code
 }
 
 struct DesktopApp {

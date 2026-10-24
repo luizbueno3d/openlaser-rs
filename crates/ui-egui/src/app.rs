@@ -692,6 +692,16 @@ impl OpenLaserApp {
     }
 }
 
+impl Drop for OpenLaserApp {
+    /// Fail-safe stop (UI §7.5): Dock Quit, logout and `terminate:` end the event loop through
+    /// `applicationWillTerminate`, which bypasses `CloseRequested`, so the close guard never ran. Dropping the app
+    /// still owns a live session with live drivers, so run the same stop path (latch every machine, void a pending
+    /// arm). A repeated stop is a no-op.
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
 impl eframe::App for OpenLaserApp {
     /// (1) Esc while a machine is framing, armed or marking, or while the ARM dialog is open → STOP (latch first,
     /// PendingArm voided) and the Esc events are removed before any widget sees them; when idle, Esc passes on (a
