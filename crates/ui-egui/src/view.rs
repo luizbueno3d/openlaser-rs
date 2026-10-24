@@ -100,19 +100,19 @@ pub(crate) fn zoom_about(zoom: f64, center: [f64; 2], rect: egui::Rect, anchor: 
     (next, [center[0] + before[0] - after[0], center[1] + before[1] - after[1]])
 }
 
-struct Palette {
-    background: egui::Color32,
-    pasteboard: egui::Color32,
-    grid_minor: egui::Color32,
-    grid_major: egui::Color32,
-    field: egui::Color32,
-    work_area: egui::Color32,
-    cross: egui::Color32,
-    ruler: egui::Color32,
-    ruler_text: egui::Color32,
+pub(crate) struct Palette {
+    pub(crate) background: egui::Color32,
+    pub(crate) pasteboard: egui::Color32,
+    pub(crate) grid_minor: egui::Color32,
+    pub(crate) grid_major: egui::Color32,
+    pub(crate) field: egui::Color32,
+    pub(crate) work_area: egui::Color32,
+    pub(crate) cross: egui::Color32,
+    pub(crate) ruler: egui::Color32,
+    pub(crate) ruler_text: egui::Color32,
 }
 
-fn palette(dark: bool) -> Palette {
+pub(crate) fn palette(dark: bool) -> Palette {
     if dark {
         Palette {
             background: egui::Color32::from_gray(44),

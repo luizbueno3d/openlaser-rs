@@ -1231,14 +1231,51 @@ fn kittest_accessibility_labels() {
 fn canvas_draws_rulers_grid_field_work_area_and_origin() {
     let mut h = harness();
     h.run();
-    let shapes = &h.output().shapes;
-    let texts: Vec<String> = shapes.iter().filter_map(|s| if let egui::Shape::Text(t) = &s.shape { Some(t.galley.text().to_owned()) } else { None }).collect();
-    assert!(texts.iter().filter(|t| t.parse::<f64>().is_ok()).count() >= 6, "ruler labels: {texts:?}");
-    assert!(texts.iter().any(|t| t == "encodable"), "the encodable field is labelled");
-    let segments = shapes.iter().filter(|s| matches!(s.shape, egui::Shape::LineSegment { .. })).count();
-    assert!(segments > 40, "grid, ticks and the dashed field outline: {segments}");
+    let colors = crate::view::palette(h.ctx.theme() == egui::Theme::Dark);
+    let check = |h: &H| {
+        let shapes = &h.output().shapes;
+        let segments = |color: egui::Color32| -> Vec<[egui::Pos2; 2]> {
+            shapes
+                .iter()
+                .filter_map(|s| if let egui::Shape::LineSegment { points, stroke } = &s.shape { (stroke.color == color).then_some(*points) } else { None })
+                .collect()
+        };
+        // Rulers: numeric labels along the top strip (one y) and the left strip (one x).
+        let labels: Vec<egui::Pos2> = shapes
+            .iter()
+            .filter_map(|s| if let egui::Shape::Text(t) = &s.shape { t.galley.text().parse::<f64>().is_ok().then_some(t.pos) } else { None })
+            .collect();
+        let most = |key: &dyn Fn(&egui::Pos2) -> i32| {
+            let mut counts = std::collections::BTreeMap::new();
+            for p in &labels {
+                *counts.entry(key(p)).or_insert(0) += 1;
+            }
+            counts.values().copied().max().unwrap_or(0)
+        };
+        assert!(most(&|p| p.y.round() as i32) >= 3, "top ruler labels: {labels:?}");
+        assert!(most(&|p| p.x.round() as i32) >= 3, "left ruler labels: {labels:?}");
+        // Grid: minor and major lines in the work area.
+        assert!(segments(colors.grid_minor).len() >= 10, "minor grid");
+        assert!(segments(colors.grid_major).len() >= 4, "major grid");
+        // The encodable field: dashed (many short segments) and labelled.
+        assert!(segments(colors.field).len() >= 16, "dashed encodable field");
+        assert!(shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "encodable")));
+        // The work area outline.
+        assert!(shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.stroke.color == colors.work_area)), "work area");
+        // The centre cross sits at world (0, 0).
+        let cross = segments(colors.cross);
+        assert_eq!(cross.len(), 2, "centre cross");
+        (cross[0][0] + (cross[0][1] - cross[0][0]) * 0.5, cross[1][0] + (cross[1][1] - cross[1][0]) * 0.5)
+    };
+    let (a, b) = check(&h);
+    assert!(a.distance(b) < 0.01, "the two cross strokes share a centre");
+    // Pan 10 mm right: the origin cross moves 10 mm × zoom to the left.
+    let zoom = h.state().view.zoom.unwrap();
+    h.state_mut().view.center[0] += 10.0;
+    h.run();
+    let (moved, _) = check(&h);
+    assert!(((a.x - moved.x) - (10.0 * zoom) as f32).abs() < 0.5, "cross at {a:?} → {moved:?} (zoom {zoom})");
     let fit = h.state().view.zoom.unwrap();
-    // F = 200 × 1.1834 framed with 5 %: the field fits the canvas.
     assert!(fit > 0.5 && fit < 5.0, "{fit}");
 }
 
