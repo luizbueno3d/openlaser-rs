@@ -39,7 +39,7 @@ muda = { workspace = true }
 signal-hook = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-ctrlc = { workspace = true }
+ctrlc = { workspace = true, features = ["termination"] }
 
 [dev-dependencies]
 egui_kittest = { workspace = true }
