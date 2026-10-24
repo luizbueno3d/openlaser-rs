@@ -182,6 +182,19 @@ fn gcode_hostile_names_cannot_inject_lines() {
     }
     assert_eq!(program.text.lines().count(), usize::try_from(program.lines).unwrap());
     assert!(program.text.bytes().all(|b| !grbl_realtime(b) && (b == b'\n' || b >= 0x20)), "real-time or control byte in:\n{:?}", program.text);
+    assert!(program.text.bytes().all(|b| b == b'\n' || (0x20..0x7f).contains(&b)), "a byte outside printable ASCII in:\n{:?}", program.text);
+}
+
+/// No byte 0x80–0xFF ever reaches the controller (GRBL reads them as override commands, even inside a comment),
+/// whatever the layer names: the program is printable ASCII and `\n` only, the fixed comment text included.
+#[test]
+fn gcode_program_is_ascii_only() {
+    let m = diode();
+    for name in ["Cut", "Ĕngrave ×2 · ₂"] {
+        let program = compile(&plan(vec![section(name, gantry_cut(20.0, 250), vec![square()])], 2), &m, &header(name)).unwrap();
+        assert!(program.text.bytes().all(|b| b == b'\n' || (0x20..0x7f).contains(&b)), "{:?}", program.text);
+        assert!(program.text.lines().any(|l| l.starts_with("; Layer: ") && l.ends_with(" - line")), "{}", program.text);
+    }
 }
 
 /// SPEC §7.3: the frame program never turns the laser on (no M3/M4, no S, no G1), even with a hostile machine name.

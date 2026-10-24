@@ -1,14 +1,17 @@
 //! Importers (SPEC §3.6): SVG through usvg at true scale, DXF (the OM parser port plus an evaluated-SPLINE shipping
 //! variant), raster images and the prototype's (OM) `workspace.json` + `layer_settings.json`.
 //!
-//! Every import is bounded (SPEC §1.3 rule 6, never crash): the input size, the SVG nesting depth and `<use>`
-//! expansion, the number of output points (per entity and in total), the curve-evaluation work and the raster
-//! size are capped, and a file over a cap is refused with [`Error::TooLarge`]. Coordinates that are not finite
-//! after unit scaling and placement are refused, never passed on. Nothing in a file is dropped silently: what is
-//! not imported is either a refusal or a numbered [`Notice`].
+//! Every import is bounded (SPEC §1.3 rule 6, never crash): the input size, the number of output points (per entity
+//! and in total), the curve-evaluation work and the raster size are capped, and an SVG is measured by the SVG guard
+//! (`svg_guard`) before any parser that could recurse, expand or allocate without a bound sees it. A file over a cap
+//! is refused with [`Error::TooLarge`]. Coordinates that are not finite after unit scaling and placement are refused,
+//! never passed on. Nothing in a file is dropped silently, and nothing an SVG hides is burned: what is not imported
+//! is either a refusal or a numbered [`Notice`].
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
+#[cfg(test)]
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,6 +23,7 @@ use usvg::roxmltree;
 
 pub mod dxf_om;
 pub mod om;
+mod svg_guard;
 
 pub use openlaser_doc::{ColorLayer, Shape};
 pub use openlaser_geom::Polyline;
@@ -37,15 +41,54 @@ pub const MAX_IMPORT_POINTS: usize = 2_000_000;
 pub const MAX_ENTITY_POINTS: usize = 200_000;
 /// Most curve-evaluation steps (spline sampling) one import may spend.
 pub const MAX_IMPORT_WORK: u64 = 50_000_000;
-/// Deepest SVG element nesting accepted, counted before and after entity and `<use>` expansion. usvg and the
-/// tree walk recurse per level; this keeps them far inside a 2 MiB thread stack.
+/// Deepest SVG element nesting accepted, counted on the raw text before any parser runs and again once `<use>` is
+/// expanded (a `<use>` counts two levels). roxmltree, usvg and the tree walk recurse per level; this keeps them far
+/// inside a 2 MiB thread stack.
 pub const MAX_SVG_DEPTH: usize = 256;
-/// Most SVG elements after `<use>` and marker expansion (a bound computed before usvg expands anything).
+/// Most SVG elements once `<use>` references are expanded (computed before usvg expands anything).
 pub const MAX_SVG_ELEMENTS: u64 = 500_000;
 /// Most XML nodes (elements, text, comments) roxmltree may build.
 pub const MAX_SVG_XML_NODES: u32 = 1_000_000;
-/// Largest total size of the CSS in `<style>` elements, in bytes.
+/// Largest total size of the CSS in `<style>` elements, and of one `style` attribute, in bytes.
 pub const MAX_SVG_STYLE_BYTES: usize = 64 * 1024;
+/// Longest SVG `d` or `points` attribute, in bytes.
+pub const MAX_SVG_PATH_DATA_BYTES: usize = 4 * 1024 * 1024;
+/// Most cubic curves one SVG arc may become (the count grows with the radius; svgtypes' cost is quadratic in it).
+pub const MAX_SVG_ARC_CURVES: u32 = 256;
+/// Most path segments in a row that draw nothing (a repeated ClosePath): svgtypes recurses once per such segment.
+pub const MAX_SVG_EMPTY_SEGMENTS: usize = 256;
+/// Most bytes usvg may read or copy (attributes, text, style declarations, dash arrays, gradient stops) once `<use>`
+/// references are expanded.
+pub const MAX_SVG_EXPANDED_BYTES: u64 = 256 * 1024 * 1024;
+/// Largest markup the importer's own `<use>` expansion may write (usvg applies a `<use>` transform twice, so `<use>`
+/// elements are expanded into `<g>` clones before usvg ever sees them).
+pub const MAX_SVG_EXPANDED_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+/// Most style-sheet selector work usvg may do: simple-selector parts (`.a.b` is two) × the attributes each element
+/// match reads (one per element plus one per attribute), once `<use>` is expanded.
+pub const MAX_SVG_CSS_MATCHES: u64 = 1 << 26;
+/// Most attributes one SVG start tag may have (roxmltree checks each against all before it).
+pub const MAX_SVG_ATTRIBUTES: usize = 1024;
+/// Most attribute pairs roxmltree's duplicate check compares, all start tags together (Σ n·(n−1)/2).
+pub const MAX_SVG_ATTRIBUTE_PAIRS: u64 = 1 << 27;
+/// Most `xmlns` / `xmlns:*` declarations in one SVG (roxmltree resolves namespaces by linear scans).
+pub const MAX_SVG_NAMESPACES: usize = 64;
+/// Widest SVG `stroke-width`, in user units (usvg outlines every stroke to measure it; the work grows with the width).
+pub const MAX_SVG_STROKE_WIDTH: f64 = 1000.0;
+/// Most XML nodes (elements, text, comments, processing instructions) usvg visits once `<use>` is expanded.
+pub const MAX_SVG_EXPANDED_NODES: u64 = 2_000_000;
+/// Most gradient copies usvg may make: one per painted element for object-bounding-box gradients (or context paints),
+/// else one per referenced gradient. usvg deduplicates them with a linear scan each, so the work is quadratic.
+pub const MAX_SVG_GRADIENT_COPIES: u64 = 20_000;
+/// Most attribute scans usvg's tree may cost: each style declaration applied scans the element's attributes, and each
+/// inherited-property lookup scans every ancestor's.
+pub const MAX_SVG_ATTRIBUTE_WORK: u64 = 1 << 27;
+/// Most text simplecss may rescan: it computes a line and column, from the start of the style text, at every token
+/// it rejects (a number without a unit, `#`, the end of each declaration), so long style texts cost quadratic time.
+pub const MAX_SVG_STYLE_SCAN: u64 = 1 << 30;
+/// Longest `class` or `id` in an SVG with a style sheet (each selector comparison reads it).
+pub const MAX_SVG_NAME_BYTES: usize = 256;
+/// Longest chain of gradients naming each other with `href`.
+pub const MAX_SVG_HREF_CHAIN: usize = 16;
 /// Most pixels a raster image may have (16 Mpx).
 pub const MAX_RASTER_PIXELS: u64 = 16_777_216;
 /// Longest raster side, in pixels.
@@ -346,47 +389,104 @@ fn place_polylines(polylines: &mut [Polyline], unit_to_mm: f64, scale: f64, cent
 
 fn import_svg(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Imported> {
     let source = std::str::from_utf8(check_vector_size("SVG", bytes)?).map_err(|e| Error::Malformed { format: "SVG", message: e.to_string() })?;
-    svg_scan_depth(source)?;
-    let xml_opts = roxmltree::ParsingOptions { allow_dtd: true, nodes_limit: MAX_SVG_XML_NODES };
-    let doc = roxmltree::Document::parse_with_options(source, xml_opts).map_err(|e| match e {
-        roxmltree::Error::NodesLimitReached => Error::TooLarge(format!("SVG has more than {MAX_SVG_XML_NODES} XML nodes")),
-        other => Error::Malformed { format: "SVG", message: other.to_string() },
-    })?;
-    let facts = svg_facts(&doc)?;
-    if opts.svg_units == SvgUnits::RequirePhysical && !svg_root_has_physical_size(doc.root_element()) {
-        return Err(Error::Unitless(name.to_owned()));
-    }
+    let source = svg_guard::prepare(source)?;
     let dpi: f32 = match opts.svg_units {
         SvgUnits::Px72 => 72.0,
         SvgUnits::RequirePhysical | SvgUnits::Px96 => 96.0,
     };
+    let doc = parse_svg_xml(source.as_ref())?;
+    // `<use>` elements are expanded into `<g>` clones before usvg sees them: usvg applies the use element's
+    // `transform` a second time when it computes the clone's absolute transform (a use-translated shape lands twice
+    // as far as a browser puts it). The expanded markup gets the same bounded parse and the same guard run.
+    match svg_guard::expand_uses(&doc, source.as_ref(), f64::from(dpi))? {
+        Some(markup) => {
+            let doc = parse_svg_xml(&markup)?;
+            import_svg_tree(name, &doc, opts, dpi)
+        }
+        None => import_svg_tree(name, &doc, opts, dpi),
+    }
+}
+
+/// Parses an SVG document with the bounded options, converting a panic inside roxmltree into an error (third-party
+/// parsers must never take the process down, never-crash).
+fn parse_svg_xml(source: &str) -> Result<roxmltree::Document<'_>> {
+    let xml_opts = roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: MAX_SVG_XML_NODES };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| roxmltree::Document::parse_with_options(source, xml_opts)))
+        .map_err(|_| Error::Malformed { format: "SVG", message: "the XML parser panicked on this file".to_owned() })?
+        .map_err(|e| match e {
+            roxmltree::Error::NodesLimitReached => Error::TooLarge(format!("SVG has more than {MAX_SVG_XML_NODES} XML nodes")),
+            // No entity is ever declared (a DOCTYPE internal subset is refused), so any `&name;` is undefined:
+            // typically an older Illustrator file whose subset was deleted by hand.
+            roxmltree::Error::UnknownEntityReference(entity, pos) => Error::Malformed {
+                format: "SVG",
+                message: format!(
+                    "the entity reference &{entity}; (line {}, column {}) is not defined (entity declarations, which SVGs saved by older Adobe Illustrator \
+                     versions rely on, are not supported); export the file again without entities (Illustrator: Save As SVG 1.1 with \"Preserve \
+                     Illustrator Editing Capabilities\" off, or File > Export > Export As SVG)",
+                    pos.row, pos.col
+                ),
+            },
+            other => Error::Malformed { format: "SVG", message: other.to_string() },
+        })
+}
+
+fn import_svg_tree(name: &str, doc: &roxmltree::Document<'_>, opts: &ImportOptions, dpi: f32) -> Result<Imported> {
+    let facts = svg_guard::check(doc)?;
+    if opts.svg_units == SvgUnits::RequirePhysical && !svg_root_has_physical_size(doc.root_element()) {
+        return Err(Error::Unitless(name.to_owned()));
+    }
     let refused_images = Arc::new(AtomicUsize::new(0));
     let parser_opts = svg_parser_options(dpi, Arc::clone(&refused_images));
-    let tree = usvg::Tree::from_xmltree(&doc, &parser_opts).map_err(|e| match e {
-        usvg::Error::ElementsLimitReached | usvg::Error::ParsingFailed(roxmltree::Error::NodesLimitReached) => {
-            Error::TooLarge("SVG nesting or <use> expansion is too large".to_owned())
-        }
-        other => Error::Malformed { format: "SVG", message: other.to_string() },
-    })?;
+    let tree = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| usvg::Tree::from_xmltree(doc, &parser_opts)))
+        .map_err(|_| Error::Malformed { format: "SVG", message: "the SVG parser panicked on this file".to_owned() })?
+        .map_err(|e| match e {
+            usvg::Error::ElementsLimitReached | usvg::Error::ParsingFailed(roxmltree::Error::NodesLimitReached) => {
+                Error::TooLarge("SVG nesting or <use> expansion is too large".to_owned())
+            }
+            other => Error::Malformed { format: "SVG", message: other.to_string() },
+        })?;
     let mm_per_px = 25.4 / f64::from(dpi);
     let mut shapes = Vec::new();
     let mut budget = Budget::new();
     let mut unmatched: BTreeSet<String> = BTreeSet::new();
     let mut unmatched_paths = 0usize;
-    let mut stack = vec![tree.root().children().iter()];
-    while let Some(top) = stack.last_mut() {
+    let (mut hidden_paths, mut dashed_paths) = (0usize, 0usize);
+    // Each level carries whether an ancestor group is fully transparent (`opacity="0"`).
+    let mut stack = vec![(tree.root().children().iter(), false)];
+    while let Some((top, transparent)) = stack.last_mut() {
+        let transparent = *transparent;
         let Some(node) = top.next() else {
             stack.pop();
             continue;
         };
         match node {
-            usvg::Node::Group(group) => stack.push(group.children().iter()),
+            usvg::Node::Group(group) => {
+                // Clip paths and masks from the file are refused before usvg runs; what remains is the viewport usvg
+                // clips a `<symbol>` or nested `<svg>` to. The walk ignores clips, so it would burn what they hide.
+                if group.clip_path().is_some() || group.mask().is_some() {
+                    return Err(Error::NotImplemented(
+                        "SVG content clipped by a <symbol> or nested <svg> viewport; set overflow=\"visible\" on it or expand the symbol before importing",
+                    ));
+                }
+                if !group.filters().is_empty() {
+                    return Err(Error::NotImplemented("SVG filter effects; remove them before importing"));
+                }
+                stack.push((group.children().iter(), transparent || group.opacity().get() <= 0.0));
+            }
             usvg::Node::Path(path) => {
+                // Geometry the SVG does not show is never burned: hidden, fully transparent, or neither filled nor
+                // stroked (usvg marks the last as not visible).
+                let paint_shows = path.fill().is_some_and(|f| f.opacity().get() > 0.0) || path.stroke().is_some_and(|s| s.opacity().get() > 0.0);
+                if transparent || !path.is_visible() || !paint_shows {
+                    hidden_paths += 1;
+                    continue;
+                }
                 let bez = svg_bez_path(path, mm_per_px)?;
                 if bez.elements().is_empty() {
                     continue;
                 }
                 budget.entity(bez_point_count(&bez))?;
+                dashed_paths += usize::from(path.stroke().is_some_and(|s| s.dasharray().is_some()));
                 let layer = match opts.layer {
                     Some(layer) => layer,
                     None => match svg_palette_layer(path) {
@@ -403,8 +503,63 @@ fn import_svg(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Imported
             usvg::Node::Image(_) | usvg::Node::Text(_) => {}
         }
     }
+    let mut notices = Notices::default();
+    if facts.display_none > 0 {
+        notices.push(
+            NoticeCode::ImportEntitySkipped,
+            format!("{} SVG elements are hidden with display:none; they and their contents were not imported", facts.display_none),
+            None,
+        );
+    }
+    if facts.sheet_hides {
+        notices.push(NoticeCode::ImportEntitySkipped, "the SVG style sheet hides elements with display:none; those were not imported".to_owned(), None);
+    }
+    if hidden_paths > 0 {
+        notices.push(
+            NoticeCode::ImportEntitySkipped,
+            format!("{hidden_paths} SVG paths are invisible (visibility hidden, opacity 0, or neither fill nor stroke); they were not imported"),
+            None,
+        );
+    }
+    // What usvg drops without a word, measured by the guard.
+    if facts.failed_conditions > 0 {
+        notices.push(
+            NoticeCode::ImportEntitySkipped,
+            format!(
+                "{} SVG elements outside <switch> have a requiredFeatures, requiredExtensions or systemLanguage condition that is not met; they and their contents were not imported",
+                facts.failed_conditions
+            ),
+            None,
+        );
+    }
+    if facts.degenerate_transforms > 0 {
+        notices.push(
+            NoticeCode::ImportEntitySkipped,
+            format!(
+                "{} SVG elements have a transform that scales to zero or is not finite; they and their contents were not imported",
+                facts.degenerate_transforms
+            ),
+            None,
+        );
+    }
+    if facts.f32_overflows > 0 {
+        notices.push(
+            NoticeCode::ImportEntitySkipped,
+            format!("{} SVG elements have coordinates beyond ±3.4e38 (single precision); geometry that uses them was not imported", facts.f32_overflows),
+            None,
+        );
+    }
+    if facts.foreign_objects > 0 {
+        notices.push(
+            NoticeCode::ImportEntitySkipped,
+            format!("{} SVG <foreignObject> elements (HTML or other non-SVG content) were not imported", facts.foreign_objects),
+            None,
+        );
+    }
     if shapes.is_empty() {
-        return Err(Error::Malformed { format: "SVG", message: format!("no usable paths found in {name}") });
+        let hidden =
+            if notices.0.is_empty() { String::new() } else { format!(" ({})", notices.0.iter().map(|n| n.message.as_str()).collect::<Vec<_>>().join("; ")) };
+        return Err(Error::Malformed { format: "SVG", message: format!("no usable paths found in {name}{hidden}") });
     }
     let bounds = shape_bounds(&shapes);
     recenter_shapes(&mut shapes, bounds, opts.center_at, opts.scale);
@@ -413,7 +568,9 @@ fn import_svg(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Imported
         check_placed(b.min[0], b.min[1], "the SVG drawing")?;
         check_placed(b.max[0], b.max[1], "the SVG drawing")?;
     }
-    let mut notices = Notices::default();
+    if dashed_paths > 0 {
+        notices.push(ASSUMED_DEFAULT, format!("{dashed_paths} SVG paths have dashed strokes; they were imported as solid paths"), None);
+    }
     if facts.texts > 0 {
         notices.push(NoticeCode::ImportTextIgnored, format!("{} SVG text elements were ignored; convert text to paths before importing", facts.texts), None);
     }
@@ -462,245 +619,6 @@ pub(crate) fn svg_parser_options(dpi: f32, refused_images: Arc<AtomicUsize>) -> 
     }
 }
 
-/// Raw-text pre-scan, before roxmltree or usvg see the document: refuses element nesting deeper than
-/// [`MAX_SVG_DEPTH`]. Comments, CDATA, processing instructions and the DOCTYPE (with its internal subset) are
-/// skipped; quoted attribute values may contain `>`. Entity expansion is checked again on the parsed tree.
-pub(crate) fn svg_scan_depth(source: &str) -> Result<()> {
-    let bytes = source.as_bytes();
-    let mut depth = 0usize;
-    let mut i = 0usize;
-    let find = |from: usize, needle: &[u8]| -> usize {
-        bytes.get(from..).and_then(|rest| rest.windows(needle.len()).position(|w| w == needle)).map_or(bytes.len(), |p| from + p + needle.len())
-    };
-    while i < bytes.len() {
-        let Some(offset) = bytes.get(i..).and_then(|rest| rest.iter().position(|&b| b == b'<')) else { break };
-        i += offset;
-        let rest = bytes.get(i..).unwrap_or_default();
-        if rest.starts_with(b"<!--") {
-            i = find(i + 4, b"-->");
-        } else if rest.starts_with(b"<![CDATA[") {
-            i = find(i + 9, b"]]>");
-        } else if rest.starts_with(b"<?") {
-            i = find(i + 2, b"?>");
-        } else if rest.starts_with(b"<!") {
-            i = skip_markup_declaration(bytes, i + 2);
-        } else if rest.starts_with(b"</") {
-            depth = depth.saturating_sub(1);
-            i = skip_tag(bytes, i + 2).0;
-        } else {
-            // Every element counts, a self-closing leaf included (as on the parsed tree).
-            let (end, self_closing) = skip_tag(bytes, i + 1);
-            if depth + 1 > MAX_SVG_DEPTH {
-                return Err(Error::TooLarge(format!("SVG elements are nested more than {MAX_SVG_DEPTH} deep")));
-            }
-            if !self_closing {
-                depth += 1;
-            }
-            i = end;
-        }
-    }
-    Ok(())
-}
-
-/// Index after the `>` closing a tag that starts at `from` (quotes honoured), and whether it ended in `/>`.
-fn skip_tag(bytes: &[u8], from: usize) -> (usize, bool) {
-    let mut quote: Option<u8> = None;
-    let mut previous = 0u8;
-    let mut i = from;
-    while let Some(&b) = bytes.get(i) {
-        match quote {
-            Some(q) if b == q => quote = None,
-            Some(_) => {}
-            None if b == b'"' || b == b'\'' => quote = Some(b),
-            None if b == b'>' => return (i + 1, previous == b'/'),
-            None => {}
-        }
-        previous = b;
-        i += 1;
-    }
-    (bytes.len(), false)
-}
-
-/// Skips `<!DOCTYPE …>` / `<!ENTITY …>`-style declarations, including a bracketed internal subset with its own
-/// comments and quoted values.
-fn skip_markup_declaration(bytes: &[u8], from: usize) -> usize {
-    let mut quote: Option<u8> = None;
-    let mut brackets = 0usize;
-    let mut i = from;
-    while let Some(&b) = bytes.get(i) {
-        match quote {
-            Some(q) if b == q => quote = None,
-            Some(_) => {}
-            None => {
-                if bytes.get(i..).is_some_and(|rest| rest.starts_with(b"<!--")) {
-                    i = bytes.get(i + 4..).and_then(|rest| rest.windows(3).position(|w| w == b"-->")).map_or(bytes.len(), |p| i + 4 + p + 3);
-                    continue;
-                }
-                match b {
-                    b'"' | b'\'' => quote = Some(b),
-                    b'[' => brackets += 1,
-                    b']' => brackets = brackets.saturating_sub(1),
-                    b'>' if brackets == 0 => return i + 1,
-                    _ => {}
-                }
-            }
-        }
-        i += 1;
-    }
-    bytes.len()
-}
-
-/// What the parsed SVG holds that usvg drops or that bounds its work.
-#[derive(Debug, Default)]
-pub(crate) struct SvgFacts {
-    pub images: usize,
-    pub texts: usize,
-}
-
-#[derive(Clone, Copy)]
-enum Visit {
-    Active,
-    Done { cost: u64, depth: usize, vertices: u64 },
-}
-
-/// Checks the parsed tree before usvg converts it: the root is `<svg>`; the nesting depth with entities and
-/// `<use>` references expanded stays within [`MAX_SVG_DEPTH`]; no `<use>` reference is recursive; the element count
-/// after `<use>` and marker expansion stays within [`MAX_SVG_ELEMENTS`]; the CSS stays within
-/// [`MAX_SVG_STYLE_BYTES`]. Iterative: a hostile file cannot exhaust the stack here.
-pub(crate) fn svg_facts(doc: &roxmltree::Document<'_>) -> Result<SvgFacts> {
-    let root = doc.root_element();
-    if root.tag_name().name() != "svg" {
-        return Err(Error::Malformed { format: "SVG", message: format!("the root element is <{}>, not <svg>", root.tag_name().name()) });
-    }
-    let mut facts = SvgFacts::default();
-    let mut ids: HashMap<&str, Vec<roxmltree::Node<'_, '_>>> = HashMap::new();
-    let mut markers = Vec::new();
-    let mut style_bytes = 0usize;
-    let mut style_mentions_marker = false;
-    let mut markers_used = false;
-    for node in doc.descendants().filter(roxmltree::Node::is_element) {
-        if let Some(id) = node.attribute("id") {
-            ids.entry(id).or_default().push(node);
-        }
-        if has_marker_property(node) {
-            markers_used = true;
-        }
-        match node.tag_name().name() {
-            "image" => facts.images += 1,
-            "text" => facts.texts += 1,
-            "marker" => markers.push(node),
-            "style" => {
-                for text in node.descendants().filter_map(|t| t.text().filter(|_| t.is_text())) {
-                    style_bytes = style_bytes.saturating_add(text.len());
-                    style_mentions_marker |= text.contains("marker");
-                }
-            }
-            _ => {}
-        }
-    }
-    if style_bytes > MAX_SVG_STYLE_BYTES {
-        return Err(Error::TooLarge(format!("SVG style sheets hold {style_bytes} bytes; the limit is {MAX_SVG_STYLE_BYTES}")));
-    }
-    let mut memo: HashMap<roxmltree::NodeId, Visit> = HashMap::new();
-    let mut stack = vec![(root, false)];
-    while let Some((node, expanded)) = stack.pop() {
-        let use_targets = svg_use_targets(node, &ids);
-        if !expanded {
-            match memo.get(&node.id()) {
-                Some(Visit::Done { .. }) => continue,
-                Some(Visit::Active) => return Err(recursive_use()),
-                None => {}
-            }
-            memo.insert(node.id(), Visit::Active);
-            stack.push((node, true));
-            for next in node.children().filter(roxmltree::Node::is_element).chain(use_targets.iter().copied()) {
-                match memo.get(&next.id()) {
-                    Some(Visit::Active) => return Err(recursive_use()),
-                    Some(Visit::Done { .. }) => {}
-                    None => stack.push((next, false)),
-                }
-            }
-            continue;
-        }
-        let (mut cost, mut depth, mut vertices) = (1u64, 1usize, svg_vertex_bound(node));
-        for (next, via_use) in node.children().filter(roxmltree::Node::is_element).map(|n| (n, false)).chain(use_targets.iter().map(|n| (*n, true))) {
-            let Some(Visit::Done { cost: c, depth: d, vertices: v }) = memo.get(&next.id()).copied() else { return Err(recursive_use()) };
-            cost = cost.saturating_add(c);
-            depth = depth.max(d.saturating_add(if via_use { 2 } else { 1 }));
-            vertices = vertices.saturating_add(v);
-        }
-        if depth > MAX_SVG_DEPTH {
-            return Err(Error::TooLarge(format!("SVG elements are nested more than {MAX_SVG_DEPTH} deep once entities and <use> are expanded")));
-        }
-        if cost > MAX_SVG_ELEMENTS {
-            return Err(Error::TooLarge(format!("SVG expands to more than {MAX_SVG_ELEMENTS} elements once <use> references are expanded")));
-        }
-        memo.insert(node.id(), Visit::Done { cost, depth, vertices });
-    }
-    let Some(Visit::Done { cost: root_cost, vertices: root_vertices, .. }) = memo.get(&root.id()).copied() else { return Err(recursive_use()) };
-    if !markers.is_empty() && (markers_used || style_mentions_marker) {
-        let nested = style_mentions_marker
-            || markers.iter().any(|marker| marker.descendants().chain(marker.ancestors()).filter(roxmltree::Node::is_element).any(has_marker_property));
-        if nested {
-            return Err(Error::NotImplemented("SVG markers that can apply inside markers (or markers set from a <style> sheet); convert markers to paths"));
-        }
-        let largest = markers
-            .iter()
-            .filter_map(|marker| match memo.get(&marker.id()) {
-                Some(Visit::Done { cost, .. }) => Some(*cost),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0);
-        let total = root_cost.saturating_add(root_vertices.saturating_mul(3).saturating_mul(largest));
-        if total > MAX_SVG_ELEMENTS {
-            return Err(Error::TooLarge(format!("SVG markers could expand to more than {MAX_SVG_ELEMENTS} elements")));
-        }
-    }
-    Ok(facts)
-}
-
-fn recursive_use() -> Error {
-    Error::Malformed { format: "SVG", message: "a <use> element references itself or one of its ancestors".to_owned() }
-}
-
-fn has_marker_property(node: roxmltree::Node<'_, '_>) -> bool {
-    node.attributes()
-        .any(|a| matches!(a.name(), "marker" | "marker-start" | "marker-mid" | "marker-end") || (a.name() == "style" && a.value().contains("marker")))
-}
-
-/// The elements a `<use>` instantiates (every element carrying the referenced id, to stay conservative).
-fn svg_use_targets<'a, 'input>(node: roxmltree::Node<'a, 'input>, ids: &HashMap<&str, Vec<roxmltree::Node<'a, 'input>>>) -> Vec<roxmltree::Node<'a, 'input>> {
-    if node.tag_name().name() != "use" {
-        return Vec::new();
-    }
-    let Some(href) = node.attributes().find(|a| a.name() == "href").map(|a| a.value()) else { return Vec::new() };
-    let Some(id) = href.trim().strip_prefix('#') else { return Vec::new() };
-    ids.get(id.trim()).cloned().unwrap_or_default()
-}
-
-/// An upper bound on the vertices markers could be drawn at: every vertex needs a command letter or a number
-/// (one or more digits).
-fn svg_vertex_bound(node: roxmltree::Node<'_, '_>) -> u64 {
-    let data = match node.tag_name().name() {
-        "path" => node.attribute("d"),
-        "polyline" | "polygon" => node.attribute("points"),
-        "line" => return 2,
-        _ => None,
-    };
-    let Some(data) = data else { return 0 };
-    let mut count = 0u64;
-    let mut in_digits = false;
-    for b in data.bytes() {
-        let digit = b.is_ascii_digit();
-        if (digit && !in_digits) || b.is_ascii_alphabetic() {
-            count += 1;
-        }
-        in_digits = digit;
-    }
-    count
-}
-
 /// Width and height of the root `<svg>` element only (never a child's `width=`, never `stroke-width=`), both in
 /// physical units.
 pub(crate) fn svg_root_has_physical_size(root: roxmltree::Node<'_, '_>) -> bool {
@@ -718,12 +636,32 @@ fn svg_bez_path(path: &usvg::Path, scale: f64) -> Result<BezPath> {
     use usvg::tiny_skia_path::PathSegment;
     let t = path.abs_transform();
     let mut bez = BezPath::new();
+    let mut started = false;
     for segment in path.data().segments() {
         match segment {
-            PathSegment::MoveTo(p) => bez.move_to(svg_point(p, t, scale)?),
-            PathSegment::LineTo(p) => bez.line_to(svg_point(p, t, scale)?),
-            PathSegment::QuadTo(p1, p2) => bez.quad_to(svg_point(p1, t, scale)?, svg_point(p2, t, scale)?),
-            PathSegment::CubicTo(p1, p2, p3) => bez.curve_to(svg_point(p1, t, scale)?, svg_point(p2, t, scale)?, svg_point(p3, t, scale)?),
+            PathSegment::MoveTo(p) => {
+                bez.move_to(svg_point(p, t, scale)?);
+                started = true;
+            }
+            PathSegment::LineTo(p) => {
+                if !started {
+                    // kurbo's BezPath push debug_asserts the path starts with a MoveTo.
+                    return Err(Error::Malformed { format: "SVG", message: "a path does not start with a moveto".to_owned() });
+                }
+                bez.line_to(svg_point(p, t, scale)?);
+            }
+            PathSegment::QuadTo(p1, p2) => {
+                if !started {
+                    return Err(Error::Malformed { format: "SVG", message: "a path does not start with a moveto".to_owned() });
+                }
+                bez.quad_to(svg_point(p1, t, scale)?, svg_point(p2, t, scale)?);
+            }
+            PathSegment::CubicTo(p1, p2, p3) => {
+                if !started {
+                    return Err(Error::Malformed { format: "SVG", message: "a path does not start with a moveto".to_owned() });
+                }
+                bez.curve_to(svg_point(p1, t, scale)?, svg_point(p2, t, scale)?, svg_point(p3, t, scale)?);
+            }
             PathSegment::Close => bez.close_path(),
         }
     }
@@ -1072,18 +1010,6 @@ mod tests {
         let notice = imported.notices.iter().find(|n| n.message.contains("<image>")).expect("image notice");
         assert!(notice.message.starts_with("2 SVG <image>"), "{}", notice.message);
         assert_eq!(notice.code, NoticeCode::ImportEntitySkipped);
-    }
-
-    #[test]
-    fn svg_depth_scan_skips_comments_quotes_and_doctype() {
-        let ok = r#"<!DOCTYPE svg [ <!ENTITY a "x>y"> <!-- it's ] > --> ]><svg a="<g>" b='>'><!-- <g><g> --><![CDATA[<g>]]><?pi <g>?><g/><g></g></svg>"#;
-        assert!(svg_scan_depth(ok).is_ok());
-        let deep = format!("<svg>{}{}</svg>", "<g>".repeat(MAX_SVG_DEPTH), "</g>".repeat(MAX_SVG_DEPTH));
-        assert!(matches!(svg_scan_depth(&deep), Err(Error::TooLarge(_))));
-        let at_limit = format!("<svg>{}<path/>{}</svg>", "<g>".repeat(MAX_SVG_DEPTH - 2), "</g>".repeat(MAX_SVG_DEPTH - 2));
-        assert!(svg_scan_depth(&at_limit).is_ok());
-        let leaf_over = format!("<svg>{}<path/>{}</svg>", "<g>".repeat(MAX_SVG_DEPTH - 1), "</g>".repeat(MAX_SVG_DEPTH - 1));
-        assert!(svg_scan_depth(&leaf_over).is_err());
     }
 
     #[test]

@@ -1,6 +1,6 @@
-//! T4 (SPEC §6.2): OM importer parity. DXF rows must match exactly (polyline and point counts, coordinates — here
-//! bit for bit, stricter than the 1e-9 rule); SVG and STL rows are informational (the shipping importer reads SVG
-//! at true scale and has no STL); refusal rows must refuse.
+//! T4 (SPEC §6.2): OM importer parity. DXF rows must match on polyline and point counts and coordinates within the
+//! 1e-9 rule (libm results can differ by one ULP between macOS, Linux and Windows); SVG and STL rows are
+//! informational (the shipping importer reads SVG at true scale and has no STL); refusal rows must refuse.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
 use openlaser_import::{ImportOptions, Polyline, SvgUnits, dxf_om, import};
@@ -40,7 +40,18 @@ fn t4() {
                     other => panic!("{}: unexpected T4 function {other}", case.name),
                 };
                 let expected = output.get("polylines").expect("expected polylines");
-                assert_eq!(serde_json::to_value(&actual).expect("serialisable"), *expected, "T4 {}", case.name);
+                let expected_lines: Vec<Vec<[f64; 2]>> = serde_json::from_value(expected.clone()).expect("expected polylines shape");
+                assert_eq!(actual.len(), expected_lines.len(), "T4 {} polyline count", case.name);
+                for (line, expected_line) in actual.iter().zip(&expected_lines) {
+                    assert_eq!(line.0.len(), expected_line.len(), "T4 {} point count", case.name);
+                    for (point, expected) in line.0.iter().zip(expected_line) {
+                        assert!(
+                            (point[0] - expected[0]).abs() <= 1e-9 && (point[1] - expected[1]).abs() <= 1e-9,
+                            "T4 {}: {point:?} vs {expected:?}",
+                            case.name
+                        );
+                    }
+                }
                 if let Some(count) = output.get("polyline_count").and_then(serde_json::Value::as_u64) {
                     assert_eq!(actual.len() as u64, count, "T4 {} polyline count", case.name);
                 }

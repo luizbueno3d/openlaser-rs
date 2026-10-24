@@ -132,7 +132,8 @@ pub fn compile(emit: &EmitPlan, m: &GantryMachine, h: &Header) -> Result<GcodePr
             let speed = cut.speed.get();
             let feed = try_number(speed * 60.0)?;
             let air = cut.air_assist && m.air_assist;
-            lines.push(format!("; Layer: {} · {}", comment_text(&section.layer_name), mode_name(section.mode)));
+            // ASCII only: GRBL acts on bytes 0x80–0xFF (overrides) even inside a comment; OM's `·` stays in `om` (T2).
+            lines.push(format!("; Layer: {} - {}", comment_text(&section.layer_name), mode_name(section.mode)));
             if air {
                 lines.push("M8".to_owned());
             }
