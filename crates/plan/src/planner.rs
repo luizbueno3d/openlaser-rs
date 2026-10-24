@@ -122,8 +122,14 @@ fn flatten_placed(mut bez: BezPath, xf: Affine, tol: f64, budget: &mut f64) -> F
         return Flat::TooDetailed(estimate);
     }
     *budget -= estimate;
-    let polys = geom::flatten(&bez, tol);
-    if polys.iter().all(Polyline::all_finite) { Flat::Polys(polys) } else { Flat::NonFinite }
+    match geom::flatten(&bez, tol) {
+        Ok(polys) if polys.iter().all(Polyline::all_finite) => Flat::Polys(polys),
+        Ok(_) | Err(geom::Error::NonFinite) => Flat::NonFinite,
+        Err(geom::Error::TooManyPoints(n)) => Flat::TooDetailed(n as f64),
+        // `plan` only ever passes a tolerance it validated (finite, ≥ MIN_FLATTEN_TOL_MM) and flatten raises no
+        // other error: any other refusal drops the shape rather than substitute geometry.
+        Err(_) => Flat::NonFinite,
+    }
 }
 
 struct Ctx<'a> {

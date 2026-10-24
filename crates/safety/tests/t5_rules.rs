@@ -963,7 +963,7 @@ fn safety_business_card_validates_with_numbered_notices() {
         }
     }
     for s in imported.shapes {
-        let id = p.alloc_id();
+        let id = p.alloc_id().unwrap();
         p.shapes.push(Arc::new(openlaser_doc::Shape { id, ..s }));
     }
     p.normalize();

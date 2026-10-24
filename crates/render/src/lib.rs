@@ -141,9 +141,10 @@ pub fn document_list(p: &Project, m: Option<&MachineProfile>, o: &ViewOpts) -> D
             }
         };
         let lines: Vec<Polyline> = match &shape.geom {
-            Geom::Path(path) => {
-                openlaser_geom::flatten(path, openlaser_geom::DEFAULT_FLATTEN_TOL_MM).into_iter().map(|line| line.transformed(&xform)).collect()
-            }
+            Geom::Path(path) => match openlaser_geom::flatten(path, openlaser_geom::DEFAULT_FLATTEN_TOL_MM) {
+                Ok(flat) => flat.into_iter().map(|line| line.transformed(&xform)).collect(),
+                Err(_) => Vec::new(),
+            },
             Geom::Rect { w, h, .. } => {
                 vec![Polyline(vec![[0.0, 0.0], [w.get(), 0.0], [w.get(), h.get()], [0.0, h.get()], [0.0, 0.0]]).transformed(&xform)]
             }
