@@ -4,16 +4,25 @@
 //! over a bound is refused:
 //!
 //! - [`prepare`] tokenizes the raw text once (comments, processing instructions, CDATA and quoted attribute values
-//!   are skipped exactly as an XML parser skips them) and refuses element nesting deeper than [`MAX_SVG_DEPTH`]
-//!   before roxmltree runs. A DOCTYPE internal subset is refused outright, so no entity is ever defined or expanded;
-//!   a plain DOCTYPE is blanked out so that roxmltree parses with `allow_dtd: false`.
-//! - [`check`] refuses, on the parsed tree, every reference usvg would follow without a bound or that hides
-//!   geometry: `clip-path`, `mask`, `filter` and markers given as `url(…)`, paint servers other than gradients
-//!   (patterns), `<tref>`, element `<feImage>`s, gradient `href` chains that loop or run longer than
-//!   [`MAX_SVG_HREF_CHAIN`], CSS beyond element / class / id selectors. It then computes, with every `<use>`
-//!   expanded, the elements, the nesting depth, the vertices (path commands, an arc counted as the curves it becomes)
-//!   and the bytes usvg would read or copy, and refuses a file over [`MAX_SVG_ELEMENTS`], [`MAX_SVG_DEPTH`],
-//!   [`MAX_IMPORT_POINTS`] / [`MAX_ENTITY_POINTS`] or [`MAX_SVG_EXPANDED_BYTES`].
+//!   are skipped exactly as an XML parser skips them) and, before roxmltree runs, refuses element nesting deeper than
+//!   [`MAX_SVG_DEPTH`] and what makes roxmltree itself quadratic: more than [`MAX_SVG_ATTRIBUTES`] attributes in a
+//!   start tag or [`MAX_SVG_ATTRIBUTE_PAIRS`] attribute pairs in all (its duplicate check), more than
+//!   [`MAX_SVG_NAMESPACES`] `xmlns` declarations (its namespace scans). A DOCTYPE internal subset is refused
+//!   outright, so no entity is ever defined or expanded; a plain DOCTYPE is blanked out so that roxmltree parses
+//!   with `allow_dtd: false`.
+//! - [`check`] refuses, on the parsed tree, every reference usvg would follow without a bound and everything that
+//!   hides geometry usvg would still draw: `clip-path` and `mask` of any value but `none`, `filter` and markers
+//!   given as `url(…)`, every `<pattern>`, `<tref>`, element `<feImage>`s, nested `<svg>` elements without both
+//!   sizes (browsers clip them, usvg does not), gradient `href` chains that loop or run longer than
+//!   [`MAX_SVG_HREF_CHAIN`], CSS beyond element / class / id selectors, stroke widths over [`MAX_SVG_STROKE_WIDTH`]
+//!   (usvg outlines every stroke) or in relative units, a viewBox beyond f32. It then computes, with every `<use>`
+//!   expanded, the elements, the nesting depth, the vertices (path commands, an arc counted as the curves it becomes),
+//!   the bytes usvg would read or copy, the XML nodes it visits, the attribute scans its tree makes, the text
+//!   simplecss rescans, the selector work and the gradient copies, and refuses a file over [`MAX_SVG_ELEMENTS`],
+//!   [`MAX_SVG_DEPTH`], [`MAX_IMPORT_POINTS`] / [`MAX_ENTITY_POINTS`], [`MAX_SVG_EXPANDED_BYTES`],
+//!   [`MAX_SVG_EXPANDED_NODES`], [`MAX_SVG_ATTRIBUTE_WORK`], [`MAX_SVG_STYLE_SCAN`], [`MAX_SVG_CSS_MATCHES`] or
+//!   [`MAX_SVG_GRADIENT_COPIES`]. What usvg drops without a word (`<foreignObject>` content, failed conditional
+//!   attributes outside `<switch>`, degenerate transforms, coordinates beyond f32) is counted for the notices.
 //!
 //! The path-data and arc arithmetic mirrors svgtypes 0.15 and kurbo 0.11 (the versions usvg 0.45.1 uses) so that the
 //! vertex count is exact; where mirroring is not needed for safety the guard over-counts instead.
@@ -26,8 +35,9 @@ use std::ops::Range;
 use usvg::roxmltree::{self, Node, NodeId};
 
 use crate::{
-    Error, MAX_ENTITY_POINTS, MAX_IMPORT_POINTS, MAX_SVG_ARC_CURVES, MAX_SVG_CSS_MATCHES, MAX_SVG_DEPTH, MAX_SVG_ELEMENTS, MAX_SVG_EMPTY_SEGMENTS,
-    MAX_SVG_EXPANDED_BYTES, MAX_SVG_HREF_CHAIN, MAX_SVG_NAME_BYTES, MAX_SVG_PATH_DATA_BYTES, MAX_SVG_STYLE_BYTES, Result,
+    Error, MAX_ENTITY_POINTS, MAX_IMPORT_POINTS, MAX_SVG_ARC_CURVES, MAX_SVG_ATTRIBUTE_PAIRS, MAX_SVG_ATTRIBUTE_WORK, MAX_SVG_ATTRIBUTES, MAX_SVG_CSS_MATCHES,
+    MAX_SVG_DEPTH, MAX_SVG_ELEMENTS, MAX_SVG_EMPTY_SEGMENTS, MAX_SVG_EXPANDED_BYTES, MAX_SVG_EXPANDED_NODES, MAX_SVG_GRADIENT_COPIES, MAX_SVG_HREF_CHAIN,
+    MAX_SVG_NAME_BYTES, MAX_SVG_NAMESPACES, MAX_SVG_PATH_DATA_BYTES, MAX_SVG_STROKE_WIDTH, MAX_SVG_STYLE_BYTES, MAX_SVG_STYLE_SCAN, Result,
 };
 
 const SVG_NS: &str = "http://www.w3.org/2000/svg";
@@ -59,12 +69,15 @@ pub(crate) fn prepare(source: &str) -> Result<Cow<'_, str>> {
 /// at the first `?>` (quotes mean nothing inside either), CDATA at the first `]]>`, a start tag at the first `>` that
 /// is not inside a quoted attribute value. On any well-formed prefix this is the tokenization roxmltree makes, so
 /// roxmltree can never nest deeper than this count before it stops. Every element counts as a level, a self-closing
-/// leaf included. Returns the DOCTYPE's byte range, if there is one.
+/// leaf included. Start tags are also measured for roxmltree's own quadratic checks: attributes per tag (each is
+/// compared with all before it) and namespace declarations in all (each element resolves its namespaces by linear
+/// scans). Returns the DOCTYPE's byte range, if there is one.
 fn scan_markup(bytes: &[u8]) -> Result<Option<Range<usize>>> {
     let mut depth = 0usize;
     let mut seen_element = false;
     let mut doctype = None;
     let mut i = 0usize;
+    let (mut attribute_pairs, mut namespaces) = (0u64, 0usize);
     while let Some(offset) = bytes.get(i..).and_then(|rest| rest.iter().position(|&b| b == b'<')) {
         let start = i + offset;
         let rest = bytes.get(start..).unwrap_or_default();
@@ -87,18 +100,43 @@ fn scan_markup(bytes: &[u8]) -> Result<Option<Range<usize>>> {
             depth = depth.saturating_sub(1);
             after(bytes, start + 2, b">").ok_or_else(|| malformed("an end tag is not closed"))?
         } else {
-            let (end, self_closing) = tag_end(bytes, start + 1).ok_or_else(|| malformed("a tag is not closed"))?;
+            let tag = tag_end(bytes, start + 1).ok_or_else(|| malformed("a tag is not closed"))?;
             if depth >= MAX_SVG_DEPTH {
                 return Err(too_deep(""));
             }
+            if tag.attributes > MAX_SVG_ATTRIBUTES {
+                return Err(Error::TooLarge(format!("an SVG element has {} attributes; the limit is {MAX_SVG_ATTRIBUTES}", tag.attributes)));
+            }
+            let n = tag.attributes as u64;
+            attribute_pairs = attribute_pairs.saturating_add(n * n.saturating_sub(1) / 2);
+            if attribute_pairs > MAX_SVG_ATTRIBUTE_PAIRS {
+                return Err(Error::TooLarge(format!(
+                    "the SVG's elements carry too many attributes each (checking them for duplicates takes more than {MAX_SVG_ATTRIBUTE_PAIRS} comparisons)"
+                )));
+            }
+            namespaces = namespaces.saturating_add(tag.namespaces);
+            if namespaces > MAX_SVG_NAMESPACES {
+                return Err(Error::TooLarge(format!("the SVG declares more than {MAX_SVG_NAMESPACES} XML namespaces (xmlns attributes)")));
+            }
             seen_element = true;
-            if !self_closing {
+            if !tag.self_closing {
                 depth += 1;
             }
-            end
+            tag.end
         };
     }
     Ok(doctype)
+}
+
+/// A start tag as [`tag_end`] reads it.
+struct Tag {
+    /// Index after its closing `>`.
+    end: usize,
+    self_closing: bool,
+    /// Its `=` signs outside quotes: one per attribute (never fewer).
+    attributes: usize,
+    /// Its `xmlns` / `xmlns:*` attributes.
+    namespaces: usize,
 }
 
 /// Index just after the first `needle` at or after `from`.
@@ -107,22 +145,41 @@ fn after(bytes: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
     rest.windows(needle.len()).position(|window| window == needle).map(|p| from + p + needle.len())
 }
 
-/// Index after the `>` closing a start tag whose name begins at `from` (a quoted attribute value may hold `>`), and
-/// whether the tag ended in `/>`.
-fn tag_end(bytes: &[u8], from: usize) -> Option<(usize, bool)> {
+/// The start tag whose name begins at `from`, up to the first `>` outside a quoted attribute value.
+fn tag_end(bytes: &[u8], from: usize) -> Option<Tag> {
     let mut quote: Option<u8> = None;
     let mut previous = 0u8;
+    let (mut attributes, mut namespaces) = (0usize, 0usize);
     for (offset, &b) in bytes.get(from..)?.iter().enumerate() {
         match quote {
             Some(q) if b == q => quote = None,
             Some(_) => {}
             None if b == b'"' || b == b'\'' => quote = Some(b),
-            None if b == b'>' => return Some((from + offset + 1, previous == b'/')),
+            None if b == b'>' => return Some(Tag { end: from + offset + 1, self_closing: previous == b'/', attributes, namespaces }),
+            None if b == b'=' => {
+                attributes += 1;
+                namespaces += usize::from(declares_namespace(bytes, from + offset));
+            }
             None => {}
         }
         previous = b;
     }
     None
+}
+
+/// Whether the attribute name before the `=` at `eq` is `xmlns` or `xmlns:…`. The walk back stops at whitespace, a
+/// quote, `=` or `<`, so the walks of one tag never overlap.
+fn declares_namespace(bytes: &[u8], eq: usize) -> bool {
+    let mut end = eq;
+    while end > 0 && bytes.get(end - 1).is_some_and(u8::is_ascii_whitespace) {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && bytes.get(start - 1).is_some_and(|b| !b.is_ascii_whitespace() && !matches!(b, b'"' | b'\'' | b'=' | b'<')) {
+        start -= 1;
+    }
+    let name = bytes.get(start..end).unwrap_or_default();
+    name == b"xmlns" || name.starts_with(b"xmlns:")
 }
 
 /// Index after the `>` closing a DOCTYPE whose body starts at `from`. Only a name and quoted public / system
@@ -171,7 +228,13 @@ fn internal_subset(bytes: &[u8], from: usize) -> Error {
         let Some(next) = skip else { break };
         i = next;
     }
-    Error::NotImplemented("SVG files whose DOCTYPE has an internal subset (entity declarations in [ … ]); delete the bracketed part and import again")
+    // Older Adobe Illustrator files rely on the subset: deleting it leaves their `&ns_…;` references undefined, so the
+    // file has to be exported again instead.
+    Error::NotImplemented(
+        "SVG files whose DOCTYPE has an internal subset (entity declarations in [ … ], as in SVGs saved by older Adobe Illustrator versions); \
+         export the file again without entities (Illustrator: Save As SVG 1.1 with \"Preserve Illustrator Editing Capabilities\" off, or File > \
+         Export > Export As SVG)",
+    )
 }
 
 /// The deepest element nesting in a markup fragment (the same tokenization as [`scan_markup`], never refusing).
@@ -192,12 +255,12 @@ fn markup_nesting(fragment: &[u8]) -> usize {
             }
             after(fragment, start + 2, b">")
         } else {
-            tag_end(fragment, start + 1).map(|(end, self_closing)| {
+            tag_end(fragment, start + 1).map(|tag| {
                 deepest = deepest.max(depth + 1);
-                if !self_closing {
+                if !tag.self_closing {
                     depth += 1;
                 }
-                end
+                tag.end
             })
         };
         let Some(next) = next else { break };
@@ -217,6 +280,17 @@ pub(crate) struct SvgFacts {
     pub display_none: usize,
     /// A `<style>` sheet sets `display: none` (usvg drops what it matches).
     pub sheet_hides: bool,
+    /// `<foreignObject>` elements: usvg skips them and their (HTML or other non-SVG) content.
+    pub foreign_objects: usize,
+    /// Elements outside `<switch>` whose `requiredFeatures`, `requiredExtensions` or `systemLanguage` condition fails:
+    /// usvg drops them with their contents.
+    pub failed_conditions: usize,
+    /// Elements with a geometry number beyond f32 (usvg converts to f32 and drops what becomes infinite).
+    pub f32_overflows: usize,
+    /// Elements whose `transform` (attribute or `style`) scales to zero or is not finite in f32: usvg drops them.
+    pub degenerate_transforms: usize,
+    /// A `<style>` sheet sets such a transform.
+    pub sheet_degenerate_transform: bool,
 }
 
 /// Elements by id: `all` holds every element carrying an id usvg resolves `url(#…)` and gradient `href`s against
@@ -264,12 +338,28 @@ pub(crate) fn check(doc: &roxmltree::Document<'_>) -> Result<SvgFacts> {
     let mut facts = SvgFacts::default();
     let mut styles = Styles::default();
     for node in doc.descendants().filter(Node::is_element) {
+        let svg = svg_element(node);
         match node.tag_name().name() {
             "image" => facts.images += 1,
             "text" => facts.texts += 1,
             "tref" => return Err(Error::NotImplemented("SVG <tref> elements (they copy text from elsewhere in the file); delete them")),
             "feImage" if attribute_values(node, "href").any(|href| href.trim_start().starts_with('#')) => {
                 return Err(Error::NotImplemented("SVG <feImage> elements that render another element; delete the filter"));
+            }
+            // usvg's pattern pass is quadratic even for patterns nothing uses, and a pattern paint renders arbitrary
+            // content per painted path.
+            "pattern" if svg => {
+                return Err(Error::NotImplemented("SVG <pattern> elements (pattern fills and strokes); convert them to plain colours before importing"));
+            }
+            "foreignObject" if svg => facts.foreign_objects += 1,
+            // A nested <svg> without both sizes is clipped by browsers to its enclosing viewport but not by usvg (one
+            // with both is clipped by usvg too, and refused after conversion).
+            "svg"
+                if svg && node.id() != root.id() && (attribute_values(node, "width").next().is_none() || attribute_values(node, "height").next().is_none()) =>
+            {
+                return Err(Error::NotImplemented(
+                    "nested SVG <svg> elements without both width and height (other viewers clip them to the enclosing viewport); give them a size or ungroup them before importing",
+                ));
             }
             "style" => {
                 // usvg reads any element named `style` (whatever its namespace or `type`); each text is checked.
@@ -278,12 +368,15 @@ pub(crate) fn check(doc: &roxmltree::Document<'_>) -> Result<SvgFacts> {
                     if styles.sheet_bytes > MAX_SVG_STYLE_BYTES {
                         return Err(Error::TooLarge(format!("SVG style sheets hold more than {MAX_SVG_STYLE_BYTES} bytes")));
                     }
+                    styles.sheet_scan = styles.sheet_scan.saturating_add(css_rescans(text));
                     styles.check_sheet(text)?;
                 }
             }
             _ => {}
         }
-        let mut hidden = false;
+        facts.failed_conditions +=
+            usize::from(svg && condition_fails(node) && !node.parent_element().is_some_and(|p| svg_element(p) && p.tag_name().name() == "switch"));
+        let (mut hidden, mut degenerate, mut overflow) = (false, false, false);
         for attribute in node.attributes().filter(read_by_usvg) {
             let (name, value) = (attribute.name(), attribute.value());
             match name {
@@ -291,19 +384,30 @@ pub(crate) fn check(doc: &roxmltree::Document<'_>) -> Result<SvgFacts> {
                     if value.len() > MAX_SVG_STYLE_BYTES {
                         return Err(Error::TooLarge(format!("an SVG style attribute holds {} bytes; the limit is {MAX_SVG_STYLE_BYTES}", value.len())));
                     }
-                    hidden |= styles.check_declarations(value)?;
+                    let declared = styles.check_declarations(value)?;
+                    hidden |= declared.hides;
+                    degenerate |= declared.degenerate_transform;
                 }
                 "display" => hidden |= value.trim() == "none",
                 "d" | "points" if value.len() > MAX_SVG_PATH_DATA_BYTES => {
                     return Err(Error::TooLarge(format!("an SVG {name} attribute holds {} bytes; the limit is {MAX_SVG_PATH_DATA_BYTES}", value.len())));
                 }
+                "transform" => degenerate |= degenerate_transform(value),
+                // usvg ignores a viewBox it cannot hold in f32 and would draw the content at the wrong scale.
+                "viewBox" if overflows_f32(value) => {
+                    return Err(Error::TooLarge("an SVG viewBox holds a number beyond ±3.4e38 (single precision)".to_owned()));
+                }
                 _ => styles.check_property(name, value)?,
             }
+            overflow |= GEOMETRY_ATTRIBUTES.contains(&name) && overflows_f32(value);
         }
         facts.display_none += usize::from(hidden);
+        facts.degenerate_transforms += usize::from(svg && degenerate);
+        facts.f32_overflows += usize::from(svg && overflow);
     }
     facts.sheet_hides = styles.sheet_hides;
-    if styles.selectors > 0 {
+    facts.sheet_degenerate_transform = styles.sheet_degenerate_transform;
+    if styles.selector_parts > 0 {
         // simplecss compares every selector with every element's `class` and `id`: keep each comparison short.
         for node in doc.descendants().filter(Node::is_element) {
             if let Some(value) = node.attributes().filter(|a| matches!(a.name(), "class" | "id")).map(|a| a.value()).find(|v| v.len() > MAX_SVG_NAME_BYTES) {
@@ -314,21 +418,39 @@ pub(crate) fn check(doc: &roxmltree::Document<'_>) -> Result<SvgFacts> {
             }
         }
     }
-    let stops = paint_stops(&styles.paints, &ids)?;
-    let expanded = expand(root, &ids)?;
-    let matches = expanded.elements.saturating_mul(styles.selectors as u64);
+    let gradients = paint_servers(&styles.paints, &ids)?;
+    let sheet = Sheet { declarations: styles.sheet_declarations, paints: styles.sheet_paints };
+    let expanded = expand(root, &ids, &sheet)?;
+    // simplecss tests every selector part against every element, reading the element's attributes for each part.
+    let matches = expanded.attribute_slots.saturating_mul(styles.selector_parts);
     if matches > MAX_SVG_CSS_MATCHES {
         return Err(Error::TooLarge(format!(
-            "matching the SVG style sheet's {} selectors against {} elements takes more than {MAX_SVG_CSS_MATCHES} comparisons; export with presentation attributes",
-            styles.selectors, expanded.elements
+            "matching the SVG style sheet's {} selector parts against {} elements takes more than {MAX_SVG_CSS_MATCHES} comparisons; export with presentation attributes",
+            styles.selector_parts, expanded.elements
         )));
+    }
+    let rescans = expanded.style_scan.saturating_add(styles.sheet_scan);
+    if rescans > MAX_SVG_STYLE_SCAN {
+        return Err(Error::TooLarge(format!(
+            "the SVG's style attributes and sheets are too long for their number of declarations (parsing them would rescan about {rescans} bytes; the limit is {MAX_SVG_STYLE_SCAN}); export with presentation attributes"
+        )));
+    }
+    // usvg copies an object-bounding-box gradient (and any gradient reached through a context paint) for every path it
+    // paints, else shares one per gradient, then deduplicates them with a linear scan each.
+    if !styles.paints.is_empty() {
+        let copies = if gradients.object_units || styles.context_paint { expanded.gradient_painted } else { gradients.distinct };
+        if copies > MAX_SVG_GRADIENT_COPIES {
+            return Err(Error::TooLarge(format!(
+                "the SVG paints {copies} elements with gradients that usvg copies per element (objectBoundingBox units or context paints), or uses that many gradients; the limit is {MAX_SVG_GRADIENT_COPIES}; export gradients in userSpaceOnUse units or as plain colours"
+            )));
+        }
     }
     // What usvg copies into every element: the style sheet's declarations (the bound assumes every rule matches), a
     // dash array (`stroke-dasharray` is inherited and re-parsed per path, f32 values, odd lists doubled) and, for each
     // of fill and stroke, a gradient with its stops (copied per path in object-bounding-box units).
     let per_element = (styles.declaration_bytes as u64)
         .saturating_add(styles.dash_values.saturating_mul(8).saturating_add(32))
-        .saturating_add(if styles.paints.is_empty() { 0 } else { stops.saturating_mul(16).saturating_add(256).saturating_mul(2) });
+        .saturating_add(if styles.paints.is_empty() { 0 } else { gradients.stops.saturating_mul(16).saturating_add(256).saturating_mul(2) });
     let copied = expanded.elements.saturating_mul(per_element).saturating_add(expanded.bytes);
     if copied > MAX_SVG_EXPANDED_BYTES {
         return Err(Error::TooLarge(format!(
@@ -451,13 +573,35 @@ fn gradient_targets<'a, 'input>(node: Node<'a, 'input>, ids: &Ids<'a, 'input>) -
 struct Styles<'a> {
     /// Ids named by `fill` / `stroke` `url(…)`.
     paints: Vec<&'a str>,
+    /// A `fill` / `stroke` is `context-fill` or `context-stroke` (usvg copies the context's paint per path).
+    context_paint: bool,
     sheet_bytes: usize,
-    selectors: usize,
+    /// Simple-selector parts of all sheet selectors (`path.a` and `.a.b` are two each).
+    selector_parts: u64,
+    /// Declarations in all sheet blocks (counted at every `;`).
+    sheet_declarations: u64,
     declaration_bytes: usize,
+    /// Bytes simplecss rescans while parsing the sheets (see [`css_rescans`]).
+    sheet_scan: u64,
+    /// A sheet block paints with a gradient.
+    sheet_paints: bool,
     /// The most numbers any `stroke-dasharray` holds.
     dash_values: u64,
     sheet_hides: bool,
+    sheet_degenerate_transform: bool,
 }
+
+/// What a `style` attribute or sheet block declares that the import reports.
+#[derive(Default)]
+struct Declared {
+    hides: bool,
+    degenerate_transform: bool,
+}
+
+/// Properties that clip or mask what an element shows (usvg reads `clip-path` and `mask`; browsers also honour the
+/// others in a `style`). Only `none` is accepted: usvg ignores the CSS shape and image forms, which would burn the
+/// clipped-away geometry.
+const CLIPPING_PROPERTIES: [&str; 6] = ["clip-path", "mask", "mask-image", "-webkit-clip-path", "-webkit-mask", "-webkit-mask-image"];
 
 impl<'a> Styles<'a> {
     /// One property, from an attribute or a declaration (`property` lower-case for declarations).
@@ -471,13 +615,24 @@ impl<'a> Styles<'a> {
                     let id = func_iri(value.trim()).filter(|_| urls == 1).ok_or_else(|| reference_refusal(property))?;
                     self.paints.push(id);
                 }
+                self.context_paint |= matches!(value.trim(), "context-fill" | "context-stroke");
             }
             "stroke-dasharray" => {
                 // Every digit counted as a value: never fewer than svgtypes parses.
                 let numbers = value.bytes().filter(u8::is_ascii_digit).count() as u64;
                 self.dash_values = self.dash_values.max(numbers);
             }
-            "clip-path" | "mask" | "filter" | "marker" | "marker-start" | "marker-mid" | "marker-end" if url_count(value) > 0 => {
+            "stroke-width" => {
+                // The largest width anywhere bounds every stroke usvg outlines, inherited ones included.
+                let width = absolute_length(value).ok_or(Error::NotImplemented("SVG stroke widths in %, em or ex; use absolute units (px, mm, …)"))?;
+                if width > MAX_SVG_STROKE_WIDTH {
+                    return Err(Error::TooLarge(format!("an SVG stroke-width of {width} user units; the limit is {MAX_SVG_STROKE_WIDTH}")));
+                }
+            }
+            p if CLIPPING_PROPERTIES.contains(&p) && !(value.trim().is_empty() || value.trim().eq_ignore_ascii_case("none")) => {
+                return Err(reference_refusal("clip-path"));
+            }
+            "filter" | "marker" | "marker-start" | "marker-mid" | "marker-end" if url_count(value) > 0 => {
                 return Err(reference_refusal(property));
             }
             _ => {}
@@ -488,15 +643,15 @@ impl<'a> Styles<'a> {
     /// Declarations of a `style` attribute or a sheet block, split at every `;` and the first `:` (simplecss splits
     /// at the same `;` unless one sits in a string or a function, and then this split sees a declaration that a
     /// `url(` cannot hide in: every `url(` must be the whole start of a `fill` / `stroke` value, or the import is
-    /// refused). Returns whether one sets `display: none`.
-    fn check_declarations(&mut self, text: &'a str) -> Result<bool> {
+    /// refused).
+    fn check_declarations(&mut self, text: &'a str) -> Result<Declared> {
         if text.contains('\\') {
             return Err(Error::NotImplemented("backslash escapes in SVG style attributes and style sheets"));
         }
         if url_count(text) > 0 && text.contains("/*") {
             return Err(Error::NotImplemented("comments in SVG styles that hold url(…) references"));
         }
-        let mut hides = false;
+        let mut declared = Declared::default();
         for declaration in text.split(';') {
             let (name, value) = declaration.split_once(':').unwrap_or((declaration, ""));
             if url_count(name) > 0 {
@@ -506,12 +661,13 @@ impl<'a> Styles<'a> {
             let value = value.trim();
             let value = value.strip_suffix("!important").map_or(value, str::trim_end);
             match name.as_str() {
-                "display" => hides |= value == "none",
+                "display" => declared.hides |= value == "none",
+                "transform" => declared.degenerate_transform |= degenerate_transform(value),
                 _ if url_count(value) > 0 && !matches!(name.as_str(), "fill" | "stroke") => return Err(reference_refusal(&name)),
                 _ => self.check_property(&name, value)?,
             }
         }
-        Ok(hides)
+        Ok(declared)
     }
 
     /// A `<style>` sheet: rules `selectors { declarations }` only, every selector a single element, class or id
@@ -540,15 +696,36 @@ impl<'a> Styles<'a> {
                         "SVG style sheet selectors other than element, class and id selectors (no combinators, attribute selectors or pseudo-classes)",
                     ));
                 }
-                self.selectors += 1;
+                // simplecss tests each part (`path`, `.a`, `#b`, `*`) on its own.
+                self.selector_parts = self.selector_parts.saturating_add(1 + selector.bytes().filter(|b| matches!(b, b'.' | b'#')).count() as u64);
             }
             let close = css_block_end(bytes, open + 1)?;
             let block = css.get(open + 1..close).unwrap_or_default();
             self.declaration_bytes = self.declaration_bytes.saturating_add(block.len());
-            self.sheet_hides |= self.check_declarations(block)?;
+            self.sheet_declarations = self.sheet_declarations.saturating_add(1 + block.bytes().filter(|&b| b == b';').count() as u64);
+            let paints = self.paints.len();
+            let declared = self.check_declarations(block)?;
+            self.sheet_paints |= self.paints.len() > paints;
+            self.sheet_hides |= declared.hides;
+            self.sheet_degenerate_transform |= declared.degenerate_transform;
             i = close + 1;
         }
     }
+}
+
+/// An upper bound of the bytes simplecss rescans while it tokenizes this style text: at every token it rejects (each
+/// declaration's end, a number without a unit, a `#` before a digit) it computes a line and a column by scanning the
+/// text from its start, so at most `len` bytes per rejection. Rejections are counted at every `;`, `#`, `+`, `-`, `.`,
+/// `,` and digit run (never fewer than simplecss makes).
+fn css_rescans(text: &str) -> u64 {
+    let mut rejections = 2u64;
+    let mut in_digits = false;
+    for b in text.bytes() {
+        let digit = b.is_ascii_digit();
+        rejections += u64::from(digit && !in_digits) + u64::from(matches!(b, b';' | b'#' | b'+' | b'-' | b'.' | b','));
+        in_digits = digit;
+    }
+    rejections.saturating_mul(text.len() as u64)
 }
 
 /// Index of the first byte after whitespace and `/* … */` comments.
@@ -597,10 +774,11 @@ enum Visit<T> {
 
 /// The paint references must name gradients only (a pattern renders arbitrary content per painted path); each
 /// gradient's `href` chain must name gradients, never loop (usvg would follow a loop forever) and stay within
-/// [`MAX_SVG_HREF_CHAIN`]. Returns the most `<stop>`s a referenced chain holds (usvg copies them per painted path).
-fn paint_stops<'a, 'input>(paints: &[&str], ids: &Ids<'a, 'input>) -> Result<u64> {
+/// [`MAX_SVG_HREF_CHAIN`].
+fn paint_servers<'a, 'input>(paints: &[&str], ids: &Ids<'a, 'input>) -> Result<Gradients> {
     let mut memo: HashMap<NodeId, Visit<(usize, u64)>> = HashMap::new();
-    let mut most = 0u64;
+    let mut gradients = Gradients::default();
+    let mut seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
     // Each id once: a file may name the same gradient from every element.
     let keys: std::collections::BTreeSet<&str> = paints.iter().flat_map(|id| [*id, id.trim()]).collect();
     for key in keys {
@@ -608,10 +786,43 @@ fn paint_stops<'a, 'input>(paints: &[&str], ids: &Ids<'a, 'input>) -> Result<u64
             if !is_gradient(target) {
                 return Err(Error::NotImplemented("SVG pattern fills and strokes (paint servers other than gradients); convert them to plain colours"));
             }
-            most = most.max(gradient_chain(target, ids, &mut memo)?);
+            gradients.stops = gradients.stops.max(gradient_chain(target, ids, &mut memo)?);
+            if seen.insert(target.id()) {
+                gradients.distinct += 1;
+                gradients.object_units |= !user_space_units(target, ids)?;
+            }
         }
     }
-    Ok(most)
+    Ok(gradients)
+}
+
+/// The gradients the paints reference.
+#[derive(Default)]
+struct Gradients {
+    /// The most `<stop>`s a referenced chain holds (usvg copies them per painted path).
+    stops: u64,
+    /// Distinct gradient elements referenced.
+    distinct: u64,
+    /// One of them may be in objectBoundingBox units (usvg then copies it for every path it paints).
+    object_units: bool,
+}
+
+/// Whether usvg resolves this gradient's `gradientUnits` to `userSpaceOnUse`: the first gradient along its `href`
+/// chain that has the attribute decides (usvg's default is objectBoundingBox). The chain is already known to be
+/// short and loop-free; an ambiguous link (two targets) counts as objectBoundingBox.
+fn user_space_units<'a, 'input>(start: Node<'a, 'input>, ids: &Ids<'a, 'input>) -> Result<bool> {
+    let mut node = start;
+    for _ in 0..=MAX_SVG_HREF_CHAIN {
+        let mut units = attribute_values(node, "gradientUnits").peekable();
+        if units.peek().is_some() {
+            return Ok(units.all(|u| u == "userSpaceOnUse"));
+        }
+        match gradient_targets(node, ids)?.as_slice() {
+            [next] => node = *next,
+            _ => return Ok(false),
+        }
+    }
+    Ok(false)
 }
 
 /// The stops along the longest `href` chain from `start` (iterative; refuses loops, long chains and non-gradients).
@@ -666,9 +877,40 @@ struct Cost {
     elements: u64,
     depth: usize,
     vertices: u64,
-    /// Attribute and text bytes usvg reads (and partly copies) per expanded element.
+    /// Attribute and text bytes usvg reads (and partly copies) per expanded element, and a fixed cost per attribute.
     bytes: u64,
+    /// XML nodes usvg's tree builder visits (every child of every element: text, comments and processing
+    /// instructions too).
+    nodes: u64,
+    /// Bytes simplecss rescans while it tokenizes `style` attributes (see [`css_rescans`]).
+    style_scan: u64,
+    /// Attribute scans in usvg's tree: each style declaration it applies scans the element's attributes, and each
+    /// inherited-property lookup scans every ancestor's.
+    attribute_work: u64,
+    /// What selector matching reads: one per element plus one per attribute.
+    attribute_slots: u64,
+    /// Elements painted (directly or by inheritance) with a gradient.
+    gradient_painted: u64,
 }
+
+/// What the style sheets add to every element.
+struct Sheet {
+    /// Declarations in all sheet blocks (the bound assumes every rule matches every element).
+    declarations: u64,
+    /// A sheet block paints with a gradient (the bound assumes it matches every element).
+    paints: bool,
+}
+
+/// Distinct presentation attributes style declarations can add to one element (usvg's presentation attributes and
+/// the shorthands' expansions, rounded up): an element's attributes in usvg's tree are its own plus at most these.
+const CSS_ATTRIBUTES: u64 = 96;
+
+/// Attributes per element that the style-declaration scan is not charged for: that part of the scan is bounded by
+/// the declaration bytes copied per element ([`MAX_SVG_EXPANDED_BYTES`]).
+const FREE_ATTRIBUTES: u64 = 16;
+
+/// The fixed cost of one attribute usvg reads, in bytes (it looks up the name and copies a reference to the value).
+const ATTRIBUTE_BYTES: u64 = 32;
 
 fn recursive_use() -> Error {
     malformed("a <use> element references itself or one of its ancestors")
@@ -676,7 +918,7 @@ fn recursive_use() -> Error {
 
 /// The cost of `root` with every `<use>` expanded (iterative and memoized: a hostile file cannot exhaust the stack or
 /// make this pass itself expand anything). A `<use>` costs two levels (usvg adds a group for it).
-fn expand<'a, 'input>(root: Node<'a, 'input>, ids: &Ids<'a, 'input>) -> Result<Cost> {
+fn expand<'a, 'input>(root: Node<'a, 'input>, ids: &Ids<'a, 'input>, sheet: &Sheet) -> Result<Cost> {
     let mut memo: HashMap<NodeId, Visit<Cost>> = HashMap::new();
     let mut stack = vec![(root, false)];
     while let Some((node, expanded)) = stack.pop() {
@@ -699,13 +941,24 @@ fn expand<'a, 'input>(root: Node<'a, 'input>, ids: &Ids<'a, 'input>) -> Result<C
             }
             continue;
         }
-        let mut cost = own_cost(node)?;
+        let own = own_cost(node, sheet)?;
+        let mut cost = own.cost;
         for (next, via_use) in children() {
             let Some(Visit::Done(c)) = memo.get(&next.id()).copied() else { return Err(recursive_use()) };
             cost.elements = cost.elements.saturating_add(c.elements);
             cost.depth = cost.depth.max(c.depth.saturating_add(if via_use { 2 } else { 1 }));
             cost.vertices = cost.vertices.saturating_add(c.vertices);
             cost.bytes = cost.bytes.saturating_add(c.bytes);
+            cost.nodes = cost.nodes.saturating_add(c.nodes);
+            cost.style_scan = cost.style_scan.saturating_add(c.style_scan);
+            cost.attribute_work = cost.attribute_work.saturating_add(c.attribute_work);
+            cost.attribute_slots = cost.attribute_slots.saturating_add(c.attribute_slots);
+            cost.gradient_painted = cost.gradient_painted.saturating_add(c.gradient_painted);
+        }
+        // Every inherited-property lookup from an element of this subtree scans this element's attributes.
+        cost.attribute_work = cost.attribute_work.saturating_add(own.tree_attributes.saturating_mul(cost.elements));
+        if own.paints || sheet.paints {
+            cost.gradient_painted = cost.elements;
         }
         if cost.depth > MAX_SVG_DEPTH {
             return Err(too_deep(" once <use> references are expanded"));
@@ -721,6 +974,21 @@ fn expand<'a, 'input>(root: Node<'a, 'input>, ids: &Ids<'a, 'input>) -> Result<C
                 "the SVG makes usvg read more than {MAX_SVG_EXPANDED_BYTES} bytes of attributes and text once <use> references are expanded"
             )));
         }
+        if cost.nodes > MAX_SVG_EXPANDED_NODES {
+            return Err(Error::TooLarge(format!(
+                "the SVG makes usvg visit more than {MAX_SVG_EXPANDED_NODES} XML nodes (elements, text, comments) once <use> references are expanded"
+            )));
+        }
+        if cost.attribute_work > MAX_SVG_ATTRIBUTE_WORK {
+            return Err(Error::TooLarge(format!(
+                "the SVG's elements carry too many attributes and style declarations for their nesting and <use> expansion (usvg would make more than {MAX_SVG_ATTRIBUTE_WORK} attribute comparisons)"
+            )));
+        }
+        if cost.style_scan > MAX_SVG_STYLE_SCAN {
+            return Err(Error::TooLarge(format!(
+                "the SVG's style attributes are too long for their number of declarations once <use> references are expanded (parsing them would rescan more than {MAX_SVG_STYLE_SCAN} bytes); export with presentation attributes"
+            )));
+        }
         memo.insert(node.id(), Visit::Done(cost));
     }
     match memo.get(&root.id()) {
@@ -729,15 +997,58 @@ fn expand<'a, 'input>(root: Node<'a, 'input>, ids: &Ids<'a, 'input>) -> Result<C
     }
 }
 
-/// One element on its own: one element, one level, its vertices and the bytes of its attributes and text.
-fn own_cost(node: Node<'_, '_>) -> Result<Cost> {
-    let attribute_bytes: usize = node.attributes().map(|a| a.value().len()).sum();
-    let text_bytes: usize = node.children().filter(|c| c.is_text()).filter_map(|c| c.text()).map(str::len).sum();
+/// One element on its own, and what its ancestors' subtree totals need from it.
+struct Own {
+    cost: Cost,
+    /// An upper bound of its attributes in usvg's tree (its own plus those style declarations add).
+    tree_attributes: u64,
+    /// It paints with a gradient itself (`fill`, `stroke` or `style`).
+    paints: bool,
+}
+
+/// One element on its own: one element, one level, its vertices, the bytes of its attributes and text, its child
+/// nodes, and the attribute and style work usvg spends on it.
+fn own_cost(node: Node<'_, '_>, sheet: &Sheet) -> Result<Own> {
+    let (mut attributes, mut bytes, mut style_scan, mut style_declarations, mut paints) = (0u64, 0u64, 0u64, 0u64, false);
+    for attribute in node.attributes() {
+        let (name, value) = (attribute.name(), attribute.value());
+        attributes += 1;
+        bytes = bytes.saturating_add(ATTRIBUTE_BYTES + name.len() as u64 + value.len() as u64);
+        if name == "style" {
+            style_scan = style_scan.saturating_add(css_rescans(value));
+            style_declarations = style_declarations.saturating_add(1 + value.bytes().filter(|&b| b == b';').count() as u64);
+        }
+        paints |= matches!(name, "fill" | "stroke" | "style") && read_by_usvg(&attribute) && url_count(value) > 0;
+    }
+    let mut nodes = 1u64;
+    for child in node.children().filter(|c| !c.is_element()) {
+        nodes += 1;
+        if child.is_text() {
+            bytes = bytes.saturating_add(child.text().map_or(0, str::len) as u64);
+        }
+    }
     let vertices = own_vertices(node)?;
     if vertices > MAX_ENTITY_POINTS as u64 {
         return Err(Error::TooLarge(format!("an SVG <{}> makes {vertices} points; the limit is {MAX_ENTITY_POINTS}", node.tag_name().name())));
     }
-    Ok(Cost { elements: 1, depth: 1, vertices, bytes: attribute_bytes.saturating_add(text_bytes) as u64 })
+    // usvg applies each matching declaration by scanning the element's attributes for one of the same name.
+    let declarations = sheet.declarations.saturating_add(style_declarations);
+    let insertion = declarations.saturating_mul(attributes.saturating_sub(FREE_ATTRIBUTES));
+    Ok(Own {
+        cost: Cost {
+            elements: 1,
+            depth: 1,
+            vertices,
+            bytes,
+            nodes,
+            style_scan,
+            attribute_work: insertion,
+            attribute_slots: attributes + 1,
+            gradient_painted: 0,
+        },
+        tree_attributes: attributes.saturating_add(declarations.min(CSS_ATTRIBUTES)),
+        paints,
+    })
 }
 
 /// An upper bound of the points usvg builds for one element (see [`path_points`] and [`shape_arc_curves`]).
@@ -892,14 +1203,14 @@ fn point_pairs(points: &str) -> u64 {
     pairs
 }
 
-/// A length as usvg resolves it, in user units at the larger of its two DPIs (96); `%`, `em` and `ex` are refused
-/// where an arc's radius is read (their size depends on the viewport or the font, and the curve count on the radius).
-fn radius_px(value: &str) -> Result<f64> {
+/// A length as usvg resolves it, in user units at the larger of its two DPIs (96), or `None` for `%`, `em` and `ex`
+/// (their size depends on the viewport or the font). A value that is not a number is 0 (usvg then uses its default).
+fn absolute_length(value: &str) -> Option<f64> {
     let mut s = Stream::new(value);
-    let Some(n) = s.number() else { return Ok(0.0) };
+    let Some(n) = s.number() else { return Some(0.0) };
     let unit = s.rest();
     let factor = if unit.starts_with(b"%") || unit.starts_with(b"em") || unit.starts_with(b"ex") {
-        return Err(Error::NotImplemented("SVG circle, ellipse and rounded-rectangle radii in %, em or ex; use absolute units"));
+        return None;
     } else if unit.starts_with(b"in") {
         96.0
     } else if unit.starts_with(b"cm") {
@@ -913,7 +1224,170 @@ fn radius_px(value: &str) -> Result<f64> {
     } else {
         1.0
     };
-    Ok(n.abs() * factor)
+    Some(n.abs() * factor)
+}
+
+/// A radius in user units; `%`, `em` and `ex` are refused (the curve count depends on the radius).
+fn radius_px(value: &str) -> Result<f64> {
+    absolute_length(value).ok_or(Error::NotImplemented("SVG circle, ellipse and rounded-rectangle radii in %, em or ex; use absolute units"))
+}
+
+// ---- what usvg drops without a word -------------------------------------------------------------------------------
+
+/// Attributes whose numbers become geometry (`transform` is checked as a transform instead, `viewBox` refused).
+const GEOMETRY_ATTRIBUTES: [&str; 15] = ["d", "points", "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry", "width", "height"];
+
+/// Whether a value holds a number that is finite in f64 but infinite in f32 (usvg parses f64, then converts; a path
+/// or shape with such a number is dropped).
+fn overflows_f32(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    // Without an exponent a number needs 39 integer digits to pass f32::MAX.
+    let mut run = 0usize;
+    let long_run = bytes.iter().any(|b| {
+        run = if b.is_ascii_digit() { run + 1 } else { 0 };
+        run >= 39
+    });
+    if !long_run && !bytes.iter().any(|b| matches!(b, b'e' | b'E')) {
+        return false;
+    }
+    let mut s = Stream::new(value);
+    while s.pos < bytes.len() {
+        let start = s.pos;
+        if matches!(s.peek(), Some(b'0'..=b'9' | b'.' | b'+' | b'-'))
+            && let Some(n) = s.number()
+            && (n as f32).is_infinite()
+        {
+            return true;
+        }
+        if s.pos == start {
+            s.pos += 1;
+        }
+    }
+    false
+}
+
+/// Whether usvg drops an element with this `transform`: svgtypes 0.15 `Transform::from_str` (an unparsable list is
+/// the identity), converted to f32 as usvg does, must be finite with both scale factors above f32::EPSILON
+/// (tiny-skia `Transform::is_valid`).
+fn degenerate_transform(value: &str) -> bool {
+    let Some([a, b, c, d, e, f]) = svg_transform(value) else { return false };
+    let [a, b, c, d, e, f] = [a as f32, b as f32, c as f32, d as f32, e as f32, f as f32];
+    if ![a, b, c, d, e, f].iter().all(|v| v.is_finite()) {
+        return true;
+    }
+    (a * a + c * c).sqrt() <= f32::EPSILON || (b * b + d * d).sqrt() <= f32::EPSILON
+}
+
+/// A transform list as svgtypes 0.15 parses it, as the matrix `[a, b, c, d, e, f]`; `None` where it fails.
+fn svg_transform(value: &str) -> Option<[f64; 6]> {
+    let multiply = |t: [f64; 6], u: [f64; 6]| {
+        [
+            t[0] * u[0] + t[2] * u[1],
+            t[1] * u[0] + t[3] * u[1],
+            t[0] * u[2] + t[2] * u[3],
+            t[1] * u[2] + t[3] * u[3],
+            t[0] * u[4] + t[2] * u[5] + t[4],
+            t[1] * u[4] + t[3] * u[5] + t[5],
+        ]
+    };
+    let mut s = Stream::new(value);
+    let mut ts = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    loop {
+        s.skip_spaces();
+        if s.peek().is_none() {
+            return Some(ts);
+        }
+        let start = s.pos;
+        while s.peek().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            s.pos += 1;
+        }
+        let name = s.bytes.get(start..s.pos)?;
+        s.skip_spaces();
+        if s.peek() != Some(b'(') {
+            return None;
+        }
+        s.pos += 1;
+        // The optional second number is read only when the list does not close first.
+        let closes = |s: &mut Stream<'_>| {
+            s.skip_spaces();
+            s.peek() == Some(b')')
+        };
+        match name {
+            b"matrix" => ts = multiply(ts, s.list::<6>()?),
+            b"translate" => {
+                let x = s.list_number()?;
+                let y = if closes(&mut s) { 0.0 } else { s.list_number()? };
+                ts = multiply(ts, [1.0, 0.0, 0.0, 1.0, x, y]);
+            }
+            b"scale" => {
+                let x = s.list_number()?;
+                let y = if closes(&mut s) { x } else { s.list_number()? };
+                ts = multiply(ts, [x, 0.0, 0.0, y, 0.0, 0.0]);
+            }
+            b"rotate" => {
+                let angle = s.list_number()?;
+                let center = if closes(&mut s) { None } else { Some(s.list::<2>()?) };
+                let (sin, cos) = angle.to_radians().sin_cos();
+                let rotation = [cos, sin, -sin, cos, 0.0, 0.0];
+                ts = match center {
+                    None => multiply(ts, rotation),
+                    Some([x, y]) => multiply(multiply(multiply(ts, [1.0, 0.0, 0.0, 1.0, x, y]), rotation), [1.0, 0.0, 0.0, 1.0, -x, -y]),
+                };
+            }
+            b"skewX" => ts = multiply(ts, [1.0, 0.0, s.list_number()?.to_radians().tan(), 1.0, 0.0, 0.0]),
+            b"skewY" => ts = multiply(ts, [1.0, s.list_number()?.to_radians().tan(), 0.0, 1.0, 0.0, 0.0]),
+            _ => return None,
+        }
+        if !closes(&mut s) {
+            return None;
+        }
+        s.pos += 1;
+        s.skip_spaces();
+        if s.peek() == Some(b',') {
+            s.pos += 1;
+        }
+    }
+}
+
+/// SVG 1.1 feature strings usvg 0.45 supports in `requiredFeatures` (`switch.rs`).
+const FEATURES: [&str; 26] = [
+    "http://www.w3.org/TR/SVG11/feature#SVGDOM-static",
+    "http://www.w3.org/TR/SVG11/feature#SVG-static",
+    "http://www.w3.org/TR/SVG11/feature#CoreAttribute",
+    "http://www.w3.org/TR/SVG11/feature#Structure",
+    "http://www.w3.org/TR/SVG11/feature#BasicStructure",
+    "http://www.w3.org/TR/SVG11/feature#ContainerAttribute",
+    "http://www.w3.org/TR/SVG11/feature#ConditionalProcessing",
+    "http://www.w3.org/TR/SVG11/feature#Image",
+    "http://www.w3.org/TR/SVG11/feature#Style",
+    "http://www.w3.org/TR/SVG11/feature#Shape",
+    "http://www.w3.org/TR/SVG11/feature#Text",
+    "http://www.w3.org/TR/SVG11/feature#BasicText",
+    "http://www.w3.org/TR/SVG11/feature#PaintAttribute",
+    "http://www.w3.org/TR/SVG11/feature#BasicPaintAttribute",
+    "http://www.w3.org/TR/SVG11/feature#OpacityAttribute",
+    "http://www.w3.org/TR/SVG11/feature#GraphicsAttribute",
+    "http://www.w3.org/TR/SVG11/feature#BasicGraphicsAttribute",
+    "http://www.w3.org/TR/SVG11/feature#Marker",
+    "http://www.w3.org/TR/SVG11/feature#Gradient",
+    "http://www.w3.org/TR/SVG11/feature#Pattern",
+    "http://www.w3.org/TR/SVG11/feature#Clip",
+    "http://www.w3.org/TR/SVG11/feature#BasicClip",
+    "http://www.w3.org/TR/SVG11/feature#Mask",
+    "http://www.w3.org/TR/SVG11/feature#Filter",
+    "http://www.w3.org/TR/SVG11/feature#BasicFilter",
+    "http://www.w3.org/TR/SVG11/feature#XlinkAttribute",
+];
+
+/// Whether usvg's conditional processing drops this element (usvg 0.45 `switch::is_condition_passed` with its
+/// default language list, `en`): any `requiredExtensions`, a `requiredFeatures` naming a feature it lacks, or a
+/// `systemLanguage` without `en`.
+fn condition_fails(node: Node<'_, '_>) -> bool {
+    attribute_values(node, "requiredExtensions").next().is_some()
+        || attribute_values(node, "requiredFeatures").any(|features| features.split(' ').any(|f| !FEATURES.contains(&f)))
+        || attribute_values(node, "systemLanguage").any(|languages| {
+            !languages.split(',').map(str::trim).any(|language| language == "en" || language.split_once('-').is_some_and(|(prefix, _)| prefix == "en"))
+        })
 }
 
 fn arc_too_large(radius: f64) -> Error {
@@ -1248,6 +1722,51 @@ mod tests {
         ] {
             assert_eq!(path_points(d).ok(), Some(usvg_points(d) as u64), "{d}");
         }
+    }
+
+    #[test]
+    fn start_tags_count_attributes_and_namespace_declarations() {
+        let tag = tag_end(br#"svg xmlns="a" xmlns:x = 'b' a="xmlns:y=" b='>'/>"#, 0).expect("closed");
+        assert_eq!((tag.attributes, tag.namespaces, tag.self_closing), (4, 2, true));
+        let tag = tag_end(b"g a=b=c xmlnsx=1>", 0).expect("closed");
+        assert_eq!((tag.attributes, tag.namespaces), (3, 0));
+    }
+
+    #[test]
+    fn transforms_mirror_svgtypes_and_tiny_skia() {
+        for degenerate in ["scale(0)", "scale(0, 1)", " scale( 1e-30 ) ", "translate(1e39)", "matrix(0 0 0 0 1 1)", "rotate(30) scale(0 1)x"] {
+            // The last one is unparsable: svgtypes fails, usvg keeps the element (identity).
+            assert_eq!(degenerate_transform(degenerate), !degenerate.ends_with('x'), "{degenerate}");
+        }
+        for kept in ["", "scale(1)", "rotate(45 10 10) scale(2)", "skewX(89)", "rotate(30) scale(0, 1)", "translate(1)scale(2),rotate(3)", "scale(1) junk"] {
+            assert!(!degenerate_transform(kept), "{kept}");
+        }
+        // usvg itself keeps exactly the elements the mirror calls valid.
+        for transform in [
+            "scale(0)",
+            "scale(0, 1)",
+            "scale(1e-30)",
+            "scale(1e-19)",
+            "scale(1e-18)",
+            "translate(1e39)",
+            "skewX(90)",
+            "rotate(30) scale(0, 1)",
+            "scale(1) junk",
+            "matrix(1e20 0 0 1e20 0 0)",
+        ] {
+            let svg =
+                format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><path transform="{transform}" d="M0 0L1 1" stroke="black"/></svg>"#);
+            let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).expect("parses");
+            assert_eq!(tree.root().has_children(), !degenerate_transform(transform), "{transform}");
+        }
+        assert_eq!(svg_transform("translate(1 2) scale(3)"), Some([3.0, 0.0, 0.0, 3.0, 1.0, 2.0]));
+        assert_eq!(svg_transform("rotate(90 1 1)").map(|m| m.map(|v| v.round())), Some([0.0, 1.0, -1.0, 0.0, 2.0, 0.0]));
+    }
+
+    #[test]
+    fn f32_overflow_is_found_in_any_number() {
+        assert!(overflows_f32("M0 0L1e39 0") && overflows_f32("-4e38") && overflows_f32(&"1".repeat(40)));
+        assert!(!overflows_f32("3.4e38") && !overflows_f32("1e400") && !overflows_f32("M0 0 L1e-39 5e+3") && !overflows_f32(&"1".repeat(38)));
     }
 
     #[test]

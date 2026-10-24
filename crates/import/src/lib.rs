@@ -60,8 +60,28 @@ pub const MAX_SVG_EMPTY_SEGMENTS: usize = 256;
 /// Most bytes usvg may read or copy (attributes, text, style declarations, dash arrays, gradient stops) once `<use>`
 /// references are expanded.
 pub const MAX_SVG_EXPANDED_BYTES: u64 = 256 * 1024 * 1024;
-/// Most style-sheet selector comparisons usvg may make (selectors × elements once `<use>` is expanded).
-pub const MAX_SVG_CSS_MATCHES: u64 = 1 << 24;
+/// Most style-sheet selector work usvg may do: simple-selector parts (`.a.b` is two) × the attributes each element
+/// match reads (one per element plus one per attribute), once `<use>` is expanded.
+pub const MAX_SVG_CSS_MATCHES: u64 = 1 << 26;
+/// Most attributes one SVG start tag may have (roxmltree checks each against all before it).
+pub const MAX_SVG_ATTRIBUTES: usize = 1024;
+/// Most attribute pairs roxmltree's duplicate check compares, all start tags together (Σ n·(n−1)/2).
+pub const MAX_SVG_ATTRIBUTE_PAIRS: u64 = 1 << 27;
+/// Most `xmlns` / `xmlns:*` declarations in one SVG (roxmltree resolves namespaces by linear scans).
+pub const MAX_SVG_NAMESPACES: usize = 64;
+/// Widest SVG `stroke-width`, in user units (usvg outlines every stroke to measure it; the work grows with the width).
+pub const MAX_SVG_STROKE_WIDTH: f64 = 1000.0;
+/// Most XML nodes (elements, text, comments, processing instructions) usvg visits once `<use>` is expanded.
+pub const MAX_SVG_EXPANDED_NODES: u64 = 2_000_000;
+/// Most gradient copies usvg may make: one per painted element for object-bounding-box gradients (or context paints),
+/// else one per referenced gradient. usvg deduplicates them with a linear scan each, so the work is quadratic.
+pub const MAX_SVG_GRADIENT_COPIES: u64 = 20_000;
+/// Most attribute scans usvg's tree may cost: each style declaration applied scans the element's attributes, and each
+/// inherited-property lookup scans every ancestor's.
+pub const MAX_SVG_ATTRIBUTE_WORK: u64 = 1 << 27;
+/// Most text simplecss may rescan: it computes a line and column, from the start of the style text, at every token
+/// it rejects (a number without a unit, `#`, the end of each declaration), so long style texts cost quadratic time.
+pub const MAX_SVG_STYLE_SCAN: u64 = 1 << 30;
 /// Longest `class` or `id` in an SVG with a style sheet (each selector comparison reads it).
 pub const MAX_SVG_NAME_BYTES: usize = 256;
 /// Longest chain of gradients naming each other with `href`.
@@ -370,6 +390,17 @@ fn import_svg(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Imported
     let xml_opts = roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: MAX_SVG_XML_NODES };
     let doc = roxmltree::Document::parse_with_options(&source, xml_opts).map_err(|e| match e {
         roxmltree::Error::NodesLimitReached => Error::TooLarge(format!("SVG has more than {MAX_SVG_XML_NODES} XML nodes")),
+        // No entity is ever declared (a DOCTYPE internal subset is refused), so any `&name;` is undefined: typically
+        // an older Illustrator file whose subset was deleted by hand.
+        roxmltree::Error::UnknownEntityReference(entity, pos) => Error::Malformed {
+            format: "SVG",
+            message: format!(
+                "the entity reference &{entity}; (line {}, column {}) is not defined (entity declarations, which SVGs saved by older Adobe Illustrator \
+                 versions rely on, are not supported); export the file again without entities (Illustrator: Save As SVG 1.1 with \"Preserve \
+                 Illustrator Editing Capabilities\" off, or File > Export > Export As SVG)",
+                pos.row, pos.col
+            ),
+        },
         other => Error::Malformed { format: "SVG", message: other.to_string() },
     })?;
     let facts = svg_guard::check(&doc)?;
@@ -461,6 +492,48 @@ fn import_svg(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Imported
         notices.push(
             NoticeCode::ImportEntitySkipped,
             format!("{hidden_paths} SVG paths are invisible (visibility hidden, opacity 0, or neither fill nor stroke); they were not imported"),
+            None,
+        );
+    }
+    // What usvg drops without a word, measured by the guard.
+    if facts.failed_conditions > 0 {
+        notices.push(
+            NoticeCode::ImportEntitySkipped,
+            format!(
+                "{} SVG elements outside <switch> have a requiredFeatures, requiredExtensions or systemLanguage condition that is not met; they and their contents were not imported",
+                facts.failed_conditions
+            ),
+            None,
+        );
+    }
+    if facts.degenerate_transforms > 0 {
+        notices.push(
+            NoticeCode::ImportEntitySkipped,
+            format!(
+                "{} SVG elements have a transform that scales to zero or is not finite; they and their contents were not imported",
+                facts.degenerate_transforms
+            ),
+            None,
+        );
+    }
+    if facts.sheet_degenerate_transform {
+        notices.push(
+            NoticeCode::ImportEntitySkipped,
+            "the SVG style sheet sets a transform that scales to zero or is not finite; the elements it matches were not imported".to_owned(),
+            None,
+        );
+    }
+    if facts.f32_overflows > 0 {
+        notices.push(
+            NoticeCode::ImportEntitySkipped,
+            format!("{} SVG elements have coordinates beyond ±3.4e38 (single precision); geometry that uses them was not imported", facts.f32_overflows),
+            None,
+        );
+    }
+    if facts.foreign_objects > 0 {
+        notices.push(
+            NoticeCode::ImportEntitySkipped,
+            format!("{} SVG <foreignObject> elements (HTML or other non-SVG content) were not imported", facts.foreign_objects),
             None,
         );
     }
