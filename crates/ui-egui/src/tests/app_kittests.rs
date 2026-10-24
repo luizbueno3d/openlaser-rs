@@ -621,9 +621,10 @@ fn kittest_cut_settings_ok_is_one_command() {
         serde_json::json!({ "speedMmS": 1234.0, "powerPct": new[0].2["galvo"]["powerPct"], "frequencyKhz": 60.0, "qPulseNs": 200.0 })
     );
     assert_eq!(new[0].2["passes"], 2);
-    // The WP0 engine refuses the command, so the dialog stays open with the error instead of pretending.
+    // The engine refuses the command without a session document (the seam's project is the UI's view, not an open
+    // document), so the dialog stays open with the error instead of pretending.
     assert!(h.state().ui.cut_settings_open);
-    assert!(h.state().ui.status_message.contains("not implemented"));
+    assert!(h.state().ui.status_message.contains("no document open"), "{}", h.state().ui.status_message);
 }
 
 #[test]
@@ -963,7 +964,10 @@ fn quit_refused_when_the_stop_is_not_confirmed_and_idle_close_is_not_held() {
     h.step();
     h.run_steps(2);
     assert!(!quit.load(Ordering::SeqCst));
-    assert!(h.state().ui.status_message.contains("STOP NOT CONFIRMED"), "{}", h.state().ui.status_message);
+    assert_eq!(h.state().seam.stops, 1, "the close tripped a stop before anything may quit");
+    // The close guard reports the unconfirmed stop; the engine's own `stop` status event may then replace that
+    // line in the status bar, so the log is the record that it was shown.
+    assert!(h.state().log.iter().any(|m| m.contains("STOP NOT CONFIRMED")), "{:?}", h.state().log);
     // Idle: a close is not held and nothing is stopped.
     let mut h = harness();
     h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
@@ -1088,8 +1092,9 @@ fn control_mutations_refused_while_busy_or_human_surface_open() {
     // Idle and nothing open: the same mutation goes through to the dispatcher.
     let mut h = with_human(NoSurface);
     assert_eq!(control(&mut h, "ui.dock.close", serde_json::json!({ "panel": "console" })).map(|_| ()), Ok(()));
-    let error = control(&mut h, "engine.execute", serde_json::json!({ "command": "file.new" })).unwrap_err();
-    assert!(!error.starts_with("machine_busy") && !error.starts_with("human_confirmation_open"), "{error}");
+    // The merged engine builds documents: the mutation reaches the dispatcher and succeeds.
+    let v = control(&mut h, "engine.execute", serde_json::json!({ "command": "file.new" })).unwrap_or_else(|e| panic!("idle mutation refused: {e}"));
+    assert_eq!(v["index"], 0, "{v}");
 }
 
 #[test]
@@ -1174,8 +1179,8 @@ fn control_refuses_conflicting_command_identifiers() {
     assert!(error.contains("conflicting command identifiers"), "{error}");
     // Single-field requests still reach the dispatcher.
     let mut h = with_human(NoSurface);
-    let error = control(&mut h, "engine.execute", serde_json::json!({ "command": "file.new" })).unwrap_err();
-    assert!(!error.contains("conflicting"), "{error}");
+    control(&mut h, "engine.execute", serde_json::json!({ "command": "file.new" }))
+        .unwrap_or_else(|e| panic!("a single-field request must reach the dispatcher: {e}"));
     let error = control(&mut h, "ui.menu.invoke", serde_json::json!({ "id": "window.show:console" })).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(error["panel"], "console");
 }
@@ -1262,7 +1267,7 @@ fn submenus_are_nested() {
     h.query_all_by_label_contains("Preferences").next().unwrap().hover();
     h.run_steps(20);
     assert!(h.query_by_label("Import Prefs…").is_some());
-    assert!(h.query_all_by_label_contains("Save GCode").next().unwrap().accesskit_node().is_disabled(), "unbuilt rows render disabled");
+    assert!(h.query_all_by_label_contains("Save As Template").next().unwrap().accesskit_node().is_disabled(), "unbuilt rows render disabled");
 }
 
 #[test]
@@ -1293,8 +1298,8 @@ fn disabled_menu_items_name_the_predicate_that_failed() {
     h.state_mut().seam.machine_state = Some(MachineState::Framing);
     h.run();
     for (menu, text, reason) in [
-        // `Save As…` is not implemented and files are blocked: the honest reason is "not in OpenLaser yet".
-        ("File", "Save As…", "Not in OpenLaser yet"),
+        // `Save As Template…` is not implemented and files are blocked: the honest reason is "not in OpenLaser yet".
+        ("File", "Save As Template…", "Not in OpenLaser yet"),
         // `Import…` is implemented: an active machine is the actual blocker.
         ("File", "Import…", "Stop the active frame or job"),
         // A hardware row keeps its human-only reason.

@@ -345,12 +345,14 @@ fn menu_invoke(app: &mut OpenLaserApp, command: &str, params: &serde_json::Value
     if !crate::menu_catalog::is_live(row) {
         return Err(format!("`{command}` is not in OpenLaser yet"));
     }
-    if openlaser_engine::registry().find(row.id).is_some() {
-        return execute_command(app, row.id, params.get("params").cloned().unwrap_or(serde_json::Value::Null));
-    }
     match row.id {
-        "file.open" | "file.import" => Err("this menu item opens a file dialog for a person; use app.open / app.import with a path".into()),
+        // Panel rows open the panel here: the engine's `window.show` is a UI hint, not the panel action, and a
+        // `window.show:<panel>` row supplies the panel when `params` does not.
         "window.show" => app.show_panel(&params.get("params").cloned().unwrap_or_else(|| serde_json::json!({ "panel": row.panel, "visible": true }))),
+        "file.open" | "file.import" => Err("this menu item opens a file dialog for a person; use app.open / app.import with a path".into()),
+        _ if openlaser_engine::registry().find(row.id).is_some() => {
+            execute_command(app, row.id, params.get("params").cloned().unwrap_or(serde_json::Value::Null))
+        }
         _ => {
             app.invoke_ui_action(&crate::menu_catalog::native_id(row));
             Ok(serde_json::json!({ "invoked": row.id }))
