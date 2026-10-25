@@ -713,15 +713,21 @@ impl OpenLaserApp {
     }
 
     /// Runs an engine command for a widget with this frame's provenance.
-    pub(crate) fn execute_widget(&mut self, id: &str, params: serde_json::Value) {
+    /// Dispatch an engine command and report the outcome in the status bar. Returns true on success —
+    /// commit paths (the text editor) keep their state open when it returns false.
+    pub(crate) fn execute_widget(&mut self, id: &str, params: serde_json::Value) -> bool {
         let origin = self.origin();
         #[cfg(test)]
         self.seam.dispatched.push((origin, id.to_owned(), params.clone()));
         let message = match self.session.execute_as(origin, id, params) {
-            Ok(_) => format!("{}: done", crate::menu_catalog::find(id).map(|r| r.label).unwrap_or(id)),
+            Ok(_) => {
+                self.set_status(format!("{}: done", crate::menu_catalog::find(id).map(|r| r.label).unwrap_or(id)));
+                return true;
+            }
             Err(e) => e.to_string(),
         };
         self.set_status(message);
+        false
     }
 
     /// A menu row, toolbar button, native menu item or shortcut by id. Recomputes provenance from the frame.
@@ -823,15 +829,18 @@ impl OpenLaserApp {
                 }
             }
             "window.resetLayout" => self.dock = crate::dock::default_layout(),
-            _ => self.execute_widget(id, serde_json::Value::Null),
+            _ => {
+                self.execute_widget(id, serde_json::Value::Null);
+            }
         }
     }
 
     /// Commit a closing text editor: `text.edit` when re-editing a shape, `tools.text` for a new text.
-    /// An empty buffer dispatches nothing.
-    pub(crate) fn commit_text_editor(&mut self, edit: &TextUi) {
+    /// Returns false when the command refused — the caller keeps the editor open so the buffer is
+    /// never lost to a failed commit. An empty buffer dispatches nothing and counts as closed.
+    pub(crate) fn commit_text_editor(&mut self, edit: &TextUi) -> bool {
         if edit.buffer.trim().is_empty() {
-            return;
+            return true;
         }
         let d = &self.ui.text_defaults;
         if let Some(id) = edit.editing {
@@ -844,9 +853,9 @@ impl OpenLaserApp {
                     map.insert("style".to_owned(), d.style.clone().into());
                 }
             }
-            self.execute_widget("text.edit", p);
+            self.execute_widget("text.edit", p)
         } else {
-            self.execute_widget("tools.text", d.create_params(edit.anchor, &edit.buffer));
+            self.execute_widget("tools.text", d.create_params(edit.anchor, &edit.buffer))
         }
     }
 

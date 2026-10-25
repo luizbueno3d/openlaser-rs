@@ -473,26 +473,40 @@ impl OpenLaserApp {
                 .fonts()
                 .face(&d.family, Some(&d.style))
                 .or_else(|| ["Arial", "Helvetica", "Hack"].iter().find_map(|f| self.session.fonts().face(f, None)));
+            let mut ghost_err = None;
             if let Some(face) = face {
                 let align = match d.align {
                     1 => openlaser_types::TextAlign::Center,
                     2 => openlaser_types::TextAlign::Right,
                     _ => openlaser_types::TextAlign::Left,
                 };
-                if let Ok(path) = openlaser_text::layout(&face, &edit.buffer, d.height, d.letter_spacing, d.line_spacing, align) {
-                    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 150, 255));
-                    let mut world = path;
-                    world.apply_affine(openlaser_doc::Affine::translate((edit.anchor[0], edit.anchor[1])));
-                    for p in openlaser_geom::flatten(&world, 0.01).unwrap_or_default() {
-                        let pts: Vec<egui::Pos2> = p.0.iter().map(|pt| view.world_to_screen(*pt)).collect();
-                        painter.add(egui::Shape::line(pts, stroke));
+                match openlaser_text::layout(&face, &edit.buffer, d.height, d.letter_spacing, d.line_spacing, align) {
+                    Ok(path) => {
+                        let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 150, 255));
+                        let mut world = path;
+                        world.apply_affine(openlaser_doc::Affine::translate((edit.anchor[0], edit.anchor[1])));
+                        for p in openlaser_geom::flatten(&world, 0.01).unwrap_or_default() {
+                            let pts: Vec<egui::Pos2> = p.0.iter().map(|pt| view.world_to_screen(*pt)).collect();
+                            painter.add(egui::Shape::line(pts, stroke));
+                        }
                     }
+                    // The same check the commit runs: show it in the box so a refusal is visible instead
+                    // of looking like the text vanished.
+                    Err(e) => ghost_err = Some(e.to_string()),
                 }
             }
             let screen = view.world_to_screen(edit.anchor);
             let mut commit = false;
             let area = egui::Area::new(egui::Id::new("text-inline-edit")).order(egui::Order::Foreground).fixed_pos(screen).show(ui.ctx(), |ui| {
                 egui::Frame::NONE.show(ui, |ui| {
+                    // Enter commits (Shift+Enter keeps the newline): swallow it before the TextEdit turns
+                    // it into a newline in the buffer. Esc commits too.
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift) {
+                        ui.input_mut(|i| {
+                            i.events.retain(|e| !matches!(e, egui::Event::Key { key: egui::Key::Enter, pressed: true, modifiers: m, .. } if !m.shift));
+                        });
+                        commit = true;
+                    }
                     let widget = egui::TextEdit::multiline(&mut edit.buffer).desired_rows(4).desired_width(200.0);
                     let r = ui.add(widget);
                     r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "Text".to_owned()));
@@ -500,15 +514,18 @@ impl OpenLaserApp {
                         edit.request_focus = false;
                         r.request_focus();
                     }
-                    // Commit triggers: Esc and Cmd+Enter. Clicks outside the canvas leave the editor open
-                    // (the options bar stays usable while typing); canvas clicks commit via `response` below.
-                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) || ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command) {
+                    // Clicks outside the canvas leave the editor open (the options bar stays usable while
+                    // typing); canvas clicks commit via `response` below.
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         commit = true;
                     }
                     // If nothing else holds keyboard focus (a button/panel click), take it back so typing
                     // is never dead. A focused text field (e.g. the font box) is left alone.
                     if !r.has_focus() && !ui.ctx().egui_wants_keyboard_input() {
                         r.request_focus();
+                    }
+                    if let Some(e) = &ghost_err {
+                        ui.colored_label(egui::Color32::from_rgb(220, 80, 80), e);
                     }
                 });
             });
@@ -520,12 +537,21 @@ impl OpenLaserApp {
                 ui.input_mut(|i| {
                     i.events.retain(|e| !matches!(e, egui::Event::Key { key: egui::Key::Escape, pressed: true, .. }));
                 });
-                self.commit_text_editor(&edit);
-                // The tool is left as-is: a fresh text keeps Edit Text armed for the next one (LightBurn),
-                // a re-edit keeps whichever tool opened it (Select, or Edit Text for an armed click).
+                if !self.commit_text_editor(&edit) {
+                    // The command refused (e.g. a missing glyph): the reason is in the status bar and the
+                    // ghost error — keep the editor open so the buffer is never lost to a failed commit.
+                    edit.request_focus = true;
+                    self.ui.text = Some(edit);
+                    self.ui.selected_tool = "Edit Text";
+                }
             } else if self.ui.selected_tool != "Edit Text" && edit.editing.is_none() {
-                // A tool change commits too.
-                self.commit_text_editor(&edit);
+                // A tool change commits too; if it refused, come back to Edit Text rather than retrying
+                // the dispatch every frame.
+                if !self.commit_text_editor(&edit) {
+                    edit.request_focus = true;
+                    self.ui.text = Some(edit);
+                    self.ui.selected_tool = "Edit Text";
+                }
             } else {
                 self.ui.text = Some(edit);
             }

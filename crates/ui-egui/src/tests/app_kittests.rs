@@ -2704,3 +2704,51 @@ fn edit_text_rearm_commits_instead_of_dropping() {
     h.run();
     assert_eq!(h.state().ui.selected_tool, "Select");
 }
+
+#[test]
+fn text_commit_failure_keeps_the_editor_and_buffer() {
+    // A refused commit (missing glyph) must not close the editor: buffer preserved, tool stays armed.
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../text/tests/fonts");
+    h.state_mut().session.set_font_dirs(vec![dir]);
+    h.get_by_label("Edit Text").click();
+    h.run();
+    let p = w2s(&h, [0.0, 0.0]);
+    click(&mut h, p);
+    h.run();
+    h.get_by_label("Text").focus();
+    h.get_by_label("Text").type_text("HI\u{1F600}");
+    h.run();
+    h.key_press(egui::Key::Enter); // Enter commits (Shift+Enter is the newline)
+    h.run();
+    assert!(h.state().ui.text.is_some(), "a refused commit keeps the editor open");
+    assert_eq!(h.state().ui.text.as_ref().unwrap().buffer, "HI\u{1F600}", "the buffer survived the refusal");
+    assert!(h.state().session.active().unwrap().project.shapes.is_empty(), "nothing committed");
+    assert_eq!(h.state().ui.selected_tool, "Edit Text");
+    // Fix the buffer and commit again.
+    h.state_mut().ui.text.as_mut().unwrap().buffer = "HI".to_owned();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert_eq!(h.state().session.active().unwrap().project.shapes.len(), 1, "a fixed buffer commits");
+    assert!(h.state().ui.text.is_none());
+}
+
+#[test]
+fn palette_tool_buttons_arm_without_dispatching() {
+    // Regression: the left palette bypassed the router — Edit Text fired `tools.text` with Null params
+    // on every arm, and action commands like Weld armed a dead canvas tool.
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let n = h.state().seam.dispatched.len();
+    h.get_by_label("Edit Text").click();
+    h.run();
+    assert_eq!(h.state().ui.selected_tool, "Edit Text");
+    assert!(h.state().seam.dispatched[n..].iter().all(|(_, id, _)| id != "tools.text"), "arming must not dispatch the command");
+    // Weld is an action, not a canvas tool: the palette must not leave it armed.
+    h.get_by_label("Weld Shapes").click();
+    h.run();
+    assert_ne!(h.state().ui.selected_tool, "Weld Shapes");
+}
