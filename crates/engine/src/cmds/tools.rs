@@ -41,6 +41,8 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             enabled: needs_doc, params: DrawLinesParams, run: draw_lines, doc: "{pointsMm?:[[x,y],…] | d?:\"M0 0L10 0…\", closed?, layer?}"),
         command!("tools.polygon", "Polygon", menu: ["Tools", "Shape"], shortcut: None, kind: Kind::Edit, access: Access::Agent,
             enabled: needs_doc, params: PolygonParams, run: polygon, doc: "{cxMm, cyMm, radiusMm, sides? (3..=64, default 6), rotateDeg?, layer?}"),
+        command!("tools.traceImage", "Trace Image", menu: ["Tools"], shortcut: Some("Alt+T"), kind: Kind::Edit, access: Access::Agent,
+            enabled: needs_bitmap, params: TraceParams, run: trace_image, doc: "{id?, threshold?(128), invert?, ignoreLessThan?(2), smoothness?(1.0), optimize?(0.5), deleteImage?, layer?}"),
         command!("tools.measure", "Measure", menu: ["Tools"], shortcut: Some("Alt+M"), kind: Kind::Query, access: Access::Agent,
             enabled: always, params: MeasureParams, run: measure, doc: "{fromMm:[x,y], toMm:[x,y]} → {distanceMm, dxMm, dyMm, angleDeg (CCW from +X, Y up)}"),
         command!("tools.weld", "Weld Shapes", menu: ["Tools"], shortcut: Some("Cmd+W"), kind: Kind::Edit, access: Access::Agent,
@@ -516,4 +518,121 @@ fn draw_lines(s: &mut Session, p: DrawLinesParams) -> Result<Value, EngineError>
         Ok(vec![id])
     })?;
     Ok(json!({ "ids": ids }))
+}
+
+// ---- Trace Image --------------------------------------------------------------------------------------------------
+
+/// `tools.traceImage` {id?, threshold?, invert?, ignoreLessThan?, smoothness?, optimize?, deleteImage?, layer?}.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TraceParams {
+    /// The bitmap object. Default: the single selected shape.
+    #[serde(default)]
+    pub id: Option<u64>,
+    /// Ink threshold 1..=255 (default 128): gray < threshold is ink.
+    #[serde(default)]
+    pub threshold: Option<u8>,
+    /// Trace the light side.
+    #[serde(default)]
+    pub invert: Option<bool>,
+    /// Drop rings under this area in px² (default 2).
+    #[serde(default)]
+    pub ignore_less_than: Option<f64>,
+    /// 0..=1.33 (default 1.0); 0 gives polygons.
+    #[serde(default)]
+    pub smoothness: Option<f64>,
+    /// Douglas–Peucker tolerance in px (default 0.5).
+    #[serde(default)]
+    pub optimize: Option<f64>,
+    /// Remove the source image in the same undo step.
+    #[serde(default)]
+    pub delete_image: Option<bool>,
+    #[serde(default)]
+    #[schemars(with = "Option<LayerKeySchema>")]
+    pub layer: Option<LayerKey>,
+}
+
+/// `tools.traceImage` is enabled only when exactly one bitmap is selected (or the caller passes `id`).
+fn needs_bitmap(s: &Session) -> Result<(), crate::command::Disabled> {
+    super::needs_doc(s)?;
+    let sel = &s.doc().map_err(|_| crate::command::Disabled::needs_document())?.selection;
+    let one = sel.ids.len() == 1
+        && sel.ids.first().is_some_and(|id| s.doc().map(|d| matches!(d.project.shape(*id).map(|sh| &sh.geom), Some(Geom::Bitmap(_)))).unwrap_or(false));
+    if one { Ok(()) } else { Err(crate::command::Disabled::new("Select one image to trace")) }
+}
+
+fn trace_image(s: &mut Session, p: TraceParams) -> Result<Created, EngineError> {
+    const ID: &str = "tools.traceImage";
+    let threshold = p.threshold.unwrap_or(128);
+    if threshold == 0 {
+        return Err(EngineError::bad(ID, "/threshold", "at least 1"));
+    }
+    let ignore = p.ignore_less_than.unwrap_or(2.0);
+    if !(ignore.is_finite() && ignore >= 0.0) {
+        return Err(EngineError::bad(ID, "/ignoreLessThan", "non-negative and finite"));
+    }
+    let smoothness = p.smoothness.unwrap_or(1.0);
+    if !(smoothness.is_finite() && (0.0..=1.33).contains(&smoothness)) {
+        return Err(EngineError::bad(ID, "/smoothness", "0..=1.33"));
+    }
+    let optimize = p.optimize.unwrap_or(0.5);
+    if !(optimize.is_finite() && (0.0..=5.0).contains(&optimize)) {
+        return Err(EngineError::bad(ID, "/optimize", "0..=5"));
+    }
+    let layer = p.layer;
+    // The target: `id` or the single selection.
+    let target = match p.id.map(ObjectId) {
+        Some(id) => id,
+        None => {
+            let sel = &s.doc()?.selection;
+            let Some(&id) = sel.ids.first().filter(|_| sel.ids.len() == 1) else {
+                return Err(EngineError::bad(ID, "/id", "select one image to trace"));
+            };
+            id
+        }
+    };
+    let (bitmap, xform) = {
+        let Some(shape) = s.doc()?.project.shape(target) else {
+            return Err(EngineError::bad(ID, "/id", format!("object {} does not exist", target.0)));
+        };
+        let Geom::Bitmap(b) = &shape.geom else {
+            return Err(EngineError::bad(ID, "/id", "select one image to trace"));
+        };
+        (b.clone(), shape.xform)
+    };
+    let path = openlaser_geom::trace::trace_bez(
+        &bitmap.gray,
+        bitmap.px,
+        &openlaser_geom::trace::TraceOptions { threshold, invert: p.invert.unwrap_or(false), ignore_less_than: ignore, optimize, smoothness },
+    )
+    .map_err(|e| EngineError::bad(ID, "/id", e.to_string()))?;
+    if path.elements().is_empty() {
+        return Err(EngineError::bad(ID, "/threshold", "nothing to trace at this threshold"));
+    }
+    // Pixel (col,row) → object space: centred on the origin, Y up.
+    let (w, h) = (bitmap.size_mm[0], bitmap.size_mm[1]);
+    let (pw, ph) = (bitmap.px[0] as f64, bitmap.px[1] as f64);
+    let to_object = Affine::new([w / pw, 0.0, 0.0, -h / ph, -w / 2.0, h / 2.0]);
+    let mut object = path;
+    object.apply_affine(to_object);
+    if !object.elements().iter().all(geomx::el_finite) {
+        return Err(EngineError::bad(ID, "/id", "the traced outline is not finite"));
+    }
+    let delete = p.delete_image.unwrap_or(false);
+    s.edit(Label::new("Trace Image"), None, move |project, sel| {
+        let slot = project.shapes.iter().position(|sh| sh.id == target);
+        let layer = layer.or_else(|| project.shapes.iter().find(|sh| sh.id == target).map(|sh| sh.layer)).unwrap_or(LayerKey::Color(0));
+        let id = project.alloc_id().map_err(geomx::doc_error)?;
+        let slot = slot.unwrap_or(project.shapes.len()) + 1;
+        project.shapes.insert(
+            slot.min(project.shapes.len()),
+            Arc::new(Shape { id, name: None, layer, xform, geom: Geom::Path(Arc::new(object)), locked: false, power_scale: FULL_POWER, priority: 0 }),
+        );
+        if delete {
+            project.shapes.retain(|sh| sh.id != target);
+        }
+        sel.ids = vec![id];
+        sel.key = Some(id);
+        Ok(Created { ids: vec![id] })
+    })
 }

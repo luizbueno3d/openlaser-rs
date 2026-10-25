@@ -19,6 +19,7 @@ use crate::cmds::Created;
 use crate::command::{Access, EngineError, Kind, Origin, registry};
 use crate::devices::{DeviceAccess, Event, PendingArm};
 use crate::files::FsAuthority;
+use crate::geomx;
 use crate::jobs::Encoded;
 use crate::session::{Label, Session, SessionConfig};
 
@@ -1830,4 +1831,101 @@ fn path_get_and_set_round_trip_in_object_space() {
     })
     .unwrap();
     assert_eq!(s.execute("path.set", json!({ "id": id, "d": "M0 0L1 0" })).unwrap_err().code(), "disabled");
+}
+
+// ---- tools.traceImage --------------------------------------------------------------------------------------------
+
+/// A 20×20 luma buffer: an ink square cols/rows 5..15 (the 100 px² square from the tracer tests).
+fn square_gray() -> Vec<u8> {
+    let mut g = vec![255u8; 20 * 20];
+    for r in 5..15 {
+        for c in 5..15 {
+            g[r * 20 + c] = 0;
+        }
+    }
+    g
+}
+
+fn add_bitmap(s: &mut Session, gray: Vec<u8>, px: [u32; 2], size_mm: [f64; 2]) -> u64 {
+    use std::sync::Arc;
+    let id = s
+        .edit(Label::new("bitmap"), None, move |project, sel| {
+            let id = project.alloc_id().map_err(geomx::doc_error)?;
+            project.shapes.push(Arc::new(openlaser_doc::Shape {
+                id,
+                name: None,
+                layer: LayerKey::Color(0),
+                xform: openlaser_doc::Affine::IDENTITY,
+                geom: openlaser_doc::Geom::Bitmap(Arc::new(openlaser_doc::BitmapData {
+                    asset: openlaser_doc::AssetId([7; 32]),
+                    px,
+                    size_mm,
+                    gray: Arc::from(gray.as_slice()),
+                    source_ext: "png".to_owned(),
+                })),
+                locked: false,
+                power_scale: openlaser_types::Percent::new(100.0).unwrap(),
+                priority: 0,
+            }));
+            sel.ids = vec![id];
+            sel.key = Some(id);
+            Ok(Created { ids: vec![id] })
+        })
+        .unwrap();
+    id.ids[0].0
+}
+
+#[test]
+fn trace_image_draws_the_square_in_object_space() {
+    let mut s = headless();
+    with_doc(&mut s);
+    // A 20×20 px bitmap at 40×40 mm centred at the origin: the ink square sits at ±5 px = ±10 mm.
+    let bid = add_bitmap(&mut s, square_gray(), [20, 20], [40.0, 40.0]);
+    let v = s.execute("tools.traceImage", json!({ "id": bid, "smoothness": 0 })).unwrap();
+    let id = v["ids"][0].as_u64().unwrap();
+    let b = bounds_of(&s, id);
+    assert!((b.min[0] + 10.0).abs() < 1e-9 && (b.max[0] - 10.0).abs() < 1e-9 && (b.min[1] + 10.0).abs() < 1e-9 && (b.max[1] - 10.0).abs() < 1e-9, "{b:?}");
+    // The traced path sits on the bitmap's layer, just above it, and is the selection.
+    let p = project(&s);
+    assert!(p.shapes.iter().any(|sh| sh.id.0 == id && matches!(sh.geom, openlaser_doc::Geom::Path(_))));
+    assert_eq!(s.active().unwrap().selection.ids, vec![openlaser_types::ObjectId(id)]);
+    // Bad targets refuse — the enabled gate fires first while a non-bitmap is selected.
+    assert_eq!(s.execute("tools.traceImage", json!({})).unwrap_err().code(), "disabled");
+    assert_eq!(s.execute("tools.traceImage", json!({ "id": 999 })).unwrap_err().code(), "disabled");
+    // Nothing at this threshold: a white image.
+    let bid2 = add_bitmap(&mut s, vec![255u8; 4], [2, 2], [4.0, 4.0]);
+    assert_eq!(s.execute("tools.traceImage", json!({ "id": bid2 })).unwrap_err().code(), "bad_params");
+}
+
+#[test]
+fn trace_image_maps_through_the_bitmap_transform() {
+    let mut s = headless();
+    with_doc(&mut s);
+    let bid = add_bitmap(&mut s, square_gray(), [20, 20], [40.0, 40.0]);
+    // Move the bitmap: the traced path follows its xform (translation is on the bitmap shape itself).
+    s.execute("arrange.transform", json!({ "ids": [bid], "anchor": "center", "xMm": 50.0, "yMm": 30.0 })).unwrap();
+    s.execute("document.select", json!({ "index": 0 })).ok();
+    let v = s.execute("tools.traceImage", json!({ "id": bid, "smoothness": 0, "deleteImage": true })).unwrap();
+    let id = v["ids"][0].as_u64().unwrap();
+    let b = bounds_of(&s, id);
+    assert!((b.min[0] - 40.0).abs() < 1e-9 && (b.max[0] - 60.0).abs() < 1e-9 && (b.min[1] - 20.0).abs() < 1e-9 && (b.max[1] - 40.0).abs() < 1e-9, "{b:?}");
+    assert!(!project(&s).shapes.iter().any(|sh| sh.id.0 == bid), "the image is gone");
+    // Undo restores both.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(project(&s).shapes.iter().any(|sh| sh.id.0 == bid));
+    assert!(!project(&s).shapes.iter().any(|sh| sh.id.0 == id));
+    // A traced design plans as closed paths.
+    let m = openlaser_machine::jpt_m7_200_sim();
+    let plan = openlaser_plan::plan(
+        &project(&s),
+        &m,
+        &openlaser_plan::PlanOptions {
+            selected: None,
+            repeats: 1,
+            frame_style: openlaser_types::FrameStyle::Contour,
+            frame_source: openlaser_types::FrameSource::Job,
+            flatten_tol_mm: 0.01,
+        },
+    );
+    assert!(plan.is_ok(), "{plan:?}");
 }

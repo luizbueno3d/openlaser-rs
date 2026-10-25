@@ -364,6 +364,25 @@ impl OpenLaserApp {
         self.canvas_nodes(ui, &response, &view);
         self.canvas_draw(ui, &response, &view, hover);
         self.paint_nodes(ui, &view);
+        // The Trace Image dialog's live ghost: the traced outline over the image.
+        if let Some(t) = &self.ui.trace
+            && let Some(polys) = &t.preview
+        {
+            let xform =
+                self.project().and_then(|p| p.world_transform(openlaser_types::ObjectId(t.id)).ok().flatten()).unwrap_or(openlaser_doc::Affine::IDENTITY);
+            let stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 80, 80));
+            let painter = ui.painter().with_clip_rect(view.rect);
+            for line in polys {
+                let pts: Vec<egui::Pos2> = line
+                    .iter()
+                    .map(|pt| {
+                        let w = xform * openlaser_geom::Point::new(pt[0], pt[1]);
+                        view.world_to_screen([w.x, w.y])
+                    })
+                    .collect();
+                painter.add(egui::Shape::line(pts, stroke));
+            }
+        }
 
         // ---- the inline text editor: an Area at the anchor, live outline ghost, commit on Esc/outside/Enter.
         if let Some(mut edit) = self.ui.text.take() {

@@ -37,6 +37,8 @@ pub struct UiState {
     pub offset: Option<OffsetUi>,
     /// The inline text editor: `Some` while a canvas text box is open (new text when `editing` is `None`,
     /// re-editing an existing shape when it is `Some(id)`).
+    /// The Trace Image dialog's values (remembered between opens, like the offset dialog).
+    pub trace: Option<TraceUi>,
     /// The Edit Nodes state while the tool is armed.
     pub nodes: Option<NodeEditUi>,
     pub text: Option<TextUi>,
@@ -122,6 +124,63 @@ impl Default for TextDefaults {
     }
 }
 
+/// The Trace Image dialog's persisted values plus the live preview ghost.
+#[derive(Debug, Clone)]
+pub struct TraceUi {
+    /// The bitmap being traced.
+    pub id: u64,
+    pub threshold: f64,
+    pub ignore_less_than: f64,
+    pub smoothness: f64,
+    pub optimize: f64,
+    pub invert: bool,
+    pub delete_image: bool,
+    /// The last preview polylines in the bitmap's object space, and when it was computed (debounce).
+    pub preview: Option<Vec<Vec<[f64; 2]>>>,
+    pub preview_at: Option<std::time::Instant>,
+}
+
+impl TraceUi {
+    /// The parameters the command and the preview share.
+    pub fn params(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "threshold": self.threshold as u8,
+            "invert": self.invert,
+            "ignoreLessThan": self.ignore_less_than,
+            "smoothness": self.smoothness,
+            "optimize": self.optimize,
+            "deleteImage": self.delete_image,
+        })
+    }
+
+    pub(crate) fn geom_opts(&self) -> openlaser_geom::trace::TraceOptions {
+        openlaser_geom::trace::TraceOptions {
+            threshold: self.threshold.clamp(0.0, 255.0) as u8,
+            invert: self.invert,
+            ignore_less_than: self.ignore_less_than.max(0.0),
+            optimize: self.optimize.clamp(0.0, 5.0),
+            smoothness: self.smoothness.clamp(0.0, 1.33),
+        }
+    }
+}
+
+impl Default for TraceUi {
+    fn default() -> Self {
+        TraceUi {
+            id: 0,
+            threshold: 128.0,
+            ignore_less_than: 2.0,
+            smoothness: 1.0,
+            optimize: 0.5,
+            invert: false,
+            delete_image: false,
+            preview: None,
+            preview_at: None,
+        }
+    }
+}
+
 impl TextDefaults {
     /// The alignment index → the engine's `align` string.
     pub fn align_str(&self) -> &'static str {
@@ -189,6 +248,7 @@ impl Default for UiState {
             polygon_sides: 6,
             lock_ratio: true,
             offset: None,
+            trace: None,
             nodes: None,
             text: None,
             text_defaults: TextDefaults::default(),
@@ -612,6 +672,22 @@ impl OpenLaserApp {
                 self.execute_widget(id, serde_json::json!({}));
             }
             "tools.offsetShapes" => self.ui.offset = Some(self.ui.offset.unwrap_or_default()),
+            "tools.traceImage" => {
+                // Open the dialog only on a single bitmap target; otherwise say why.
+                let sel = self.selection();
+                let bitmap = sel.first().filter(|_| sel.len() == 1).and_then(|id| {
+                    self.project().and_then(|p| if matches!(p.shape(*id).map(|s| &s.geom), Some(openlaser_doc::Geom::Bitmap(_))) { Some(id.0) } else { None })
+                });
+                match bitmap {
+                    Some(id) => {
+                        let mut t = self.ui.trace.clone().unwrap_or_default();
+                        t.id = id;
+                        t.preview = None;
+                        self.ui.trace = Some(t);
+                    }
+                    None => self.set_status("Select one image to trace."),
+                }
+            }
             "tools.text" => {
                 self.ui.text = None; // arming closes any open editor without committing via the tool click
                 self.ui.selected_tool = "Edit Text";

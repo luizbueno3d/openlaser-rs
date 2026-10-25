@@ -2215,3 +2215,96 @@ fn edit_nodes_on_a_rect_prompts_convert() {
     // Converted: the shape is a Path and the editor is armed.
     assert!(h.state().ui.nodes.is_some(), "editing starts after conversion");
 }
+
+// ---- Trace Image -------------------------------------------------------------------------------------------------
+
+fn add_square_bitmap(h: &mut H) -> u64 {
+    // A 20×20 luma buffer with a black 10×10 square at centre (px coords 5..15).
+    let mut g = vec![255u8; 20 * 20];
+    for r in 5..15 {
+        for c in 5..15 {
+            g[r * 20 + c] = 0;
+        }
+    }
+    use std::sync::Arc;
+    h.state_mut()
+        .session
+        .edit(openlaser_engine::Label::new("bitmap"), None, move |project, sel| {
+            let id = project.alloc_id().expect("ids");
+            project.shapes.push(Arc::new(openlaser_doc::Shape {
+                id,
+                name: None,
+                layer: openlaser_types::LayerKey::Color(0),
+                xform: openlaser_doc::Affine::IDENTITY,
+                geom: openlaser_doc::Geom::Bitmap(Arc::new(openlaser_doc::BitmapData {
+                    asset: openlaser_doc::AssetId([9; 32]),
+                    px: [20, 20],
+                    size_mm: [40.0, 40.0],
+                    gray: Arc::from(g.as_slice()),
+                    source_ext: "png".to_owned(),
+                })),
+                locked: false,
+                power_scale: openlaser_types::Percent::MAX_VALID,
+                priority: 0,
+            }));
+            sel.ids = vec![id];
+            sel.key = Some(id);
+            Ok::<_, openlaser_engine::EngineError>(())
+        })
+        .unwrap();
+    h.run();
+    h.state().session.active().unwrap().selection.ids[0].0
+}
+
+#[test]
+fn trace_image_button_needs_one_bitmap() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    // No bitmap: the Tools menu row is disabled with the reason.
+    assert_eq!(h.state().ui.status_message, "");
+    h.state_mut().invoke_ui_action("tools.traceImage");
+    h.run();
+    assert!(h.state().ui.trace.is_none());
+    assert!(h.state().ui.status_message.contains("image"), "{:?}", h.state().ui.status_message);
+}
+
+#[test]
+fn trace_dialog_previews_commits_and_undoes() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let bid = add_square_bitmap(&mut h);
+    h.state_mut().invoke_ui_action("tools.traceImage");
+    h.run();
+    assert!(h.state().ui.trace.is_some(), "the dialog opened");
+    // The preview ghost exists before OK and nothing was dispatched yet.
+    h.run(); // let the debounce fire
+    assert!(h.state().ui.trace.as_ref().unwrap().preview.is_some(), "the ghost preview computed");
+    let count = h.state().seam.dispatched.iter().filter(|(_, id, _)| id == "tools.traceImage").count();
+    h.get_by_label("OK").click();
+    h.run();
+    let dispatched = h.state().seam.dispatched.iter().filter(|(_, id, _)| id == "tools.traceImage").count();
+    assert_eq!(dispatched, count + 1, "exactly one traceImage command");
+    let doc = h.state().session.active().unwrap();
+    let sel = doc.selection.ids[0];
+    let sh = doc.project.shape(sel).unwrap();
+    assert!(matches!(sh.geom, openlaser_doc::Geom::Path(_)));
+    // The square sits at ±10 mm (20×20 px → 40 mm, ink 5..15 px).
+    let b = doc.project.bounds(&[sel]).unwrap().unwrap();
+    assert!((b.min[0] + 10.0).abs() < 0.2 && (b.max[0] - 10.0).abs() < 0.2, "{b:?}");
+    // deleteImage removes the source; Cmd+Z restores both.
+    let bid2 = add_square_bitmap(&mut h);
+    h.state_mut().invoke_ui_action("tools.traceImage");
+    h.run();
+    h.state_mut().ui.trace.as_mut().unwrap().delete_image = true;
+    h.get_by_label("OK").click();
+    h.run();
+    let doc = h.state().session.active().unwrap();
+    assert!(!doc.project.shapes.iter().any(|sh| sh.id.0 == bid2), "the image is deleted");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run();
+    let doc = h.state().session.active().unwrap();
+    assert!(doc.project.shapes.iter().any(|sh| sh.id.0 == bid2), "undo restored the image");
+    let _ = bid;
+}

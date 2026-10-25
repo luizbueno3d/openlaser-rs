@@ -12,6 +12,7 @@ mod hit;
 mod ops;
 #[cfg(test)]
 mod props;
+pub mod trace;
 
 pub use kurbo::{Affine, BezPath, PathEl, Point, Rect, Vec2};
 pub use openlaser_types::emission::Bounds;
@@ -101,4 +102,7 @@ pub enum Error {
     /// I2 addition: the boolean/offset library failed on this input (a panic inside it, caught).
     #[error("the geometry kernel could not process this shape; simplify it and try again")]
     KernelFailed,
+    /// A caller's input buffer/shape is inconsistent (e.g. gray length ≠ px).
+    #[error("{0}")]
+    BadInput(&'static str),
 }

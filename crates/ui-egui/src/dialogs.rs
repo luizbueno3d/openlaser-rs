@@ -77,6 +77,7 @@ impl OpenLaserApp {
             self.settings_window(ctx);
         }
         self.offset_dialog(ctx);
+        self.trace_dialog(ctx);
         if self.ui.device_settings_open {
             self.device_settings_window(ctx);
         } else {
@@ -445,6 +446,90 @@ impl OpenLaserApp {
                     self.set_status(e.to_string());
                 }
             }
+        }
+    }
+    /// The Trace Image dialog: LightBurn-style options with a live ghost on the canvas. The preview is the
+    /// same geometry the command commits — recomputed at most every 150 ms so a big image never stalls the UI.
+    fn trace_dialog(&mut self, ctx: &egui::Context) {
+        let Some(t0) = self.ui.trace.clone() else { return };
+        let mut t = t0.clone();
+        // Recompute the preview when values changed since the last run and the debounce has elapsed.
+        let stale = t.preview_at.is_none()
+            || (t0.threshold != t.threshold
+                || t0.ignore_less_than != t.ignore_less_than
+                || t0.smoothness != t.smoothness
+                || t0.optimize != t.optimize
+                || t0.invert != t.invert);
+        let _ = stale;
+        if t.preview_at.is_none_or(|at| at.elapsed() > std::time::Duration::from_millis(150)) {
+            let bitmap = self.project().and_then(|p| {
+                p.shape(openlaser_types::ObjectId(t.id)).and_then(|sh| if let openlaser_doc::Geom::Bitmap(b) = &sh.geom { Some(b.clone()) } else { None })
+            });
+            if let Some(b) = bitmap {
+                let opts = t.geom_opts();
+                if let Ok(path) = openlaser_geom::trace::trace_bez(&b.gray, b.px, &opts) {
+                    let (w, h) = (b.size_mm[0], b.size_mm[1]);
+                    let (pw, ph) = (b.px[0] as f64, b.px[1] as f64);
+                    let xform = openlaser_doc::Affine::new([w / pw, 0.0, 0.0, -h / ph, -w / 2.0, h / 2.0]);
+                    let mut object = path;
+                    object.apply_affine(xform);
+                    t.preview = openlaser_geom::flatten(&object, 0.01).ok().map(|polys| polys.into_iter().map(|p| p.0).collect());
+                }
+            }
+            t.preview_at = Some(std::time::Instant::now());
+        }
+        let mut open = true;
+        let mut ok = false;
+        let mut cancel = false;
+        egui::Window::new("Trace Image").open(&mut open).collapsible(false).auto_sized().show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Threshold");
+                let r = ui.add(egui::Slider::new(&mut t.threshold, 1.0..=255.0));
+                self.labeled(&r, egui::WidgetType::Slider, "Threshold", false);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Ignore less than");
+                let r = ui.add(egui::DragValue::new(&mut t.ignore_less_than).speed(0.1).range(0.0..=1000.0));
+                self.labeled(&r, egui::WidgetType::DragValue, "Ignore less than", false);
+                ui.label("px²");
+            });
+            ui.horizontal(|ui| {
+                ui.label("Smoothness");
+                let r = ui.add(egui::Slider::new(&mut t.smoothness, 0.0..=1.33));
+                self.labeled(&r, egui::WidgetType::Slider, "Smoothness", false);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Optimize");
+                let r = ui.add(egui::DragValue::new(&mut t.optimize).speed(0.05).range(0.0..=5.0));
+                self.labeled(&r, egui::WidgetType::DragValue, "Optimize", false);
+                ui.label("px");
+            });
+            let r = ui.checkbox(&mut t.invert, "Invert (trace the light side)");
+            self.labeled(&r, egui::WidgetType::Checkbox, "Invert", false);
+            let r = ui.checkbox(&mut t.delete_image, "Delete image after tracing");
+            self.labeled(&r, egui::WidgetType::Checkbox, "Delete image after tracing", false);
+            ui.horizontal(|ui| {
+                let r = ui.button("OK");
+                self.labeled(&r, egui::WidgetType::Button, "OK", false);
+                if r.clicked() {
+                    ok = true;
+                }
+                let r = ui.button("Cancel");
+                self.labeled(&r, egui::WidgetType::Button, "Cancel", false);
+                if r.clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if ok {
+            // Persist the values for next time, then dispatch exactly one tools.traceImage.
+            let params = t.params();
+            self.ui.trace = None;
+            self.execute_widget("tools.traceImage", params);
+        } else if cancel || !open {
+            self.ui.trace = None;
+        } else {
+            self.ui.trace = Some(t);
         }
     }
 }

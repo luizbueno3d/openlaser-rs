@@ -1546,6 +1546,116 @@ expression: rows
     }
   },
   {
+    "id": "tools.traceImage",
+    "label": "Trace Image",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Alt+T",
+    "defaultShortcut": "Alt+T",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{id?, threshold?(128), invert?, ignoreLessThan?(2), smoothness?(1.0), optimize?(0.5), deleteImage?, layer?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`tools.traceImage` {id?, threshold?, invert?, ignoreLessThan?, smoothness?, optimize?, deleteImage?, layer?}.",
+      "properties": {
+        "deleteImage": {
+          "default": null,
+          "description": "Remove the source image in the same undo step.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "id": {
+          "default": null,
+          "description": "The bitmap object. Default: the single selected shape.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ignoreLessThan": {
+          "default": null,
+          "description": "Drop rings under this area in px² (default 2).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "invert": {
+          "default": null,
+          "description": "Trace the light side.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "description": "A LightBurn layer: colour 0..=29, or \"C05\", \"05\", \"T1\", \"T2\" (case-insensitive).",
+              "oneOf": [
+                {
+                  "maximum": 29,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "^([CcTt]?[0-9]{1,2})$",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "optimize": {
+          "default": null,
+          "description": "Douglas–Peucker tolerance in px (default 0.5).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "smoothness": {
+          "default": null,
+          "description": "0..=1.33 (default 1.0); 0 gives polygons.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "threshold": {
+          "default": null,
+          "description": "Ink threshold 1..=255 (default 128): gray < threshold is ink.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "TraceParams",
+      "type": "object"
+    }
+  },
+  {
     "id": "tools.measure",
     "label": "Measure",
     "menu": [

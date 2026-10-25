@@ -395,7 +395,7 @@ mod undo {
     }
 
     /// `arrange.ungroup` needs a grouped scene (covered in `undo_roundtrip_edit_commands_needing_geometry_and_import`).
-    const NEEDS_I1: [&str; 13] = [
+    const NEEDS_I1: [&str; 14] = [
         "file.import",
         "edit.autoJoin",
         "edit.deleteDuplicates",
@@ -409,6 +409,7 @@ mod undo {
         "text.edit",
         "edit.convertToPath",
         "path.set",
+        "tools.traceImage",
     ];
 
     /// `edit.copy` only writes the session clipboard: it changes no document and records no history step.
@@ -488,6 +489,41 @@ mod undo {
         let (mut s, _, _) = scene();
         let p = ids_of(&s.execute("tools.drawLines", json!({ "pointsMm": [[0, 0], [10, 0], [10, 10]] })).unwrap())[0];
         assert_undo_roundtrip(&mut s, "path.set", json!({ "id": p, "d": "M0 0L20 0L20 5Z" }));
+        // tools.traceImage needs a bitmap target: inject one, then trace it.
+        let (mut s, _, _) = scene();
+        let bid = {
+            let mut g = vec![255u8; 20 * 20];
+            for r in 5..15 {
+                for c in 5..15 {
+                    g[r * 20 + c] = 0;
+                }
+            }
+            use std::sync::Arc;
+            s.edit(openlaser_engine::Label::new("bitmap"), None, move |project, _| {
+                let id = project.alloc_id().expect("fresh ids available");
+                project.shapes.push(Arc::new(openlaser_doc::Shape {
+                    id,
+                    name: None,
+                    layer: openlaser_types::LayerKey::Color(0),
+                    xform: openlaser_doc::Affine::IDENTITY,
+                    geom: openlaser_doc::Geom::Bitmap(Arc::new(openlaser_doc::BitmapData {
+                        asset: openlaser_doc::AssetId([7; 32]),
+                        px: [20, 20],
+                        size_mm: [40.0, 40.0],
+                        gray: Arc::from(g.as_slice()),
+                        source_ext: "png".to_owned(),
+                    })),
+                    locked: false,
+                    power_scale: openlaser_types::Percent::MAX_VALID,
+                    priority: 0,
+                }));
+                Ok::<_, openlaser_engine::EngineError>(())
+            })
+            .map(|_| s.active().unwrap().project.shapes.last().unwrap().id.0)
+            .unwrap()
+        };
+        s.execute("edit.select", json!({ "ids": [bid] })).unwrap();
+        assert_undo_roundtrip(&mut s, "tools.traceImage", json!({ "id": bid, "smoothness": 0 }));
     }
 
     #[derive(Debug, Clone)]
