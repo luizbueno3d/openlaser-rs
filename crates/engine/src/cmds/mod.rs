@@ -11,6 +11,7 @@ use crate::session::Session;
 
 mod app;
 mod arrange;
+mod camera;
 mod device;
 mod edit;
 mod file;
@@ -33,6 +34,7 @@ pub(crate) fn all() -> Vec<CommandSpec> {
     v.extend(laser::specs());
     v.extend(device::specs());
     v.extend(job::specs());
+    v.extend(camera::specs());
     v.extend(app::specs());
     v
 }

@@ -23,6 +23,7 @@ openlaser-safety = { workspace = true }
 openlaser-lmc = { workspace = true }
 openlaser-gcode = { workspace = true }
 openlaser-driver = { workspace = true }
+openlaser-camera = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }

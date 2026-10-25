@@ -50,6 +50,18 @@ pub struct UiState {
     pub machine_active: bool,
     pub status_message: String,
     pub pointer_mm: Option<[f64; 2]>,
+    /// The Camera Control panel's device list and pick (phase 6a).
+    pub camera: CameraUi,
+}
+
+/// The Camera Control panel's state. `devices` is `None` until the panel first opens or Refresh is clicked —
+/// enumeration is lazy so a missing or permission-denied camera can never block startup (SPEC §2.2 `camera`).
+#[derive(Debug, Default)]
+pub struct CameraUi {
+    /// The last enumeration: `Ok(devices)` or `Err(the camera error's message)`.
+    pub devices: Option<std::result::Result<Vec<openlaser_engine::CameraDeviceInfo>, String>>,
+    /// The device index the dropdown selects.
+    pub selected: u32,
 }
 
 /// Offset Shapes dialog state. `direction`/`corner` are combo indices: 0 outward / 1 inward / 2 both and
@@ -318,6 +330,7 @@ impl Default for UiState {
             machine_active: false,
             status_message: String::new(),
             pointer_mm: None,
+            camera: CameraUi::default(),
         }
     }
 }
@@ -436,6 +449,8 @@ pub struct OpenLaserApp {
     pub(crate) elements: Vec<Element>,
     pub(crate) last_elements: Vec<Element>,
     pub(crate) stop_overlay_rect: Option<egui::Rect>,
+    /// The Camera Control panel's live-feed texture (kept across frames; `camera_panel` `set`s it).
+    pub(crate) camera_tex: Option<egui::TextureHandle>,
     pub(crate) log: VecDeque<String>,
     #[cfg(test)]
     pub(crate) seam: Seam,
@@ -474,6 +489,7 @@ impl OpenLaserApp {
             elements: Vec::new(),
             last_elements: Vec::new(),
             stop_overlay_rect: None,
+            camera_tex: None,
             log: VecDeque::new(),
             #[cfg(test)]
             seam: Seam::default(),
@@ -712,6 +728,12 @@ impl OpenLaserApp {
             "edit.deviceSettings" | "device.settings" | "device.manage" => self.ui.device_settings_open = true,
             "laser.liveFraming" => self.ui.live_framing_open = true,
             "preview.open" => self.ui.preview_open = true,
+            "laserTools.cameras" => {
+                // "Manage Cameras…" and the toolbar Camera button open the Camera Control dock panel.
+                if let Err(e) = self.show_panel(&serde_json::json!({ "panel": "camera", "visible": true })) {
+                    self.set_status(e);
+                }
+            }
             "file.exit" => (self.services.quit)(),
             "file.open" | "file.import" => {
                 let kind = if id == "file.open" { DialogKind::OpenProject } else { DialogKind::Import };

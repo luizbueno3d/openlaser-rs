@@ -193,7 +193,7 @@ fn prefs_set(s: &mut Session, p: PrefSet) -> Result<Value, EngineError> {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct WindowParams {
-    /// Panel id: "cuts", "laser", "move", "console", "library", "preview", "shapeProperties", "undoHistory".
+    /// Panel id: "cuts", "laser", "move", "console", "library", "camera", "preview", "shapeProperties", "undoHistory".
     pub panel: String,
     /// Show or hide it.
     pub visible: bool,

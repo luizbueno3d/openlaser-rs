@@ -2446,3 +2446,30 @@ fn edit_nodes_on_a_locked_path_shows_greyed_nodes_and_refuses() {
     h.run();
     assert_eq!(format!("{:?}", h.state().ui.nodes.as_ref().unwrap().subs), before);
 }
+
+// ---- Camera Control panel --------------------------------------------------------------------------------------------
+
+/// Phase 6a: the Camera toolbar button / "Manage Cameras…" and Window ▸ Camera Control open the camera dock
+/// panel, which enumerates devices lazily (never at boot) and reports its state honestly — empty list,
+/// device list, or a permission error are all non-fatal.
+#[test]
+fn camera_panel_opens_and_enumerates_lazily() {
+    // NoSurface: the control dispatcher serves mutations (NoHuman counts a human surface as always open).
+    let mut h = with_human(NoSurface);
+    // Nothing is enumerated at startup.
+    assert!(h.state().ui.camera.devices.is_none());
+    // Window ▸ Camera Control (a `window.show` panel row) opens the dock panel…
+    let r = control(&mut h, "ui.menu.invoke", serde_json::json!({ "id": "window.show:camera" })).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(r["panel"], "camera");
+    assert!(h.state().dock.contains(&"camera".to_owned()));
+    // …and Laser Tools ▸ Manage Cameras… (the toolbar Camera button's id) opens it too.
+    let r = control(&mut h, "ui.menu.invoke", serde_json::json!({ "id": "laserTools.cameras" })).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(r["invoked"], "laserTools.cameras");
+    // Painting the panel enumerates once: Some(devices) or Some(error message), never a block or a panic.
+    h.run();
+    assert!(h.state().ui.camera.devices.is_some(), "panel did not enumerate");
+    // camera.* are agent-safe view-state commands in the GUI session too (camera.stop is idempotent).
+    control(&mut h, "engine.execute", serde_json::json!({ "command": "camera.stop" })).unwrap_or_else(|e| panic!("{e}"));
+    let status = control(&mut h, "engine.execute", serde_json::json!({ "command": "camera.status" })).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(status["running"], false);
+}

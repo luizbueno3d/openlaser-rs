@@ -1,0 +1,20 @@
+[package]
+name = "openlaser-camera"
+description = "Webcam capture for camera-guided placement: device enumeration, latest-wins frame pump, RGBA frames (nokhwa native backends; no laser state)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Deterministic fake camera for tests and demos; never enabled by default.
+synthetic = []
+
+[dependencies]
+nokhwa = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }

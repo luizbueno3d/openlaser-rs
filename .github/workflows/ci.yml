@@ -36,12 +36,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux system dependencies (egui/winit/rfd)
+      - name: Install Linux system dependencies (egui/winit/rfd, libclang for v4l2-sys-mit/bindgen)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+            libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev libclang-dev
 
       # rust-toolchain.toml pins `stable` with rustfmt and clippy; rustup installs it on first use.
       - uses: dtolnay/rust-toolchain@stable

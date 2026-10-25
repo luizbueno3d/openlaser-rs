@@ -1101,3 +1101,61 @@ fn panic_hunt() {
     let internal = handle.join().unwrap();
     assert!(internal.is_empty(), "contained panics: {internal:#?}");
 }
+
+// ---- camera (phase 6a) --------------------------------------------------------------------------------------------
+
+mod camera {
+    use super::*;
+
+    /// The four commands are registered, `Access::Agent` (agents may drive view state) and not Human.
+    #[test]
+    fn camera_commands_are_agent_view_state() {
+        for id in ["camera.list", "camera.status", "camera.start", "camera.stop"] {
+            let spec = registry().find(id).unwrap_or_else(|| panic!("{id} not registered"));
+            assert_eq!(spec.access, Access::Agent, "{id}");
+            assert!(matches!(spec.kind, Kind::Query | Kind::View), "{id} is not device state");
+        }
+    }
+
+    /// `camera.status`/`camera.stop` are safe and idempotent with no camera open; `camera.list` returns a
+    /// devices array (possibly empty — the test host may have no webcam).
+    #[test]
+    fn camera_status_and_stop_without_a_camera() {
+        let mut s = headless();
+        let status = s.execute("camera.status", json!({})).unwrap();
+        assert_eq!(status, json!({ "open": false, "running": false }));
+        let stopped = s.execute("camera.stop", json!({})).unwrap();
+        assert_eq!(stopped["open"], false);
+        let listed = s.execute("camera.list", json!({})).unwrap();
+        assert!(listed["devices"].is_array(), "{listed}");
+    }
+
+    /// `camera.start` on an index that cannot exist fails as a typed `camera` error, never a panic, and
+    /// leaves no capture behind. Params stay strict.
+    #[test]
+    fn camera_start_refuses_cleanly() {
+        let mut s = headless();
+        let e = s.execute("camera.start", json!({ "index": u32::MAX })).unwrap_err();
+        assert_eq!(e.code(), "camera", "{e}");
+        assert_eq!(s.execute("camera.status", json!({})).unwrap()["open"], false);
+        let e = s.execute("camera.start", json!({ "index": "0" })).unwrap_err();
+        assert_eq!(e.code(), "bad_params", "{e}");
+        let e = s.execute("camera.start", json!({ "bogus": 1 })).unwrap_err();
+        assert_eq!(e.code(), "bad_params", "{e}");
+    }
+
+    /// Camera state is view state: it is not journaled and a `dryRun` batch leaves the document untouched —
+    /// and camera commands never touch the stop registry or a pending arm.
+    #[test]
+    fn camera_commands_do_not_touch_machine_state() {
+        let mut s = headless();
+        with_doc(&mut s);
+        let trips = s.stop_registry().trips();
+        s.execute("camera.stop", json!({})).unwrap();
+        let _ = s.execute("camera.start", json!({ "index": u32::MAX }));
+        assert_eq!(s.stop_registry().trips(), trips);
+        assert!(s.pending_arm().is_none());
+        // Camera commands journal nothing (only Edit and Io commands are journaled).
+        assert!(s.journal().iter().all(|e| !e.id.starts_with("camera.")));
+    }
+}

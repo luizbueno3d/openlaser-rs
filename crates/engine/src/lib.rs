@@ -12,6 +12,7 @@
 //! are decoded, and the typed device methods check the origin again.
 #![forbid(unsafe_code)]
 
+mod camera;
 mod cmds;
 mod command;
 mod devices;
@@ -47,6 +48,7 @@ pub use session::{
 };
 
 // Re-exports so callers can name these without a direct dependency (SPEC §3.0).
+pub use openlaser_camera::{Capture as CameraCapture, DeviceInfo as CameraDeviceInfo, Frame as CameraFrame};
 pub use openlaser_doc::{Project, Selection};
 pub use openlaser_driver::{DeviceProvider, DriverError, DriverEvent, MachineState, Outcome, StopAck, StopReport, Stopper, TraceLine};
 pub use openlaser_gcode::{GcodeFrame, GcodeProgram};

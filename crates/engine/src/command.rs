@@ -155,6 +155,9 @@ pub enum EngineError {
     Cancelled,
     #[error("file: {0}")]
     Io(String),
+    /// A camera (webcam) failure: enumeration, open, stream or decode. View state only — never laser state.
+    #[error("camera: {0}")]
+    Camera(String),
     #[error("`{0}` failed with an internal error; the project is unchanged")]
     Internal(String),
     #[error("not implemented: {0}")]
@@ -194,6 +197,7 @@ impl EngineError {
             EngineError::NeedsBridge => "needs_bridge",
             EngineError::Cancelled => "cancelled",
             EngineError::Io(_) => "io",
+            EngineError::Camera(_) => "camera",
             EngineError::Internal(_) => "internal",
             EngineError::NotImplemented(_) => "not_implemented",
         }

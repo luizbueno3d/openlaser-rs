@@ -46,9 +46,10 @@ const TABLE: &[(&str, &[&str], &[&str])] = &[
     ("driver", &["types", "machine", "lmc", "gcode"], &["crossbeam-channel", "serde", "thiserror", "log"]),
     ("lmc-sim", &["types", "machine", "lmc", "driver"], &["crossbeam-channel", "thiserror"]),
     ("transport", &["types", "machine", "lmc", "driver"], &["nusb", "serialport", "keepawake", "craft-settings", "serde", "serde_json", "thiserror"]),
+    ("camera", &[], &["nokhwa", "thiserror", "log"]),
     (
         "engine",
-        &["types", "geom", "doc", "machine", "format", "import", "plan", "safety", "lmc", "gcode", "driver", "text"],
+        &["types", "geom", "doc", "machine", "format", "import", "plan", "safety", "lmc", "gcode", "driver", "text", "camera"],
         &["serde", "serde_json", "schemars", "thiserror", "log"],
     ),
     ("control", &["types"], &["serde", "serde_json", "cap-std", "getrandom", "craft-atomic", "thiserror"]),

@@ -4361,6 +4361,98 @@ expression: rows
     }
   },
   {
+    "id": "camera.list",
+    "label": "Cameras",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.status",
+    "label": "Camera Status",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.start",
+    "label": "Start Camera",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{index?} (view state; never touches laser state)",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`camera.start`.",
+      "properties": {
+        "index": {
+          "default": null,
+          "description": "Device index (`camera.list`). Default: the open camera, else the first enumerated one.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "StartParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.stop",
+    "label": "Stop Camera",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{} (idempotent)",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
     "id": "document.inspect",
     "label": "Inspect Document",
     "menu": [],
@@ -4789,7 +4881,7 @@ expression: rows
       "description": "`window.show`.",
       "properties": {
         "panel": {
-          "description": "Panel id: \"cuts\", \"laser\", \"move\", \"console\", \"library\", \"preview\", \"shapeProperties\", \"undoHistory\".",
+          "description": "Panel id: \"cuts\", \"laser\", \"move\", \"console\", \"library\", \"camera\", \"preview\", \"shapeProperties\", \"undoHistory\".",
           "type": "string"
         },
         "visible": {

@@ -395,6 +395,7 @@ pub fn is_shell_row(row: &Row) -> bool {
         | "device.settings"
         | "device.manage"
         | "laser.liveFraming"
+        | "laserTools.cameras"
         | "view.zoomIn"
         | "view.zoomOut"
         | "view.zoomPage"
@@ -430,6 +431,16 @@ mod tests {
             assert!(MENUS.contains(&top), "{row:?}");
             assert!(!row.label.contains("LightBurn"), "LightBurn's name never appears in the UI: {row:?}");
         }
+    }
+
+    #[test]
+    fn camera_rows_are_live() {
+        // Phase 6a: "Manage Cameras…" is a shell row (opens the Camera Control panel), and the Window ▸
+        // Camera Control row is live because "camera" is a dock panel.
+        let manage = CATALOG.iter().find(|r| r.id == "laserTools.cameras").expect("row");
+        assert!(is_live(manage), "Manage Cameras… must be dispatchable");
+        let control = CATALOG.iter().find(|r| r.panel == Some("camera")).expect("row");
+        assert!(is_live(control), "Window ▸ Camera Control must be dispatchable");
     }
 
     #[test]

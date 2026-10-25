@@ -108,6 +108,9 @@ pub struct Session {
     pub(crate) ctx: Option<Ctx>,
     pub(crate) group: Option<Group>,
     pub(crate) clipboard: Option<Clipboard>,
+    /// The one live webcam capture (camera.rs): view state only — never in a Snapshot, never journaled, and
+    /// untouched by `file.new`/`file.open`. `camera.*` commands are safe for agents (AGENTS.md §1).
+    pub(crate) camera: Option<openlaser_camera::Capture>,
 }
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -136,6 +139,7 @@ impl Session {
             ctx: None,
             group: None,
             clipboard: None,
+            camera: None,
         }
     }
 

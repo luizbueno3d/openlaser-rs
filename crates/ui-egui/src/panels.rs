@@ -745,6 +745,9 @@ impl OpenLaserApp {
                     egui::ScrollArea::vertical().id_salt("laser-scroll").show(ui, |ui| self.laser_panel(ui));
                 }
                 "console" => self.console_panel(ui),
+                "camera" => {
+                    egui::ScrollArea::vertical().id_salt("camera-scroll").show(ui, |ui| self.camera_panel(ui));
+                }
                 "library" => {
                     ui.label("Material Library: presets by material and thickness arrive in P1 (CAT §5.12).");
                 }
@@ -764,6 +767,92 @@ impl OpenLaserApp {
             if let Err(error) = self.dock.apply_with_permissions(action, crate::dock::permissions) {
                 self.set_status(error.to_string());
             }
+        }
+    }
+
+    // ---- Camera Control (phase 6a) ------------------------------------------------------------------------------------
+
+    /// Enumerate cameras into `ui.camera.devices` (the panel's lazy init and its Refresh button share this).
+    pub(crate) fn refresh_cameras(&mut self) {
+        self.ui.camera.devices = Some(self.session.camera_devices().map_err(|e| e.to_string()));
+        if let Some(Ok(devices)) = &self.ui.camera.devices
+            && !devices.iter().any(|d| d.index == self.ui.camera.selected)
+        {
+            self.ui.camera.selected = devices.first().map(|d| d.index).unwrap_or(0);
+        }
+    }
+
+    /// The Camera Control panel: device dropdown, Start/Stop (engine `camera.*` commands — view state, safe
+    /// for agents), the live feed and honest empty/error states. Phase 6a draws the raw feed only; lens
+    /// calibration and the workspace overlay arrive in a later phase.
+    pub(crate) fn camera_panel(&mut self, ui: &mut egui::Ui) {
+        if self.ui.camera.devices.is_none() {
+            self.refresh_cameras();
+        }
+        let running = self.session.camera_running();
+        let has_devices = matches!(&self.ui.camera.devices, Some(Ok(d)) if !d.is_empty());
+        ui.horizontal(|ui| {
+            match &self.ui.camera.devices {
+                Some(Ok(devices)) if !devices.is_empty() => {
+                    let selected =
+                        devices.iter().find(|d| d.index == self.ui.camera.selected).or_else(|| devices.first()).map(|d| d.name.clone()).unwrap_or_default();
+                    egui::ComboBox::from_id_salt("camera-device").selected_text(selected).show_ui(ui, |ui| {
+                        for d in devices {
+                            ui.selectable_value(&mut self.ui.camera.selected, d.index, format!("{} ({})", d.name, d.index));
+                        }
+                    });
+                }
+                Some(Ok(_)) => {
+                    ui.weak("No camera found — check the OS camera permission, then Refresh.");
+                }
+                Some(Err(e)) => {
+                    ui.weak(format!("Cannot enumerate cameras: {e}"));
+                }
+                None => {}
+            }
+            let refresh = ui.button("Refresh");
+            self.labeled(&refresh, egui::WidgetType::Button, "Refresh camera list", false);
+            if refresh.clicked() {
+                self.refresh_cameras();
+            }
+            let start = ui.add_enabled(!running, egui::Button::new("Start"));
+            self.labeled(&start, egui::WidgetType::Button, "Start camera", false);
+            if start.clicked() {
+                // No device list (or none enumerated): let `camera.start` pick the first camera itself.
+                let params = if has_devices { serde_json::json!({ "index": self.ui.camera.selected }) } else { serde_json::json!({}) };
+                self.execute_widget("camera.start", params);
+            }
+            let stop = ui.add_enabled(running, egui::Button::new("Stop"));
+            self.labeled(&stop, egui::WidgetType::Button, "Stop camera", false);
+            if stop.clicked() {
+                self.execute_widget("camera.stop", serde_json::json!({}));
+            }
+        });
+
+        if let Some(error) = self.session.camera_last_error() {
+            ui.colored_label(egui::Color32::from_rgb(230, 80, 60), format!("Camera: {error}"));
+        }
+
+        if running {
+            match self.session.camera_frame() {
+                Some(frame) => {
+                    let image = egui::ColorImage::from_rgba_unmultiplied([frame.width as usize, frame.height as usize], &frame.rgba);
+                    let tex = self.camera_tex.get_or_insert_with(|| ui.ctx().load_texture("camera-feed", image.clone(), egui::TextureOptions::LINEAR));
+                    tex.set(image, egui::TextureOptions::LINEAR);
+                    // Fit the feed to the panel width (never upscale past 1:1).
+                    let natural = egui::vec2(frame.width as f32, frame.height as f32);
+                    let scale = (ui.available_width() / natural.x).min(1.0);
+                    ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(tex.id(), natural * scale)));
+                    // Repaint only while streaming: ~30 fps, matching the pump's own frame rate.
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                }
+                None => {
+                    ui.weak("Waiting for the first frame…");
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                }
+            }
+        } else if self.camera_tex.is_some() {
+            self.camera_tex = None; // free the feed texture once the stream stops
         }
     }
 

@@ -2,7 +2,7 @@
 use craft_ui::docking::{Layout, Node, Permissions};
 use craft_ui::layout::{SplitAxis, SplitSize};
 
-pub const PANELS: &[&str] = &["canvas", "cuts", "laser", "library", "move", "console"];
+pub const PANELS: &[&str] = &["canvas", "cuts", "laser", "library", "move", "console", "camera"];
 pub type DockLayout = Layout<String>;
 
 pub fn default_layout() -> DockLayout {
@@ -47,6 +47,7 @@ pub fn label(panel: &str) -> String {
         "library" => "Library",
         "move" => "Move",
         "console" => "Console",
+        "camera" => "Camera Control",
         _ => panel,
     }
     .into()
