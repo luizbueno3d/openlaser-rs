@@ -1,0 +1,23 @@
+[package]
+name = "openlaser-text"
+description = "System-font discovery and LightBurn-style text layout (harfrust shaping + skrifa outlines) into kurbo paths"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+openlaser-types = { workspace = true }
+openlaser-geom = { workspace = true }
+kurbo = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+skrifa = { workspace = true }
+harfrust = { workspace = true }
+
+[dev-dependencies]
+openlaser-testkit = { workspace = true }

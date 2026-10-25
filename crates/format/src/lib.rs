@@ -327,6 +327,24 @@ fn scan_shapes<'a>(shapes: &'a [ShapeM], paths: &std::collections::BTreeMap<Stri
                 }
             }
             GeomM::Group { shapes } => scan_shapes(shapes, paths, seen)?,
+            GeomM::Text { text, height_mm, letter_spacing_mm, line_spacing, path, .. } => {
+                if text.chars().count() > 10_000 {
+                    return Err(Error::Corrupt(format!("{} exceeds 10k characters", at("text"))));
+                }
+                if !height_mm.is_finite() || !(0.1..=1000.0).contains(height_mm) {
+                    return Err(Error::Corrupt(format!("{} outside 0.1..=1000", at("heightMm"))));
+                }
+                for (value, what) in [(letter_spacing_mm, "letterSpacingMm"), (line_spacing, "lineSpacing")] {
+                    if !value.is_finite() {
+                        return Err(Error::NonFinite { path: at(what) });
+                    }
+                    check_magnitude(*value, &at(what))?;
+                }
+                if !paths.contains_key(path) {
+                    return Err(Error::Corrupt(format!("missing path {path}")));
+                }
+                seen.paths.insert(path.as_str());
+            }
         }
         if !matches!(shape.geom, GeomM::Group { .. }) {
             seen.layers.insert(shape.layer);
@@ -375,12 +393,44 @@ struct ShapeM {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 enum GeomM {
-    Path { path: String },
-    Rect { w: Mm, h: Mm, corner_radius: Mm },
-    Ellipse { rx: Mm, ry: Mm },
-    Polygon { sides: u16, radius: Mm },
-    Bitmap { asset: [u8; 32], px: [u32; 2], size_mm: [f64; 2], gray_asset: String, source_ext: String },
-    Group { shapes: Vec<ShapeM> },
+    Path {
+        path: String,
+    },
+    Rect {
+        w: Mm,
+        h: Mm,
+        corner_radius: Mm,
+    },
+    Ellipse {
+        rx: Mm,
+        ry: Mm,
+    },
+    Polygon {
+        sides: u16,
+        radius: Mm,
+    },
+    Bitmap {
+        asset: [u8; 32],
+        px: [u32; 2],
+        size_mm: [f64; 2],
+        gray_asset: String,
+        source_ext: String,
+    },
+    Group {
+        shapes: Vec<ShapeM>,
+    },
+    /// A text shape: its editable parameters plus the cached outline, encoded like any other path so a document
+    /// opened on a machine without the font is byte-identical.
+    Text {
+        text: String,
+        family: String,
+        style: String,
+        height_mm: f64,
+        letter_spacing_mm: f64,
+        line_spacing: f64,
+        align: openlaser_types::TextAlign,
+        path: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -479,6 +529,33 @@ impl ShapeM {
             Geom::Group(shapes) => {
                 GeomM::Group { shapes: shapes.iter().map(|item| ShapeM::from_shape(item, paths, assets, next, depth + 1)).collect::<Result<_, _>>()? }
             }
+            Geom::Text(text) => {
+                if text.text.chars().count() > 10_000 {
+                    return Err(Error::LimitExceeded("text exceeds 10k characters".to_owned()));
+                }
+                if !text.height_mm.is_finite() || !(0.1..=1000.0).contains(&text.height_mm) {
+                    return Err(Error::NonFinite { path: format!("shape[{}].text.heightMm", shape.id.0) });
+                }
+                if ![text.height_mm, text.letter_spacing_mm, text.line_spacing].iter().all(|v| v.is_finite()) {
+                    return Err(Error::NonFinite { path: format!("shape[{}].text", shape.id.0) });
+                }
+                if text.outline.elements().iter().map(PathCommand::from_el).flat_map(|cmd| cmd.coordinates()).any(|value| !value.is_finite()) {
+                    return Err(Error::NonFinite { path: format!("shape[{}].text.outline", shape.id.0) });
+                }
+                let key = format!("p{}", *next);
+                *next = next.checked_add(1).ok_or_else(|| Error::LimitExceeded("path id overflow".to_owned()))?;
+                paths.insert(key.clone(), encode_path(&text.outline));
+                GeomM::Text {
+                    text: text.text.clone(),
+                    family: text.family.clone(),
+                    style: text.style.clone(),
+                    height_mm: text.height_mm,
+                    letter_spacing_mm: text.letter_spacing_mm,
+                    line_spacing: text.line_spacing,
+                    align: text.align,
+                    path: key,
+                }
+            }
         };
         Ok(Self {
             id: shape.id,
@@ -527,6 +604,23 @@ impl ShapeM {
             GeomM::Group { shapes } => Geom::Group(
                 shapes.into_iter().map(|item| item.into_shape(paths, assets, depth + 1).map(|shape| (*shape).clone().into())).collect::<Result<_, _>>()?,
             ),
+            GeomM::Text { text, family, style, height_mm, letter_spacing_mm, line_spacing, align, path } => {
+                if text.chars().count() > 10_000 {
+                    return Err(Error::Corrupt("text exceeds 10k characters".to_owned()));
+                }
+                if !height_mm.is_finite() || !(0.1..=1000.0).contains(&height_mm) {
+                    return Err(Error::Corrupt("text heightMm outside 0.1..=1000".to_owned()));
+                }
+                if ![letter_spacing_mm, line_spacing].iter().all(|v| v.is_finite()) {
+                    return Err(Error::Corrupt("text spacing not finite".to_owned()));
+                }
+                let commands = paths.get(&path).ok_or_else(|| Error::Corrupt(format!("missing path {path}")))?;
+                let mut bez = BezPath::new();
+                for command in decode_path(commands)? {
+                    bez.push(command.to_el());
+                }
+                Geom::Text(Arc::new(openlaser_doc::TextGeom { text, family, style, height_mm, letter_spacing_mm, line_spacing, align, outline: Arc::new(bez) }))
+            }
         };
         Ok(Arc::new(Shape {
             id: self.id,
@@ -1423,5 +1517,72 @@ mod tests {
         let result = load(&zip_of(&[("manifest.json", &json), (&name, &gray)])).map(|_| ());
         assert!(matches!(result, Err(Error::Corrupt(_))), "{result:?}");
         assert_corrupt(|m| m["paths"]["p9"] = serde_json::json!("M 0 0 L 1 1"));
+    }
+    #[test]
+    fn text_round_trips_with_params_and_cached_outline() {
+        let mut project = project();
+        let mut outline = BezPath::new();
+        outline.move_to((0.0, 0.0));
+        outline.line_to((3.0, 0.0));
+        outline.line_to((3.0, 7.0));
+        outline.close_path();
+        project.shapes.push(Arc::new(Shape {
+            id: ObjectId(9),
+            name: None,
+            layer: LayerKey::Color(2),
+            xform: Affine::translate((5.0, 5.0)),
+            geom: Geom::Text(Arc::new(openlaser_doc::TextGeom {
+                text: "H".to_owned(),
+                family: "Hack".to_owned(),
+                style: "Regular".to_owned(),
+                height_mm: 10.0,
+                letter_spacing_mm: 0.5,
+                line_spacing: 1.2,
+                align: openlaser_types::TextAlign::Center,
+                outline: Arc::new(outline),
+            })),
+            locked: false,
+            power_scale: Percent::new(100.0).unwrap(),
+            priority: 0,
+        }));
+        project.next_id = 10;
+        project.normalize();
+        let bytes = save(&project).unwrap();
+        let back = load(&bytes).unwrap();
+        let (a, b) = (project.shape(ObjectId(9)).unwrap(), back.shape(ObjectId(9)).unwrap());
+        let (Geom::Text(ta), Geom::Text(tb)) = (&a.geom, &b.geom) else { panic!("text did not round-trip") };
+        assert_eq!(ta.as_ref(), tb.as_ref(), "params and outline identical");
+        // A forged outline key is refused exactly like forged path data.
+        // A forged outline key is refused: rewrite the manifest's text path key by hand.
+        let bytes = save(&project).unwrap();
+        let mut archive = ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_reader(archive.by_name("manifest.json").unwrap()).unwrap();
+        for sh in manifest["project"]["shapes"].as_array_mut().unwrap() {
+            if sh["id"].as_u64() == Some(9) {
+                sh["geom"]["path"] = serde_json::Value::String("p999".to_owned());
+            }
+        }
+        let mut json = Vec::new();
+        manifest.serialize(&mut serde_json::Serializer::new(&mut json)).unwrap();
+        let mut out = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut out);
+            let names: Vec<String> =
+                (0..archive.len()).map(|i| archive.by_index(i).and_then(|f| f.name().map(|n| n.to_string()))).collect::<Result<_, _>>().unwrap();
+            for (i, name) in names.iter().enumerate() {
+                if name == "manifest.json" {
+                    continue;
+                }
+                let mut file = archive.by_index(i).unwrap();
+                let mut data = Vec::new();
+                std::io::Read::read_to_end(&mut file, &mut data).unwrap();
+                zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+                std::io::Write::write_all(&mut zip, &data).unwrap();
+            }
+            zip.start_file("manifest.json", zip::write::SimpleFileOptions::default()).unwrap();
+            std::io::Write::write_all(&mut zip, &json).unwrap();
+        }
+        let e = load(&out.into_inner());
+        assert!(e.is_err(), "a missing outline key is corrupt: {e:?}");
     }
 }

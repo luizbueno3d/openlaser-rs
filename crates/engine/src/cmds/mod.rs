@@ -17,12 +17,14 @@ mod file;
 mod job;
 mod laser;
 mod layer;
+mod text;
 mod tools;
 
 pub(crate) fn all() -> Vec<CommandSpec> {
     let mut v = Vec::new();
     v.extend(file::specs());
     v.extend(edit::specs());
+    v.extend(text::specs());
     v.extend(tools::specs());
     v.extend(arrange::specs());
     v.extend(layer::specs());

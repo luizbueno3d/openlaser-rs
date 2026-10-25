@@ -842,6 +842,264 @@ expression: rows
     }
   },
   {
+    "id": "tools.text",
+    "label": "Edit Text",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Cmd+T",
+    "defaultShortcut": "Cmd+T",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{xMm, yMm, text, family?, style?, heightMm?(10), letterSpacingMm?(0), lineSpacing?(1), align?\"left\"|\"center\"|\"right\", layer?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`tools.text` parameters.",
+      "properties": {
+        "align": {
+          "default": null,
+          "description": "\"left\" (default), \"center\" or \"right\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "family": {
+          "default": null,
+          "description": "Font family; default: the first available of the usual system names, else the first indexed family.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "heightMm": {
+          "default": null,
+          "description": "Cap height in mm (default 10).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "description": "A LightBurn layer: colour 0..=29, or \"C05\", \"05\", \"T1\", \"T2\" (case-insensitive).",
+              "oneOf": [
+                {
+                  "maximum": 29,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "^([CcTt]?[0-9]{1,2})$",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Layer. Default: C00."
+        },
+        "letterSpacingMm": {
+          "default": null,
+          "description": "Extra advance per character in mm (default 0).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "lineSpacing": {
+          "default": null,
+          "description": "Line-height multiplier (default 1.0).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "style": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "description": "The text; `\\n` splits lines.",
+          "type": "string"
+        },
+        "xMm": {
+          "description": "Baseline anchor point (the alignment point), world mm.",
+          "format": "double",
+          "type": "number"
+        },
+        "yMm": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "xMm",
+        "yMm",
+        "text"
+      ],
+      "title": "TextParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "text.edit",
+    "label": "Edit Text…",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Cmd+E",
+    "defaultShortcut": "Cmd+E",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{id, text?, family?, style?, heightMm?, letterSpacingMm?, lineSpacing?, align?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`text.edit` parameters: every field optional except `id`.",
+      "properties": {
+        "align": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "family": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "heightMm": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "letterSpacingMm": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "lineSpacing": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "style": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "TextEditParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "text.fonts",
+    "label": "List Fonts",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{fonts:[{family, styles}]}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.convertToPath",
+    "label": "Convert to Path",
+    "menu": [
+      "Arrange"
+    ],
+    "shortcut": "Cmd+Shift+C",
+    "defaultShortcut": "Cmd+Shift+C",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (text and parametric shapes become Geom::Path, xform kept)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
     "id": "tools.select",
     "label": "Select",
     "menu": [

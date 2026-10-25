@@ -17,6 +17,7 @@ publish = false
 openlaser-types = { path = "crates/types" }
 openlaser-geom = { path = "crates/geom" }
 openlaser-doc = { path = "crates/doc" }
+openlaser-text = { path = "crates/text" }
 openlaser-machine = { path = "crates/machine" }
 openlaser-format = { path = "crates/format" }
 openlaser-import = { path = "crates/import" }
@@ -55,6 +56,9 @@ rfd = { version = "=0.17.2" }
 
 # ---- geometry, raster, files (S7: one kurbo, one usvg, one tiny-skia with egui_extras[svg]) ---------------------
 kurbo = { version = "=0.11.3" }
+# Text shaping (S19): already resolved to these versions through the GUI stack; used by openlaser-text.
+skrifa = { version = "=0.44.0" }
+harfrust = { version = "=0.12.0" }
 usvg = { version = "=0.45.1", default-features = false }
 tiny-skia = { version = "=0.11.4" }
 rstar = { version = "=0.13.0" }

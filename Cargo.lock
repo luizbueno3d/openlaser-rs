@@ -3158,6 +3158,7 @@ dependencies = [
  "openlaser-plan",
  "openlaser-safety",
  "openlaser-testkit",
+ "openlaser-text",
  "openlaser-types",
  "proptest",
  "schemars",
@@ -3379,6 +3380,20 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "openlaser-text"
+version = "0.1.0"
+dependencies = [
+ "harfrust",
+ "kurbo 0.11.3",
+ "openlaser-geom",
+ "openlaser-testkit",
+ "openlaser-types",
+ "serde",
+ "skrifa",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

@@ -222,3 +222,13 @@ mod tests {
         assert!("30".parse::<LayerKey>().is_err());
     }
 }
+
+/// Horizontal alignment of a text block about its anchor point (LightBurn's Left/Centre/Right).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}

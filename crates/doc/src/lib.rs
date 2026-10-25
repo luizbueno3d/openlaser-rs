@@ -11,7 +11,7 @@ pub use layers::{
 };
 pub use palette::{COLOR_LAYERS, PALETTE, TOOL_COLORS};
 pub use project::{
-    AssetId, BitmapData, DeviceHint, DeviceKind, Geom, JobSettings, MAX_ARC_CUBICS_PER_QUARTER, MAX_NEXT_ID, Project, Selection, Shape, Workspace,
+    AssetId, BitmapData, DeviceHint, DeviceKind, Geom, JobSettings, MAX_ARC_CUBICS_PER_QUARTER, MAX_NEXT_ID, Project, Selection, Shape, TextGeom, Workspace,
     WorkspaceOrigin, default_layer_name,
 };
 

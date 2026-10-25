@@ -1687,3 +1687,108 @@ fn a_welded_design_plans_one_outline() {
     assert_eq!(total_paths, 1, "{:?}", plan.sections.len());
     assert_eq!(bounds_of(&s, g), openlaser_types::Bounds { min: [-20.0, -20.0], max: [-5.0, -10.0] });
 }
+
+// ---- text: tools.text, text.edit, text.fonts, edit.convertToPath --------------------------------------------------
+
+fn with_hack(s: &mut Session) {
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../text/tests/fonts");
+    s.set_font_dirs(vec![dir]);
+}
+
+#[test]
+fn tools_text_lays_out_and_selects() {
+    let mut s = headless();
+    with_doc(&mut s);
+    with_hack(&mut s);
+    let v = s.execute("tools.text", json!({ "xMm": 10, "yMm": 20, "text": "HI", "family": "Hack", "heightMm": 10 })).unwrap();
+    let id = v["ids"][0].as_u64().unwrap();
+    let p = project(&s);
+    let sh = p.shape(openlaser_types::ObjectId(id)).unwrap();
+    let openlaser_doc::Geom::Text(t) = &sh.geom else { panic!("not text") };
+    assert_eq!(t.family, "Hack");
+    // The anchor sits at the click: the baseline anchor is xform; the 'H' cap height is heightMm.
+    let b = bounds_of(&s, id);
+    assert!((b.max[1] - b.min[1] - 10.0).abs() < 0.05, "{b:?}");
+    // The baseline lands on y; the left ink edge stays within a sidebearing of the anchor.
+    assert!((b.min[1] - 20.0).abs() < 0.05 && b.min[0] >= 10.0 && b.min[0] < 12.0, "{b:?}");
+    assert_eq!(s.active().unwrap().selection.ids, vec![openlaser_types::ObjectId(id)]);
+    // Missing glyph and bad params refuse.
+    assert_eq!(s.execute("tools.text", json!({ "xMm": 0, "yMm": 0, "text": "中", "family": "Hack" })).unwrap_err().code(), "bad_params");
+    assert_eq!(s.execute("tools.text", json!({ "xMm": 0, "yMm": 0, "text": "A", "bogus": 1 })).unwrap_err().code(), "bad_params");
+}
+
+#[test]
+fn text_edit_relays_in_place_and_undoes() {
+    let mut s = headless();
+    with_doc(&mut s);
+    with_hack(&mut s);
+    let v = s.execute("tools.text", json!({ "xMm": 0, "yMm": 0, "text": "A", "family": "Hack", "heightMm": 10 })).unwrap();
+    let id = v["ids"][0].as_u64().unwrap();
+    let before = bounds_of(&s, id);
+    s.execute("text.edit", json!({ "id": id, "text": "WW", "heightMm": 20 })).unwrap();
+    let after = bounds_of(&s, id);
+    assert!(after.max[1] - after.min[1] > before.max[1] - before.min[1] + 9.0, "{before:?} → {after:?}");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(bounds_of(&s, id), before);
+}
+
+#[test]
+fn text_fonts_lists_and_convert_to_path_bakes() {
+    let mut s = headless();
+    with_doc(&mut s);
+    with_hack(&mut s);
+    let v = s.execute("text.fonts", json!({})).unwrap();
+    assert_eq!(v["fonts"][0]["family"], "Hack", "{v}");
+    let v = s.execute("tools.text", json!({ "xMm": 0, "yMm": 0, "text": "H", "family": "Hack" })).unwrap();
+    let id = v["ids"][0].as_u64().unwrap();
+    let before = bounds_of(&s, id);
+    s.execute("edit.convertToPath", json!({ "ids": [id] })).unwrap();
+    let p = project(&s);
+    let sh = p.shape(openlaser_types::ObjectId(id)).unwrap();
+    assert!(matches!(sh.geom, openlaser_doc::Geom::Path(_)), "converted in place");
+    assert_eq!(bounds_of(&s, id), before, "world geometry identical");
+    // Also a parametric rect.
+    let r = rect(&mut s, 50.0, 50.0, 10.0, 10.0);
+    let b = bounds_of(&s, r);
+    s.execute("edit.convertToPath", json!({ "ids": [r] })).unwrap();
+    assert!(matches!(project(&s).shape(openlaser_types::ObjectId(r)).unwrap().geom, openlaser_doc::Geom::Path(_)));
+    assert_eq!(bounds_of(&s, r), b);
+}
+
+#[test]
+fn a_text_shape_plans_its_outline() {
+    let mut s = headless();
+    with_doc(&mut s);
+    with_hack(&mut s);
+    let v = s.execute("tools.text", json!({ "xMm": 10, "yMm": 10, "text": "HI", "family": "Hack", "heightMm": 10 })).unwrap();
+    let id = v["ids"][0].as_u64().unwrap();
+    let m = openlaser_machine::jpt_m7_200_sim();
+    let plan = openlaser_plan::plan(
+        &project(&s),
+        &m,
+        &openlaser_plan::PlanOptions {
+            selected: None,
+            repeats: 1,
+            frame_style: openlaser_types::FrameStyle::Contour,
+            frame_source: openlaser_types::FrameSource::Job,
+            flatten_tol_mm: 0.01,
+        },
+    )
+    .unwrap();
+    assert!(!plan.sections.is_empty());
+    let total: usize = plan.sections.iter().map(|sec| sec.paths.len()).sum();
+    assert!(total >= 2, "H+I outlines (inner counter of nothing — two letter outlines): {total}");
+    let b = bounds_of(&s, id);
+    let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+    for sec in &plan.sections {
+        for path in &sec.paths {
+            for pt in &path.0 {
+                lo[0] = lo[0].min(pt[0]);
+                lo[1] = lo[1].min(pt[1]);
+                hi[0] = hi[0].max(pt[0]);
+                hi[1] = hi[1].max(pt[1]);
+            }
+        }
+    }
+    assert!((lo[0] - b.min[0]).abs() < 0.02 && (hi[1] - b.max[1]).abs() < 0.02, "{lo:?} {hi:?} vs {b:?}");
+}

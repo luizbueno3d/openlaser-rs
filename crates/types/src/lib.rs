@@ -22,7 +22,7 @@ pub mod units;
 pub use arm::{ARM_TOKEN_TTL, ArmToken};
 pub use emission::{Bounds, EmissionSummary, EmittedSegment, GalvoWords, PassRow, SectionMode};
 pub use frame::{FRAME_RECEIPT_MAX_AGE, FrameMode, FrameOrigin, FrameReceipt, FrameSource, FrameStyle};
-pub use ids::{DeviceKind, Fingerprint, LayerKey, MachineId, ObjectId, SessionId};
+pub use ids::{DeviceKind, Fingerprint, LayerKey, MachineId, ObjectId, SessionId, TextAlign};
 pub use refusal::{Notice, NoticeCode, Refusal, RefusalCode};
 pub use serde_dur::{serde_ms, serde_secs};
 pub use std::time::Duration;

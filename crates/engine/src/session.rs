@@ -91,6 +91,8 @@ pub struct Session {
     pub(crate) docs: Vec<DocState>,
     pub(crate) active: Option<usize>,
     pub(crate) prefs: Prefs,
+    /// The lazily-built font index for text layout; tests point it at a fixture dir.
+    fonts: openlaser_text::FontLibrary,
     pub(crate) journal: VecDeque<JournalEntry>,
     pub(crate) events: VecDeque<Event>,
     pub(crate) hub: Vec<Slot>,
@@ -119,6 +121,7 @@ impl Session {
             docs: Vec::new(),
             active: None,
             prefs: Prefs::default(),
+            fonts: openlaser_text::FontLibrary::new(),
             journal: VecDeque::new(),
             events: VecDeque::new(),
             hub: Vec::new(),
@@ -448,6 +451,17 @@ impl Session {
 
     pub fn prefs(&self) -> &Prefs {
         &self.prefs
+    }
+
+    /// The font index (built on first use).
+    pub fn fonts(&self) -> &openlaser_text::FontLibrary {
+        &self.fonts
+    }
+
+    /// Swap in a differently-rooted index (tests inject the committed fixture; OPENLASER_FONT_DIRS is already
+    /// honoured by `FontLibrary::new`).
+    pub fn set_font_dirs(&mut self, dirs: Vec<std::path::PathBuf>) {
+        self.fonts = openlaser_text::FontLibrary::with_dirs(dirs);
     }
 
     // ---- documents ------------------------------------------------------------------------------------------

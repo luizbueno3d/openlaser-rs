@@ -395,7 +395,7 @@ mod undo {
     }
 
     /// `arrange.ungroup` needs a grouped scene (covered in `undo_roundtrip_edit_commands_needing_geometry_and_import`).
-    const NEEDS_I1: [&str; 9] = [
+    const NEEDS_I1: [&str; 12] = [
         "file.import",
         "edit.autoJoin",
         "edit.deleteDuplicates",
@@ -405,6 +405,9 @@ mod undo {
         "tools.booleanSubtract",
         "tools.booleanIntersect",
         "tools.offsetShapes",
+        "tools.text",
+        "text.edit",
+        "edit.convertToPath",
     ];
     /// `edit.copy` only writes the session clipboard: it changes no document and records no history step.
     const NOT_UNDOABLE: [&str; 4] = ["file.new", "edit.undo", "edit.redo", "edit.copy"];
@@ -466,6 +469,19 @@ mod undo {
         let (mut s, _, _) = scene();
         let sel = b_id(&s);
         assert_undo_roundtrip(&mut s, "tools.offsetShapes", json!({ "ids": [sel], "distanceMm": 1.0 }));
+        // Text commands need the committed Hack fixture (fonts are host-dependent).
+        let hack = || std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../text/tests/fonts");
+        let (mut s, _, _) = scene();
+        s.set_font_dirs(vec![hack()]);
+        assert_undo_roundtrip(&mut s, "tools.text", json!({ "xMm": 0, "yMm": 0, "text": "HI", "family": "Hack" }));
+        let (mut s, _, _) = scene();
+        s.set_font_dirs(vec![hack()]);
+        let t = ids_of(&s.execute("tools.text", json!({ "xMm": 0, "yMm": 0, "text": "A", "family": "Hack" })).unwrap())[0];
+        assert_undo_roundtrip(&mut s, "text.edit", json!({ "id": t, "text": "WW" }));
+        let (mut s, _, _) = scene();
+        s.set_font_dirs(vec![hack()]);
+        let t = ids_of(&s.execute("tools.text", json!({ "xMm": 0, "yMm": 0, "text": "A", "family": "Hack" })).unwrap())[0];
+        assert_undo_roundtrip(&mut s, "edit.convertToPath", json!({ "ids": [t] }));
     }
 
     #[derive(Debug, Clone)]

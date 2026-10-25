@@ -55,7 +55,7 @@ fn parametric_corners(g: &Geom) -> Vec<Point> {
         Geom::Ellipse { rx, ry } => (rx.get(), ry.get()),
         Geom::Polygon { radius, .. } => (radius.get(), radius.get()),
         Geom::Bitmap(b) => (b.size_mm[0] / 2.0, b.size_mm[1] / 2.0),
-        Geom::Path(_) | Geom::Group(_) => return Vec::new(),
+        Geom::Path(_) | Geom::Group(_) | Geom::Text(_) => return Vec::new(),
     };
     vec![Point::new(-hx, -hy), Point::new(hx, -hy), Point::new(hx, hy), Point::new(-hx, hy)]
 }
@@ -239,6 +239,10 @@ pub(crate) fn path_stats(project: &Project, id: ObjectId, tol_mm: f64) -> Result
             (subpaths, subpaths > 0 && closes >= subpaths)
         }
         Geom::Rect { .. } | Geom::Ellipse { .. } | Geom::Polygon { .. } | Geom::Bitmap(_) => (1, true),
+        Geom::Text(t) => {
+            let subpaths = t.outline.elements().iter().filter(|e| matches!(e, PathEl::MoveTo(_))).count();
+            (subpaths, true)
+        }
         Geom::Group(c) => (c.len(), false),
     })
 }
