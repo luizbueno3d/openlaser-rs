@@ -1299,6 +1299,86 @@ fn a_new_drawn_shape_is_selected_and_shift_constrains_the_drag() {
 }
 
 #[test]
+fn polygon_drag_and_sides_field_produce_the_shape() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    h.get_by_label("Polygon").click();
+    h.run();
+    assert_eq!(h.state().ui.selected_tool, "Polygon");
+    // The Sides field arms the vertex count before the drag.
+    h.get_by_label("Sides").focus();
+    h.get_by_label("Sides").type_text("5");
+    h.event(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.run();
+    assert_eq!(h.state().ui.polygon_sides, 5);
+    // Centre-out drag: radius 10 straight right → rotateDeg ≈ -90° (first vertex at +X).
+    let (a, b) = (w2s(&h, [0.0, 0.0]), w2s(&h, [10.0, 0.0]));
+    drag_to(&mut h, a, b, egui::Modifiers::NONE);
+    let dispatched = &h.state().seam.dispatched;
+    let last = dispatched.iter().find(|(_, id, _)| id == "tools.polygon").expect("a polygon was dispatched");
+    assert_eq!(last.2["sides"], 5, "{:?}", last.2);
+    assert!((last.2["radiusMm"].as_f64().unwrap() - 10.0).abs() < 1e-4, "{:?}", last.2);
+    assert!((last.2["rotateDeg"].as_f64().unwrap() + 90.0).abs() < 0.5, "{:?}", last.2);
+    let id = h.state().session.active().unwrap().selection.ids[0];
+    let b = h.state().session.active().unwrap().project.bounds(&[id]).unwrap().unwrap();
+    // A radius-10 pentagon rotated -90° spans 18.09 mm across (the first vertex is at +X).
+    assert!((b.max[0] - b.min[0] - 18.09).abs() < 0.05, "{b:?}");
+    assert!(h.state().session.active().unwrap().project.world_polylines(id, 0.01).unwrap()[0].0.iter().any(|p| (p[0] - b.max[0]).abs() < 1e-3));
+    assert!(h.state().session.active().unwrap().project.shape(id).is_some_and(|s| matches!(s.geom, openlaser_doc::Geom::Polygon { sides: 5, .. })));
+}
+
+#[test]
+fn measure_drag_shows_the_segment_and_dispatches_nothing() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let count = h.state().seam.dispatched.len();
+    h.get_by_label("Measure").click();
+    h.run();
+    let (a, b) = (w2s(&h, [0.0, 0.0]), w2s(&h, [3.0, 4.0]));
+    drag_to(&mut h, a, b, egui::Modifiers::NONE);
+    let (from, to) = h.state().view.measure.expect("the measurement stays on screen");
+    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+    assert!((dx - 3.0).abs() < 1e-3 && (dy - 4.0).abs() < 1e-3, "{from:?} → {to:?}");
+    assert!(h.state().ui.status_message.contains("5.00 mm"), "{:?}", h.state().ui.status_message);
+    assert_eq!(h.state().seam.dispatched.len(), count, "measuring dispatches no command");
+    // Esc clears the measurement and returns to Select.
+    h.event(egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.run();
+    assert!(h.state().view.measure.is_none());
+    assert_eq!(h.state().ui.selected_tool, "Select");
+}
+
+#[test]
+fn group_paste_and_cut_go_through_the_real_engine() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    doc_with_rect(&mut h, 0.0, 0.0, 10.0, 10.0);
+    h.state_mut().session.execute_as(Origin::Human, "tools.rectangle", serde_json::json!({ "xMm": 20, "yMm": 0, "wMm": 5, "hMm": 5 })).unwrap();
+    h.state_mut().session.execute_as(Origin::Human, "edit.selectAll", serde_json::json!({})).unwrap();
+    h.run();
+    // Cmd+G groups through the shortcut path; the group is the selection.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::G);
+    h.run();
+    let sel = h.state().session.active().unwrap().selection.ids.clone();
+    assert_eq!(sel.len(), 1);
+    let gid = sel[0];
+    assert!(h.state().session.active().unwrap().project.shape(gid).is_some_and(|s| matches!(s.geom, openlaser_doc::Geom::Group(_))));
+    // Cmd+U releases the children; Cmd+C/X/V all reach the clipboard.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::U);
+    h.run();
+    assert_eq!(h.state().session.active().unwrap().selection.ids.len(), 2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::C);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "edit.selectNone", serde_json::json!({})).unwrap();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::V);
+    h.run();
+    let n = h.state().session.active().unwrap().project.shapes.len();
+    assert_eq!(n, 4, "two originals + the pasted two: {n}");
+}
+
+#[test]
 fn hidden_window_still_polls_while_active() {
     let mut h = harness();
     h.state_mut().seam.machine_state = Some(MachineState::Framing);

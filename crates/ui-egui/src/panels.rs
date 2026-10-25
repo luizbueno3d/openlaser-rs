@@ -446,6 +446,17 @@ impl OpenLaserApp {
                     self.execute_widget("arrange.transform", params);
                 }
             }
+            // The Polygon tool's side count, set before the drag as LightBurn's shape properties do.
+            if self.ui.selected_tool == "Polygon" {
+                caption(ui, "Sides");
+                let mut sides = f64::from(self.ui.polygon_sides);
+                let r = ui.add(egui::DragValue::new(&mut sides).speed(0.1).range(3.0..=64.0).max_decimals(0));
+                self.labeled(&r, egui::WidgetType::DragValue, "Sides", false);
+                let r = r.on_hover_text("The polygon's vertex count (3–64)");
+                if r.changed() && (3.0..=64.0).contains(&sides) {
+                    self.ui.polygon_sides = sides as u16;
+                }
+            }
         });
     }
 

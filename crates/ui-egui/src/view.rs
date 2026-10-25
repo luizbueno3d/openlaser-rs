@@ -16,7 +16,16 @@ const FIT_MARGIN: f64 = 1.05;
 
 /// The draw tools: (command id, tool label). Clicking the toolbar button or menu row only ARMS the tool; the
 /// canvas drag or clicks produce the command's parameters, like LightBurn.
-pub(crate) const DRAW_TOOLS: [(&str, &str); 3] = [("tools.rectangle", "Rectangle"), ("tools.ellipse", "Ellipse"), ("tools.drawLines", "Draw Lines")];
+/// The armed tools: (command id, tool label). Clicking the toolbar button or menu row only ARMS the tool; the
+/// canvas drag or clicks produce the command's parameters, like LightBurn. `tools.measure` is armed the same
+/// way but never dispatches — the measuring line is purely visual.
+pub(crate) const DRAW_TOOLS: [(&str, &str); 5] = [
+    ("tools.rectangle", "Rectangle"),
+    ("tools.ellipse", "Ellipse"),
+    ("tools.drawLines", "Draw Lines"),
+    ("tools.polygon", "Polygon"),
+    ("tools.measure", "Measure"),
+];
 
 /// Selection handle size on screen (points).
 const HANDLE_SIZE: f32 = 7.0;
@@ -50,6 +59,8 @@ pub(crate) struct CanvasView {
     pub last_canvas: Option<egui::Rect>,
     /// A move / scale / rotate drag on the selection (live ghost; one command on release).
     pub sel_drag: Option<SelectionDrag>,
+    /// The last measured segment (world mm): kept on screen until the next press, Esc or a tool change.
+    pub measure: Option<([f64; 2], [f64; 2])>,
     /// LightBurn's handle toggle: clicking an already-selected shape switches between scale and rotate
     /// handles. Any selection change resets this to scale handles.
     pub rotate_handles: bool,
@@ -340,11 +351,13 @@ impl OpenLaserApp {
             self.ui.selected_tool = "Select";
             self.view.draw_from = None;
             self.view.draw_points.clear();
+            self.view.measure = None;
             return;
         }
         if !armed {
             self.view.draw_from = None;
             self.view.draw_points.clear();
+            self.view.measure = None;
             return;
         }
         if hover.is_some() {
@@ -449,6 +462,88 @@ impl OpenLaserApp {
                     if !duplicate {
                         self.view.draw_points.push(view.screen_to_world(pos));
                     }
+                }
+            }
+            "Polygon" => {
+                // Centre-out drag: radius = distance, the drag angle points the first vertex (the model's
+                // polygon has its first vertex straight up, so rotateDeg = angle - 90°). Shift snaps to 15°.
+                if response.drag_started_by(egui::PointerButton::Primary) {
+                    self.view.draw_from = ui.input(|i| i.pointer.press_origin()).or_else(|| response.interact_pointer_pos());
+                }
+                let Some(from) = self.view.draw_from else { return };
+                let Some(to) = ui.input(|i| i.pointer.latest_pos()) else {
+                    self.view.draw_from = None;
+                    return;
+                };
+                let shift = ui.input(|i| i.modifiers.shift);
+                let (c, p) = (view.screen_to_world(from), view.screen_to_world(to));
+                let (dx, dy) = (p[0] - c[0], p[1] - c[1]);
+                let radius = dx.hypot(dy);
+                let mut rotate = dy.atan2(dx).to_degrees() - 90.0;
+                if shift {
+                    rotate = (rotate / 15.0).round() * 15.0;
+                }
+                let sides = self.ui.polygon_sides;
+                let outline: Vec<egui::Pos2> = (0..=sides)
+                    .map(|i| {
+                        let a = (90.0 + rotate).to_radians() + std::f64::consts::TAU * f64::from(i) / f64::from(sides);
+                        view.world_to_screen([c[0] + radius * a.cos(), c[1] + radius * a.sin()])
+                    })
+                    .collect();
+                painter.extend(egui::Shape::dashed_line(&outline, ghost, 4.0, 3.0));
+                self.ui.status_message = format!("Polygon: radius {radius:.2} mm, {sides} sides, rotate {rotate:+.1}°");
+                if response.drag_stopped() {
+                    if radius >= 0.01 {
+                        self.execute_widget(
+                            "tools.polygon",
+                            serde_json::json!({ "cxMm": c[0], "cyMm": c[1], "radiusMm": radius, "sides": sides, "rotateDeg": rotate }),
+                        );
+                    }
+                    finish(self);
+                }
+            }
+            "Measure" => {
+                // A press starts a new measurement (the previous one clears); release keeps it on screen.
+                if response.drag_started_by(egui::PointerButton::Primary) {
+                    self.view.draw_from = ui.input(|i| i.pointer.press_origin()).or_else(|| response.interact_pointer_pos());
+                    self.view.measure = None;
+                }
+                let shift = ui.input(|i| i.modifiers.shift);
+                // Shift snaps the segment to 15° directions.
+                let snap = |a: [f64; 2], b: [f64; 2]| -> [f64; 2] {
+                    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                    let deg = (dy.atan2(dx).to_degrees() / 15.0).round() * 15.0;
+                    [a[0] + dx.hypot(dy) * deg.to_radians().cos(), a[1] + dx.hypot(dy) * deg.to_radians().sin()]
+                };
+                let live = match (self.view.draw_from, ui.input(|i| i.pointer.latest_pos())) {
+                    (Some(from), Some(to)) => {
+                        let a = view.screen_to_world(from);
+                        let b = view.screen_to_world(to);
+                        Some((a, if shift { snap(a, b) } else { b }))
+                    }
+                    _ => None,
+                };
+                if response.drag_stopped()
+                    && let Some(from) = self.view.draw_from.take()
+                {
+                    let a = view.screen_to_world(from);
+                    let b = view.screen_to_world(ui.input(|i| i.pointer.latest_pos()).unwrap_or(from));
+                    self.view.measure = Some((a, if shift { snap(a, b) } else { b }));
+                }
+                let seg = live.or(self.view.measure);
+                if let Some((a, b)) = seg {
+                    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                    let (d, deg) = (dx.hypot(dy), dy.atan2(dx).to_degrees());
+                    painter.line_segment([view.world_to_screen(a), view.world_to_screen(b)], egui::Stroke::new(1.5, egui::Color32::from_rgb(90, 150, 255)));
+                    let text = format!("{d:.2} mm  dx {dx:+.2}  dy {dy:+.2}  {deg:+.1}°");
+                    painter.text(
+                        view.world_to_screen(b) + egui::vec2(8.0, -8.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        &text,
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::from_rgb(200, 210, 230),
+                    );
+                    self.ui.status_message = text;
                 }
             }
             _ => {}

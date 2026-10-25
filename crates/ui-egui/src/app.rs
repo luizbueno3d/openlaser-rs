@@ -27,6 +27,8 @@ pub struct UiState {
     pub live_framing_open: bool,
     pub live_style: FrameStyle,
     pub live_source: FrameSource,
+    /// The Polygon tool's vertex count (3..=64, LightBurn's shape properties default).
+    pub polygon_sides: u16,
     /// Numeric edits: keep the aspect ratio when W/H/W%/H% change.
     pub lock_ratio: bool,
     /// Numeric edits: which of the 9 points of the selection bounds XPos/YPos name (0 = top-left … 8 = bottom-right).
@@ -49,6 +51,7 @@ impl Default for UiState {
             live_framing_open: false,
             live_style: FrameStyle::Contour,
             live_source: FrameSource::Job,
+            polygon_sides: 6,
             lock_ratio: true,
             anchor: 4,
             machine_active: false,
@@ -466,6 +469,11 @@ impl OpenLaserApp {
             "edit.selectNone" => {
                 self.ui.selected_tool = "Select";
                 self.execute_widget(id, serde_json::json!({}));
+            }
+            "edit.paste" => {
+                // Paste lands at the canvas pointer (LightBurn); with no pointer over the canvas it offsets.
+                let params = self.ui.pointer_mm.map_or_else(|| serde_json::json!({}), |[x, y]| serde_json::json!({ "xMm": x, "yMm": y }));
+                self.execute_widget(id, params);
             }
             _ if crate::view::DRAW_TOOLS.iter().any(|(d, _)| *d == id) => {
                 // A draw tool is only armed; the canvas drag or clicks produce the command's mm parameters.
