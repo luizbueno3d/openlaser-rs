@@ -611,16 +611,9 @@ impl OpenLaserApp {
                 self.labeled(&r, egui::WidgetType::Button, label, false);
                 let r = if live { r.on_hover_text(*label) } else { r.on_disabled_hover_text(format!("{label}: {NOT_YET}")) };
                 if r.clicked() {
-                    if *id == "tools.select" {
-                        self.invoke_menu_command(ui.ctx(), id);
-                    } else if crate::view::DRAW_TOOLS.iter().any(|(d, _)| d == id) {
-                        // Draw tools only arm: the canvas drag or clicks produce the command's mm parameters.
-                        self.ui.selected_tool = label;
-                    } else {
-                        self.ui.selected_tool = label;
-                        self.frame_synthetic = self.services.human.frame_is_synthetic(ui.ctx());
-                        self.execute_widget(id, serde_json::Value::Null);
-                    }
+                    // Route every palette row through the one dispatcher: it knows which ids arm a canvas
+                    // tool and which execute, marks provenance, and applies the machine-active guard.
+                    self.invoke_menu_command(ui.ctx(), id);
                 }
             }
         });

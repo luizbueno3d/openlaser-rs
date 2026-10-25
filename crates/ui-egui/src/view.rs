@@ -500,19 +500,19 @@ impl OpenLaserApp {
                         edit.request_focus = false;
                         r.request_focus();
                     }
-                    // Commit triggers: Esc, click outside the editor, Cmd+Enter.
+                    // Commit triggers: Esc and Cmd+Enter. Clicks outside the canvas leave the editor open
+                    // (the options bar stays usable while typing); canvas clicks commit via `response` below.
                     if ui.input(|i| i.key_pressed(egui::Key::Escape)) || ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command) {
                         commit = true;
                     }
-                    if ui.input(|i| i.pointer.any_click())
-                        && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
-                        && !r.rect.contains(pos)
-                    {
-                        commit = true;
+                    // If nothing else holds keyboard focus (a button/panel click), take it back so typing
+                    // is never dead. A focused text field (e.g. the font box) is left alone.
+                    if !r.has_focus() && !ui.ctx().egui_wants_keyboard_input() {
+                        r.request_focus();
                     }
                 });
             });
-            // Clicking the canvas itself (outside the Area's own rect) also commits — but not the opening click.
+            // Clicking the canvas commits — but not the click that opened the editor this frame.
             if !just_opened && response.clicked_by(egui::PointerButton::Primary) {
                 commit = true;
             }
@@ -520,29 +520,12 @@ impl OpenLaserApp {
                 ui.input_mut(|i| {
                     i.events.retain(|e| !matches!(e, egui::Event::Key { key: egui::Key::Escape, pressed: true, .. }));
                 });
-                if !edit.buffer.trim().is_empty() {
-                    let d = &self.ui.text_defaults;
-                    if let Some(id) = edit.editing {
-                        let mut p = serde_json::json!({ "id": id, "text": edit.buffer, "align": d.align_str(), "heightMm": d.height, "letterSpacingMm": d.letter_spacing, "lineSpacing": d.line_spacing });
-                        if let Some(map) = p.as_object_mut() {
-                            if !d.family.is_empty() {
-                                map.insert("family".to_owned(), d.family.clone().into());
-                            }
-                            if !d.style.is_empty() {
-                                map.insert("style".to_owned(), d.style.clone().into());
-                            }
-                        }
-                        self.execute_widget("text.edit", p);
-                    } else {
-                        self.execute_widget("tools.text", d.create_params(edit.anchor, &edit.buffer));
-                    }
-                }
-                self.ui.selected_tool = "Select";
+                self.commit_text_editor(&edit);
+                // The tool is left as-is: a fresh text keeps Edit Text armed for the next one (LightBurn),
+                // a re-edit keeps whichever tool opened it (Select, or Edit Text for an armed click).
             } else if self.ui.selected_tool != "Edit Text" && edit.editing.is_none() {
                 // A tool change commits too.
-                if !edit.buffer.trim().is_empty() {
-                    self.execute_widget("tools.text", self.ui.text_defaults.create_params(edit.anchor, &edit.buffer));
-                }
+                self.commit_text_editor(&edit);
             } else {
                 self.ui.text = Some(edit);
             }
@@ -721,12 +704,21 @@ impl OpenLaserApp {
                 }
             }
             "Edit Text" => {
-                // A canvas click opens the inline editor at that point (LightBurn's click-to-type).
-                if response.clicked_by(egui::PointerButton::Primary)
+                // Esc while armed (no editor open) disarms back to Select.
+                if self.ui.text.is_none() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.ui.selected_tool = "Select";
+                } else if self.ui.text.is_none()
+                    && response.clicked_by(egui::PointerButton::Primary)
                     && let Some(pos) = response.interact_pointer_pos()
                 {
+                    // Clicking an existing text re-edits it; anywhere else opens a fresh editor. The
+                    // `ui.text.is_none()` guard leaves canvas clicks to the editor's commit check below —
+                    // without it this branch would replace the open editor and silently drop its buffer.
                     let world = view.screen_to_world(pos);
-                    self.ui.text = Some(crate::app::TextUi { anchor: world, buffer: String::new(), editing: None, request_focus: true });
+                    let reedited = self.hit_shape(view, world).is_some_and(|id| self.open_text_editor_for(id));
+                    if !reedited {
+                        self.ui.text = Some(crate::app::TextUi { anchor: world, buffer: String::new(), editing: None, request_focus: true });
+                    }
                 }
             }
             "Measure" => {
@@ -1304,25 +1296,10 @@ impl OpenLaserApp {
         // Double-click a text shape: reopen the inline editor (commit becomes text.edit).
         if response.double_clicked_by(egui::PointerButton::Primary)
             && let Some(pos) = response.interact_pointer_pos()
+            && let Some(id) = self.hit_shape(view, view.screen_to_world(pos))
+            && self.open_text_editor_for(id)
         {
-            let world = view.screen_to_world(pos);
-            if let Some(id) = self.hit_shape(view, world)
-                && let Some(openlaser_doc::Geom::Text(t)) = self.project().and_then(|p| p.shape(id).map(|sh| sh.geom.clone()))
-            {
-                let d = &mut self.ui.text_defaults;
-                d.family = t.family.clone();
-                d.style = t.style.clone();
-                d.height = t.height_mm;
-                d.letter_spacing = t.letter_spacing_mm;
-                d.line_spacing = t.line_spacing;
-                d.align = match t.align {
-                    openlaser_types::TextAlign::Left => 0,
-                    openlaser_types::TextAlign::Center => 1,
-                    openlaser_types::TextAlign::Right => 2,
-                };
-                self.ui.text = Some(crate::app::TextUi { anchor: world, buffer: t.text.clone(), editing: Some(id.0), request_focus: true });
-                return;
-            }
+            return;
         }
         // Esc cancels a drag or marquee in flight: no dispatch, the selection is kept (logic skips
         // edit.selectNone while a drag exists).

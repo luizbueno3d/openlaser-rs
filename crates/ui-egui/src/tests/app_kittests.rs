@@ -2618,3 +2618,89 @@ fn camera_underlay_paints_only_live_and_calibrated() {
     h.step();
     assert!(!h.state().seam.camera_overlay, "a cleared calibration must not leave a stale map");
 }
+
+#[test]
+fn text_editor_canvas_click_commits_not_discards() {
+    // Regression: canvas_draw ran before the editor block, so a canvas click replaced the open editor
+    // with a fresh empty one and the typed buffer was silently dropped.
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../text/tests/fonts");
+    h.state_mut().session.set_font_dirs(vec![dir]);
+    h.get_by_label("Edit Text").click();
+    h.run();
+    let p0 = w2s(&h, [0.0, 0.0]);
+    click(&mut h, p0);
+    h.run();
+    h.get_by_label("Text").focus();
+    h.get_by_label("Text").type_text("HI");
+    // Click elsewhere on the canvas: the text must commit, not vanish.
+    let p1 = w2s(&h, [40.0, 40.0]);
+    click(&mut h, p1);
+    h.run();
+    let doc = h.state().session.active().unwrap();
+    assert_eq!(doc.project.shapes.len(), 1, "the typed text became a shape, not a discarded buffer");
+    assert!(matches!(doc.project.shapes[0].geom, openlaser_doc::Geom::Text(_)));
+    // The tool stays armed for the next text; a further click opens a fresh editor.
+    assert_eq!(h.state().ui.selected_tool, "Edit Text");
+    let p2 = w2s(&h, [60.0, 40.0]);
+    click(&mut h, p2);
+    h.run();
+    assert!(h.state().ui.text.is_some(), "the next click opened a fresh editor");
+}
+
+#[test]
+fn edit_text_armed_click_on_a_text_reedits_it() {
+    // With Edit Text armed, clicking an existing text opens the re-edit editor (LightBurn), anchored at
+    // the shape's position — not a fresh empty editor at the click point.
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../text/tests/fonts");
+    h.state_mut().session.set_font_dirs(vec![dir]);
+    let v =
+        h.state_mut().session.execute_as(Origin::Human, "tools.text", serde_json::json!({ "xMm": 0.0, "yMm": 0.0, "text": "HI", "heightMm": 10.0 })).unwrap();
+    let id = openlaser_types::ObjectId(v["ids"][0].as_u64().unwrap());
+    h.run();
+    // A point that is guaranteed to be on a glyph outline.
+    let pt = h.state().session.active().unwrap().project.world_polylines(id, 0.02).unwrap()[0].0[0];
+    h.get_by_label("Edit Text").click();
+    h.run();
+    let p3 = w2s(&h, pt);
+    click(&mut h, p3);
+    h.run();
+    let t = h.state().ui.text.as_ref().unwrap();
+    assert_eq!(t.editing, Some(id.0), "the click re-edited the text");
+    assert_eq!(t.buffer, "HI");
+    assert!(t.anchor[0].abs() < 1e-9 && t.anchor[1].abs() < 1e-9, "the ghost anchors at the shape, not the click: {:?}", t.anchor);
+}
+
+#[test]
+fn edit_text_rearm_commits_instead_of_dropping() {
+    // Re-clicking the tool (or pressing its shortcut) while an editor is open must commit the buffer,
+    // not drop it.
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../text/tests/fonts");
+    h.state_mut().session.set_font_dirs(vec![dir]);
+    h.get_by_label("Edit Text").click();
+    h.run();
+    let p4 = w2s(&h, [0.0, 0.0]);
+    click(&mut h, p4);
+    h.run();
+    h.get_by_label("Text").focus();
+    h.get_by_label("Text").type_text("HI");
+    h.run();
+    assert_eq!(h.state().ui.text.as_ref().unwrap().buffer, "HI", "the buffer held the typed text");
+    h.get_by_label("Edit Text").click();
+    h.run();
+    assert_eq!(h.state().ui.selected_tool, "Edit Text", "still armed");
+    assert_eq!(h.state().session.active().unwrap().project.shapes.len(), 1, "the buffer committed");
+    // Esc while armed (no editor open) disarms back to Select.
+    h.state_mut().ui.text = None;
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(h.state().ui.selected_tool, "Select");
+}

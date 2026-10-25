@@ -799,7 +799,10 @@ impl OpenLaserApp {
                 }
             }
             "tools.text" => {
-                self.ui.text = None; // arming closes any open editor without committing via the tool click
+                // Re-arming while an editor is open commits its buffer instead of dropping it.
+                if let Some(edit) = self.ui.text.take() {
+                    self.commit_text_editor(&edit);
+                }
                 self.ui.selected_tool = "Edit Text";
             }
             "tools.editNodes" => {
@@ -822,6 +825,52 @@ impl OpenLaserApp {
             "window.resetLayout" => self.dock = crate::dock::default_layout(),
             _ => self.execute_widget(id, serde_json::Value::Null),
         }
+    }
+
+    /// Commit a closing text editor: `text.edit` when re-editing a shape, `tools.text` for a new text.
+    /// An empty buffer dispatches nothing.
+    pub(crate) fn commit_text_editor(&mut self, edit: &TextUi) {
+        if edit.buffer.trim().is_empty() {
+            return;
+        }
+        let d = &self.ui.text_defaults;
+        if let Some(id) = edit.editing {
+            let mut p = serde_json::json!({ "id": id, "text": edit.buffer, "align": d.align_str(), "heightMm": d.height, "letterSpacingMm": d.letter_spacing, "lineSpacing": d.line_spacing });
+            if let Some(map) = p.as_object_mut() {
+                if !d.family.is_empty() {
+                    map.insert("family".to_owned(), d.family.clone().into());
+                }
+                if !d.style.is_empty() {
+                    map.insert("style".to_owned(), d.style.clone().into());
+                }
+            }
+            self.execute_widget("text.edit", p);
+        } else {
+            self.execute_widget("tools.text", d.create_params(edit.anchor, &edit.buffer));
+        }
+    }
+
+    /// Open the inline editor re-editing text shape `id`: the options bar loads the shape's settings and
+    /// the ghost anchors at the shape's position (not the click point). False when `id` is not a text.
+    pub(crate) fn open_text_editor_for(&mut self, id: openlaser_types::ObjectId) -> bool {
+        let Some(project) = self.project() else { return false };
+        let Some(shape) = project.shape(id) else { return false };
+        let openlaser_doc::Geom::Text(t) = &shape.geom else { return false };
+        let t = t.clone();
+        let origin = project.world_transform(id).ok().flatten().map(|xf| xf * openlaser_geom::Point::new(0.0, 0.0)).map(|p| [p.x, p.y]).unwrap_or([0.0, 0.0]);
+        let d = &mut self.ui.text_defaults;
+        d.family = t.family.clone();
+        d.style = t.style.clone();
+        d.height = t.height_mm;
+        d.letter_spacing = t.letter_spacing_mm;
+        d.line_spacing = t.line_spacing;
+        d.align = match t.align {
+            openlaser_types::TextAlign::Left => 0,
+            openlaser_types::TextAlign::Center => 1,
+            openlaser_types::TextAlign::Right => 2,
+        };
+        self.ui.text = Some(TextUi { anchor: origin, buffer: t.text.clone(), editing: Some(id.0), request_focus: true });
+        true
     }
 
     pub(crate) fn show_panel(&mut self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
@@ -1162,7 +1211,7 @@ impl eframe::App for OpenLaserApp {
         self.frame_synthetic = self.services.human.frame_is_synthetic(ctx);
         self.poll_session();
         self.drain_control(ctx);
-        let text_focus = ctx.egui_wants_keyboard_input();
+        let text_focus = ctx.egui_wants_keyboard_input() || self.ui.text.is_some();
         let table = crate::shortcuts::table();
         let fired = ctx.input_mut(|input| crate::shortcuts::take_pressed(input, &table, text_focus));
         for id in fired {
