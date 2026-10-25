@@ -124,3 +124,12 @@ fn layout_is_deterministic() {
     let run = || layout(&font, "Hello\nWorld", 12.5, 0.5, 1.2, openlaser_types::TextAlign::Left).unwrap();
     assert_eq!(format!("{:?}", run()), format!("{:?}", run()));
 }
+
+#[test]
+fn a_background_warm_builds_the_same_index() {
+    let warmed = fixture_lib();
+    warmed.warm_in_background();
+    // A query during or after the background scan waits for it and sees exactly what a synchronous scan finds.
+    assert_eq!(warmed.families(), fixture_lib().families());
+    assert!(warmed.families().iter().any(|(family, _)| family == "Hack"));
+}

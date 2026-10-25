@@ -68,23 +68,34 @@ pub struct FontEntry {
 #[derive(Debug)]
 pub struct FontLibrary {
     dirs: Vec<PathBuf>,
-    index: std::sync::OnceLock<Vec<FontEntry>>,
+    /// Shared so [`FontLibrary::warm_in_background`] can build it on another thread.
+    index: std::sync::Arc<std::sync::OnceLock<Vec<FontEntry>>>,
 }
 
 impl FontLibrary {
     /// The platform directories plus `OPENLASER_FONT_DIRS`.
     pub fn new() -> Self {
-        FontLibrary { dirs: default_dirs(), index: std::sync::OnceLock::new() }
+        FontLibrary { dirs: default_dirs(), index: std::sync::Arc::default() }
     }
 
     /// An index over exactly these directories (tests point it at the fixture).
     pub fn with_dirs(dirs: Vec<PathBuf>) -> Self {
-        FontLibrary { dirs, index: std::sync::OnceLock::new() }
+        FontLibrary { dirs, index: std::sync::Arc::default() }
     }
 
     /// Discard the index and face caches; the next query rescans.
     pub fn rescan(&mut self) {
-        self.index = std::sync::OnceLock::new();
+        self.index = std::sync::Arc::default();
+    }
+
+    /// Builds the index on a background thread, so the first text the user places does not wait for the scan
+    /// (a cold scan of a Mac's ~800 MB of system fonts takes over a second). A query that arrives while the scan
+    /// runs waits for it; if the thread cannot start, the first query scans as before.
+    pub fn warm_in_background(&self) {
+        let (index, dirs) = (std::sync::Arc::clone(&self.index), self.dirs.clone());
+        let _ = std::thread::Builder::new().name("openlaser-fonts".into()).spawn(move || {
+            index.get_or_init(|| scan(&dirs));
+        });
     }
 
     /// The discovered faces, sorted by family, weight, italic.

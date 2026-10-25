@@ -453,6 +453,11 @@ impl Session {
         &self.prefs
     }
 
+    /// Starts building the font index in the background (the GUI calls this at launch).
+    pub fn warm_fonts(&self) {
+        self.fonts.warm_in_background();
+    }
+
     /// The font index (built on first use).
     pub fn fonts(&self) -> &openlaser_text::FontLibrary {
         &self.fonts

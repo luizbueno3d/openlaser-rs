@@ -351,6 +351,8 @@ impl OpenLaserApp {
                 self.set_status(format!("{}: {e}", path.display()));
             }
         }
+        // The font index takes over a second to build cold; start it now so the first text does not wait.
+        self.session.warm_fonts();
         // As in LightBurn, the window always opens on a document: an empty one when no file was given (or none
         // opened), so the draw and edit tools work at once.
         if self.session.active().is_none()
