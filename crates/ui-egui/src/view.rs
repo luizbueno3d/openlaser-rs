@@ -323,7 +323,7 @@ impl OpenLaserApp {
 
         // Zoom to fit, at the canvas corner.
         let button = egui::Rect::from_min_size(canvas.right_bottom() - egui::vec2(34.0, 30.0), egui::vec2(28.0, 24.0));
-        let fit_response = ui.put(button, egui::Button::image(crate::panels::icon_image("maximize")));
+        let fit_response = ui.put(button, egui::Button::image(crate::panels::icon_image("maximize", ui)));
         self.labeled(&fit_response, egui::WidgetType::Button, "Zoom to fit", false);
         if fit_response.on_hover_text("Zoom to fit (frame the field)").clicked() {
             self.view.fit();

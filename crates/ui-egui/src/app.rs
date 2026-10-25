@@ -234,6 +234,13 @@ impl OpenLaserApp {
                 self.set_status(format!("{}: {e}", path.display()));
             }
         }
+        // As in LightBurn, the window always opens on a document: an empty one when no file was given (or none
+        // opened), so the draw and edit tools work at once.
+        if self.session.active().is_none()
+            && let Err(e) = self.session.execute_as(Origin::Human, "file.new", serde_json::json!({}))
+        {
+            self.set_status(format!("New document: {e}"));
+        }
     }
 
     pub fn session(&self) -> &Session {

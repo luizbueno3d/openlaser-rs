@@ -15,7 +15,14 @@ pub(crate) const NOT_YET: &str = "Not in OpenLaser yet";
 pub(crate) const FILES_WHILE_ACTIVE: &str = "Stop the active frame or job before opening, importing or saving files.";
 
 /// Lucide icons (ISC, `assets/icons`, ATTRIBUTION.md), recoloured white and tinted by egui.
-pub(crate) fn icon_image(name: &str) -> egui::Image<'static> {
+/// A toolbar icon, tinted with the theme's text colour. The SVGs are rasterised white, and the tint multiplies,
+/// so the icon matches the theme (untinted white icons look disabled on the light theme). A disabled button
+/// still fades it.
+pub(crate) fn icon_image(name: &str, ui: &egui::Ui) -> egui::Image<'static> {
+    icon_image_white(name).tint(ui.visuals().widgets.inactive.fg_stroke.color)
+}
+
+fn icon_image_white(name: &str) -> egui::Image<'static> {
     static ICONS: std::sync::OnceLock<craft_ui::icons::SvgIconSet> = std::sync::OnceLock::new();
     let icons = ICONS.get_or_init(|| {
         craft_ui::icons::SvgIconSet::new(
@@ -332,7 +339,7 @@ impl OpenLaserApp {
     fn toolbar_button(&mut self, ui: &mut egui::Ui, label: &str, id: &str, icon: &str) {
         let (enabled, reason) = self.toolbar_state(id);
         let selected = id == "view.pan" && self.ui.selected_tool == "Pan";
-        let response = ui.add_enabled(enabled, egui::Button::image(icon_image(icon)).selected(selected).min_size(BUTTON));
+        let response = ui.add_enabled(enabled, egui::Button::image(icon_image(icon, ui)).selected(selected).min_size(BUTTON));
         self.labeled(&response, egui::WidgetType::Button, label, false);
         let response = match reason {
             Some(reason) => response.on_disabled_hover_text(format!("{label}: {reason}")),
@@ -411,7 +418,7 @@ impl OpenLaserApp {
             for (n, (label, key, unit)) in fields.iter().enumerate() {
                 if n == 4 {
                     let icon = if self.ui.lock_ratio { "lock" } else { "lock-open" };
-                    let r = ui.add(egui::Button::image(icon_image(icon)).selected(self.ui.lock_ratio));
+                    let r = ui.add(egui::Button::image(icon_image(icon, ui)).selected(self.ui.lock_ratio));
                     self.labeled(&r, egui::WidgetType::Checkbox, "Lock aspect ratio", false);
                     if r.on_hover_text("Lock the aspect ratio").clicked() {
                         self.ui.lock_ratio = !self.ui.lock_ratio;
@@ -451,7 +458,7 @@ impl OpenLaserApp {
                     ui.separator();
                 }
                 let live = *id == "tools.select" || command_live(id);
-                let r = ui.add_enabled(live, egui::Button::image(icon_image(icon)).selected(self.ui.selected_tool == *label).min_size(BUTTON));
+                let r = ui.add_enabled(live, egui::Button::image(icon_image(icon, ui)).selected(self.ui.selected_tool == *label).min_size(BUTTON));
                 self.labeled(&r, egui::WidgetType::Button, label, false);
                 let r = if live { r.on_hover_text(*label) } else { r.on_disabled_hover_text(format!("{label}: {NOT_YET}")) };
                 if r.clicked() {
@@ -476,7 +483,7 @@ impl OpenLaserApp {
         ui.horizontal(|ui| {
             for (label, id, icon) in ARRANGE_TOOLS {
                 let live = command_live(id);
-                let r = ui.add_enabled(live && !self.ui.machine_active, egui::Button::image(icon_image(icon)).min_size(BUTTON));
+                let r = ui.add_enabled(live && !self.ui.machine_active, egui::Button::image(icon_image(icon, ui)).min_size(BUTTON));
                 self.labeled(&r, egui::WidgetType::Button, label, false);
                 let r = if live {
                     r.on_hover_text(*label).on_disabled_hover_text("Edits are locked while a machine is active.")

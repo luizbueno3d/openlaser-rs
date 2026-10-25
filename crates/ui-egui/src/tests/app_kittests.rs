@@ -1185,6 +1185,16 @@ fn clicking_selected_toggles_rotate_handles_and_rotate_drag_commits() {
 }
 
 #[test]
+fn the_window_opens_on_an_empty_document() {
+    // Regression: launching with no file left the session without a document, so every edit tool was disabled.
+    let mut h = harness();
+    assert!(h.state().session.active().is_none());
+    h.state_mut().open_startup_files(&[]);
+    assert!(h.state().session.active().is_some(), "an empty document is open");
+    assert!(h.state_mut().session.execute_as(Origin::Human, "tools.rectangle", serde_json::json!({ "xMm": 0, "yMm": 0, "wMm": 5, "hMm": 5 })).is_ok());
+}
+
+#[test]
 fn clicking_an_unselected_shape_inside_the_box_selects_it() {
     // Regression: a stroke hit on another shape inside the selection's box toggled the handles instead.
     let mut h = with_human(HumanFrames);
@@ -1855,6 +1865,10 @@ fn layout_screenshot() {
         .with_step_dt(0.05)
         .renderer(crate::screenshot::tests_raster::Recorder(Arc::clone(&textures)))
         .build_eframe(move |cc| OpenLaserApp::new(cc, session, services));
+    // OPENLASER_LAYOUT_THEME=light renders the light theme (the default render is dark).
+    if std::env::var("OPENLASER_LAYOUT_THEME").is_ok_and(|t| t == "light") {
+        h.ctx.set_theme(egui::Theme::Light);
+    }
     h.state_mut().seam.project = Some(used_project());
     ready_plan(&mut h);
     h.run();
