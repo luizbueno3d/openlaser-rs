@@ -37,8 +37,10 @@ pub struct UiState {
     pub offset: Option<OffsetUi>,
     /// The inline text editor: `Some` while a canvas text box is open (new text when `editing` is `None`,
     /// re-editing an existing shape when it is `Some(id)`).
-    /// The Trace Image dialog's values (remembered between opens, like the offset dialog).
+    /// The Trace Image dialog while open.
     pub trace: Option<TraceUi>,
+    /// The last-used Trace Image values; seeds the next dialog open.
+    pub trace_defaults: Option<TraceUi>,
     /// The Edit Nodes state while the tool is armed.
     pub nodes: Option<NodeEditUi>,
     pub text: Option<TextUi>,
@@ -106,6 +108,8 @@ pub struct NodeEditUi {
     pub sel: Vec<(usize, usize)>,
     /// An in-flight drag: moving the selected nodes (the last pointer world pos) or one handle.
     pub drag: Option<NodeDrag>,
+    /// The shape is locked: the nodes draw greyed and no edit can start.
+    pub locked: bool,
     /// A marquee in progress (world-space start).
     pub marquee: Option<[f64; 2]>,
 }
@@ -138,6 +142,18 @@ pub struct TraceUi {
     /// The last preview polylines in the bitmap's object space, and when it was computed (debounce).
     pub preview: Option<Vec<Vec<[f64; 2]>>>,
     pub preview_at: Option<std::time::Instant>,
+    /// A preview trace is running on the worker; the current `pending` request replaces older ones.
+    pub in_flight: bool,
+    /// Settings changed since the last request was sent (they are re-debounced and re-sent).
+    pub dirty: bool,
+    /// The worker's input channel and its request generation (stale results are discarded).
+    pub tx: Option<std::sync::mpsc::Sender<TraceJob>>,
+    pub rx: Option<std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<TraceResult>>>>,
+    pub request_seq: u64,
+    /// Count of worker runs, for tests (the preview must never trace on the UI thread).
+    pub runs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Latest-wins/stale-discard bookkeeping for worker results.
+    pub pending: TracePending,
 }
 
 impl TraceUi {
@@ -165,6 +181,44 @@ impl TraceUi {
     }
 }
 
+/// What one worker trace needs: the bitmap pixels plus the settings at request time.
+#[derive(Debug)]
+pub struct TraceJob {
+    pub seq: u64,
+    pub image_id: u64,
+    pub gray: std::sync::Arc<[u8]>,
+    pub px: [u32; 2],
+    pub size_mm: [f64; 2],
+    pub opts: openlaser_geom::trace::TraceOptions,
+    pub runs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[derive(Debug)]
+pub struct TraceResult {
+    pub seq: u64,
+    pub image_id: u64,
+    pub polys: Vec<Vec<[f64; 2]>>,
+}
+
+/// Latest-wins result filtering for the trace worker, kept pure for tests: a result is accepted only when
+/// it matches the newest request (seq) for the same image — anything older or for another image is stale.
+#[derive(Debug, Default, Clone)]
+pub struct TracePending {
+    pub newest: Option<(u64, u64)>, // (seq, image_id)
+}
+
+impl TracePending {
+    /// Record a sent request.
+    pub fn sent(&mut self, seq: u64, image_id: u64) {
+        self.newest = Some((seq, image_id));
+    }
+
+    /// A result counts only when it is the newest for the same image.
+    pub fn accept(&self, seq: u64, image_id: u64) -> bool {
+        self.newest == Some((seq, image_id))
+    }
+}
+
 impl Default for TraceUi {
     fn default() -> Self {
         TraceUi {
@@ -177,6 +231,13 @@ impl Default for TraceUi {
             delete_image: false,
             preview: None,
             preview_at: None,
+            in_flight: false,
+            dirty: false,
+            tx: None,
+            rx: None,
+            request_seq: 0,
+            runs: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pending: TracePending::default(),
         }
     }
 }
@@ -249,6 +310,7 @@ impl Default for UiState {
             lock_ratio: true,
             offset: None,
             trace: None,
+            trace_defaults: None,
             nodes: None,
             text: None,
             text_defaults: TextDefaults::default(),
@@ -673,16 +735,16 @@ impl OpenLaserApp {
             }
             "tools.offsetShapes" => self.ui.offset = Some(self.ui.offset.unwrap_or_default()),
             "tools.traceImage" => {
-                // Open the dialog only on a single bitmap target; otherwise say why.
-                let sel = self.selection();
-                let bitmap = sel.first().filter(|_| sel.len() == 1).and_then(|id| {
-                    self.project().and_then(|p| if matches!(p.shape(*id).map(|s| &s.geom), Some(openlaser_doc::Geom::Bitmap(_))) { Some(id.0) } else { None })
-                });
-                match bitmap {
+                // Open the dialog only on a single bitmap target; otherwise say why. Agents can still
+                // dispatch the engine command by `id` — this gate is only the GUI's dialog.
+                match self.trace_bitmap_id() {
                     Some(id) => {
-                        let mut t = self.ui.trace.clone().unwrap_or_default();
+                        let mut t = self.ui.trace_defaults.clone().unwrap_or_default();
                         t.id = id;
                         t.preview = None;
+                        t.preview_at = None;
+                        t.in_flight = false;
+                        t.dirty = false;
                         self.ui.trace = Some(t);
                     }
                     None => self.set_status("Select one image to trace."),
@@ -751,6 +813,49 @@ impl OpenLaserApp {
             return Some(project);
         }
         self.session.active().map(|doc| doc.project.as_ref())
+    }
+
+    /// The selected bitmap's id when exactly one is selected — the Trace Image dialog's target.
+    pub(crate) fn trace_bitmap_id(&self) -> Option<u64> {
+        let sel = self.selection();
+        sel.first().filter(|_| sel.len() == 1).and_then(|id| {
+            self.project().and_then(|p| if matches!(p.shape(*id).map(|s| &s.geom), Some(openlaser_doc::Geom::Bitmap(_))) { Some(id.0) } else { None })
+        })
+    }
+
+    /// Whether the Trace Image button/menu row may run (exactly one image selected).
+    pub(crate) fn trace_target(&self) -> bool {
+        self.trace_bitmap_id().is_some()
+    }
+
+    /// One worker thread owned by the open dialog: it takes the LATEST queued request only — a newer send
+    /// replaces the queued one while it is busy, so at most one job is in flight and it is always current.
+    pub(crate) fn spawn_trace_worker() -> (std::sync::mpsc::Sender<TraceJob>, std::sync::mpsc::Receiver<TraceResult>) {
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<TraceJob>();
+        let (res_tx, res_rx) = std::sync::mpsc::channel::<TraceResult>();
+        std::thread::spawn(move || {
+            for first in req_rx.iter() {
+                let mut job = first;
+                while let Ok(newer) = req_rx.try_recv() {
+                    job = newer;
+                }
+                job.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let polys = openlaser_geom::trace::trace_bez(&job.gray, job.px, &job.opts)
+                    .ok()
+                    .and_then(|mut path| {
+                        let (w, h) = (job.size_mm[0], job.size_mm[1]);
+                        let (pw, ph) = (f64::from(job.px[0]), f64::from(job.px[1]));
+                        path.apply_affine(openlaser_doc::Affine::new([w / pw, 0.0, 0.0, -h / ph, -w / 2.0, h / 2.0]));
+                        openlaser_geom::flatten(&path, 0.01).ok()
+                    })
+                    .map(|polys| polys.into_iter().map(|p| p.0).collect())
+                    .unwrap_or_default();
+                if res_tx.send(TraceResult { seq: job.seq, image_id: job.image_id, polys }).is_err() {
+                    return;
+                }
+            }
+        });
+        (req_tx, res_rx)
     }
 
     pub(crate) fn selection(&self) -> Vec<openlaser_types::ObjectId> {

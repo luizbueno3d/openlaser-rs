@@ -448,36 +448,32 @@ impl OpenLaserApp {
             }
         }
     }
-    /// The Trace Image dialog: LightBurn-style options with a live ghost on the canvas. The preview is the
-    /// same geometry the command commits — recomputed at most every 150 ms so a big image never stalls the UI.
+    /// The Trace Image dialog: LightBurn-style options with a live ghost on the canvas. Every preview trace
+    /// runs on a worker thread (std::thread + channels): at most one job in flight, a newer request replaces
+    /// the queued one (latest wins), stale results are dropped, and a "tracing…" hint shows while it works.
+    /// Values persist on `ui.trace_defaults` when the dialog closes.
     fn trace_dialog(&mut self, ctx: &egui::Context) {
-        let Some(t0) = self.ui.trace.clone() else { return };
-        let mut t = t0.clone();
-        // Recompute the preview when values changed since the last run and the debounce has elapsed.
-        let stale = t.preview_at.is_none()
-            || (t0.threshold != t.threshold
-                || t0.ignore_less_than != t.ignore_less_than
-                || t0.smoothness != t.smoothness
-                || t0.optimize != t.optimize
-                || t0.invert != t.invert);
-        let _ = stale;
-        if t.preview_at.is_none_or(|at| at.elapsed() > std::time::Duration::from_millis(150)) {
-            let bitmap = self.project().and_then(|p| {
-                p.shape(openlaser_types::ObjectId(t.id)).and_then(|sh| if let openlaser_doc::Geom::Bitmap(b) = &sh.geom { Some(b.clone()) } else { None })
-            });
-            if let Some(b) = bitmap {
-                let opts = t.geom_opts();
-                if let Ok(path) = openlaser_geom::trace::trace_bez(&b.gray, b.px, &opts) {
-                    let (w, h) = (b.size_mm[0], b.size_mm[1]);
-                    let (pw, ph) = (b.px[0] as f64, b.px[1] as f64);
-                    let xform = openlaser_doc::Affine::new([w / pw, 0.0, 0.0, -h / ph, -w / 2.0, h / 2.0]);
-                    let mut object = path;
-                    object.apply_affine(xform);
-                    t.preview = openlaser_geom::flatten(&object, 0.01).ok().map(|polys| polys.into_iter().map(|p| p.0).collect());
+        let Some(mut t) = self.ui.trace.clone() else { return };
+        // Worker channel on first open.
+        if t.tx.is_none() {
+            let (tx, rx) = OpenLaserApp::spawn_trace_worker();
+            t.tx = Some(tx);
+            t.rx = Some(std::sync::Arc::new(std::sync::Mutex::new(rx)));
+        }
+        // Collect a finished result; drop it when it is stale (older settings seq or another image).
+        if let Some(rx) = &t.rx {
+            let mut got = None;
+            while let Some(res) = rx.lock().ok().and_then(|r| r.try_recv().ok()) {
+                got = Some(res);
+            }
+            if let Some(res) = got {
+                t.in_flight = false;
+                if t.pending.accept(res.seq, res.image_id) {
+                    t.preview = Some(res.polys);
                 }
             }
-            t.preview_at = Some(std::time::Instant::now());
         }
+        let before = (t.threshold, t.ignore_less_than, t.smoothness, t.optimize, t.invert);
         let mut open = true;
         let mut ok = false;
         let mut cancel = false;
@@ -508,6 +504,9 @@ impl OpenLaserApp {
             self.labeled(&r, egui::WidgetType::Checkbox, "Invert", false);
             let r = ui.checkbox(&mut t.delete_image, "Delete image after tracing");
             self.labeled(&r, egui::WidgetType::Checkbox, "Delete image after tracing", false);
+            if t.in_flight {
+                ui.small("tracing…");
+            }
             ui.horizontal(|ui| {
                 let r = ui.button("OK");
                 self.labeled(&r, egui::WidgetType::Button, "OK", false);
@@ -521,12 +520,50 @@ impl OpenLaserApp {
                 }
             });
         });
+        // Debounce a change then send it; the worker drops superseded requests itself.
+        if before != (t.threshold, t.ignore_less_than, t.smoothness, t.optimize, t.invert) || t.preview_at.is_none() {
+            t.dirty = true;
+            t.preview_at = Some(std::time::Instant::now());
+        }
+        if t.dirty && t.preview_at.is_some_and(|at| at.elapsed() > std::time::Duration::from_millis(150)) {
+            let bitmap = self.project().and_then(|p| {
+                p.shape(openlaser_types::ObjectId(t.id)).and_then(|sh| if let openlaser_doc::Geom::Bitmap(b) = &sh.geom { Some(b.clone()) } else { None })
+            });
+            if let (Some(b), Some(tx)) = (bitmap, &t.tx) {
+                t.request_seq += 1;
+                t.pending.sent(t.request_seq, t.id);
+                let _ = tx.send(crate::app::TraceJob {
+                    seq: t.request_seq,
+                    image_id: t.id,
+                    gray: b.gray.clone(),
+                    px: b.px,
+                    size_mm: b.size_mm,
+                    opts: t.geom_opts(),
+                    runs: t.runs.clone(),
+                });
+                t.in_flight = true;
+                t.dirty = false;
+            }
+        }
+        if t.in_flight || t.dirty {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
         if ok {
-            // Persist the values for next time, then dispatch exactly one tools.traceImage.
             let params = t.params();
+            // Persist the values for the next open (id/worker fields are per-open).
+            let mut saved = t.clone();
+            saved.preview = None;
+            saved.tx = None;
+            saved.rx = None;
+            self.ui.trace_defaults = Some(saved);
             self.ui.trace = None;
             self.execute_widget("tools.traceImage", params);
         } else if cancel || !open {
+            let mut saved = t.clone();
+            saved.preview = None;
+            saved.tx = None;
+            saved.rx = None;
+            self.ui.trace_defaults = Some(saved);
             self.ui.trace = None;
         } else {
             self.ui.trace = Some(t);

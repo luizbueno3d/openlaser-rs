@@ -2308,3 +2308,141 @@ fn trace_dialog_previews_commits_and_undoes() {
     assert!(doc.project.shapes.iter().any(|sh| sh.id.0 == bid2), "undo restored the image");
     let _ = bid;
 }
+
+#[test]
+fn trace_pending_is_latest_wins() {
+    let mut p = crate::app::TracePending::default();
+    p.sent(3, 42);
+    assert!(p.accept(3, 42));
+    assert!(!p.accept(2, 42), "an older seq is stale");
+    assert!(!p.accept(3, 7), "a different image is stale");
+    p.sent(4, 42);
+    assert!(!p.accept(3, 42) && p.accept(4, 42), "a newer request supersedes");
+}
+
+#[test]
+fn trace_dialog_remembers_values_between_opens() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let bid = add_square_bitmap(&mut h);
+    h.state_mut().invoke_ui_action("tools.traceImage");
+    h.run();
+    // Change the values, then cancel — the next open remembers them.
+    {
+        let t = h.state_mut().ui.trace.as_mut().unwrap();
+        t.threshold = 90.0;
+        t.invert = true;
+        t.smoothness = 0.0;
+        t.ignore_less_than = 7.0;
+        t.optimize = 2.0;
+    }
+    h.get_by_label("Cancel").click();
+    h.run();
+    assert!(h.state().ui.trace.is_none());
+    h.state_mut().invoke_ui_action("tools.traceImage");
+    h.run();
+    let t = h.state().ui.trace.as_ref().unwrap();
+    assert_eq!((t.threshold, t.invert, t.smoothness, t.ignore_less_than, t.optimize), (90.0, true, 0.0, 7.0, 2.0), "values persisted");
+    assert_eq!(t.id, bid);
+}
+
+#[test]
+fn trace_preview_runs_on_the_worker_not_the_ui() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    // A large bitmap: 3000×3000 with an ink blob — too slow to trace on the UI thread.
+    let mut g = vec![255u8; 3000 * 3000];
+    for r in 1000..2000 {
+        for c in 1000..2000 {
+            g[r * 3000 + c] = 0;
+        }
+    }
+    use std::sync::Arc;
+    h.state_mut()
+        .session
+        .edit(openlaser_engine::Label::new("bitmap"), None, move |project, sel| {
+            let id = project.alloc_id().unwrap();
+            project.shapes.push(Arc::new(openlaser_doc::Shape {
+                id,
+                name: None,
+                layer: openlaser_types::LayerKey::Color(0),
+                xform: openlaser_doc::Affine::IDENTITY,
+                geom: openlaser_doc::Geom::Bitmap(Arc::new(openlaser_doc::BitmapData {
+                    asset: openlaser_doc::AssetId([4; 32]),
+                    px: [3000, 3000],
+                    size_mm: [300.0, 300.0],
+                    gray: Arc::from(g.as_slice()),
+                    source_ext: "png".to_owned(),
+                })),
+                locked: false,
+                power_scale: openlaser_types::Percent::MAX_VALID,
+                priority: 0,
+            }));
+            sel.ids = vec![id];
+            sel.key = Some(id);
+            Ok::<_, openlaser_engine::EngineError>(())
+        })
+        .unwrap();
+    h.run();
+    h.state_mut().invoke_ui_action("tools.traceImage");
+    h.run();
+    // The dialog's first frames return fast: nothing is traced on the UI thread.
+    let t0 = std::time::Instant::now();
+    h.run();
+    assert!(t0.elapsed() < std::time::Duration::from_millis(400), "the frame returned quickly ({:?})", t0.elapsed());
+    // Step until the worker's result arrives (bounded).
+    let runs = h.state().ui.trace.as_ref().unwrap().runs.clone();
+    let mut done = false;
+    for _ in 0..40 {
+        h.run();
+        if h.state().ui.trace.as_ref().is_some_and(|t| t.preview.is_some()) {
+            done = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(done, "the ghost appeared after the worker finished");
+    assert!(runs.load(std::sync::atomic::Ordering::Relaxed) >= 1, "the worker traced it");
+}
+
+#[test]
+fn edit_nodes_on_a_locked_path_shows_greyed_nodes_and_refuses() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let id = h.state_mut().session.execute_as(Origin::Human, "tools.drawLines", serde_json::json!({ "pointsMm": [[0, 0], [10, 0], [10, 10]] })).unwrap()["ids"]
+        [0]
+    .as_u64()
+    .unwrap();
+    // No lock command exists yet — set the flag directly like the engine's lockable-check does.
+    h.state_mut()
+        .session
+        .edit(openlaser_engine::Label::new("lock"), None, move |project, _| {
+            if let Some(sh) = project.shapes.iter_mut().find(|sh| sh.id.0 == id) {
+                let mut s2 = (**sh).clone();
+                s2.locked = true;
+                *sh = std::sync::Arc::new(s2);
+            }
+            Ok::<_, openlaser_engine::EngineError>(())
+        })
+        .unwrap();
+    h.state_mut().session.execute_as(Origin::Human, "edit.select", serde_json::json!({ "ids": [id] })).unwrap();
+    h.state_mut().invoke_ui_action("tools.editNodes");
+    h.run();
+    let n = h.state().ui.nodes.as_ref().unwrap();
+    assert!(n.locked, "loaded but locked");
+    assert!(h.state().ui.status_message.contains("locked"), "{:?}", h.state().ui.status_message);
+    // A drag on the middle node does nothing.
+    let before = format!("{:?}", n.subs);
+    let p = w2s(&h, [10.0, 5.0]);
+    let q = egui::pos2(p.x + 50.0, p.y);
+    drag_to(&mut h, p, q, egui::Modifiers::NONE);
+    h.run();
+    assert_eq!(format!("{:?}", h.state().ui.nodes.as_ref().unwrap().subs), before, "no node moved");
+    // Keys do nothing either.
+    h.key_press_modifiers(egui::Modifiers::NONE, egui::Key::Delete);
+    h.run();
+    assert_eq!(format!("{:?}", h.state().ui.nodes.as_ref().unwrap().subs), before);
+}

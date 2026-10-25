@@ -243,14 +243,17 @@ impl OpenLaserApp {
             } else {
                 let live = menu_catalog::is_live(row);
                 let blocked = self.ui.machine_active && crate::app::opens_files(row.id);
+                let no_image = row.id == "tools.traceImage" && !self.trace_target();
                 let mut button = egui::Button::new(row.label);
                 if let Some(shortcut) = row.shortcut {
                     button = button.shortcut_text(crate::shortcuts::pretty(shortcut));
                 }
-                let response = ui.add_enabled(live && !blocked, button);
+                let response = ui.add_enabled(live && !blocked && !no_image, button);
                 // The reason names the predicate that actually failed: `!live` before `blocked` (a row that
                 // is not in OpenLaser yet is not "blocked by an active machine").
-                let response = if menu_catalog::is_hw_row(row) {
+                let response = if no_image {
+                    response.on_disabled_hover_text("Select one image to trace")
+                } else if menu_catalog::is_hw_row(row) {
                     response.on_disabled_hover_text("Hardware actions are human-only and live in the Laser panel.")
                 } else if !live {
                     response.on_disabled_hover_text(NOT_YET)
@@ -331,6 +334,8 @@ impl OpenLaserApp {
             (false, Some(NOT_YET))
         } else if self.ui.machine_active && crate::app::opens_files(id) {
             (false, Some(FILES_WHILE_ACTIVE))
+        } else if id == "tools.traceImage" && !self.trace_target() {
+            (false, Some("Select one image to trace"))
         } else {
             (true, None)
         }

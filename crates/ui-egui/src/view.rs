@@ -759,12 +759,16 @@ impl OpenLaserApp {
             self.ui.nodes = None;
             return;
         };
+        let locked = shape.locked;
         match &shape.geom {
             openlaser_doc::Geom::Path(path) => {
-                let keep = self.ui.nodes.as_ref().is_some_and(|n| n.id == id.0);
+                let subs = crate::node_edit::to_nodes(path);
+                let keep = self.ui.nodes.as_ref().is_some_and(|n| n.id == id.0 && n.locked == locked);
                 if !keep {
-                    self.ui.nodes =
-                        Some(crate::app::NodeEditUi { id: id.0, subs: crate::node_edit::to_nodes(path), sel: Vec::new(), drag: None, marquee: None });
+                    self.ui.nodes = Some(crate::app::NodeEditUi { id: id.0, subs, sel: Vec::new(), drag: None, marquee: None, locked });
+                }
+                if locked {
+                    self.ui.status_message = "the shape is locked; unlock it to edit its nodes".to_owned();
                 }
             }
             openlaser_doc::Geom::Rect { .. }
@@ -824,8 +828,9 @@ impl OpenLaserApp {
             }
         }
         // Anchors (squares) and the handles of curves adjacent to selected nodes (circles + thin lines).
-        let anchor_col = egui::Color32::from_rgb(30, 90, 200);
-        let sel_fill = egui::Color32::from_rgb(255, 160, 40);
+        // Locked shapes draw greyed and accept no edits.
+        let anchor_col = if n.locked { egui::Color32::from_rgb(140, 140, 140) } else { egui::Color32::from_rgb(30, 90, 200) };
+        let sel_fill = if n.locked { egui::Color32::from_rgb(160, 160, 160) } else { egui::Color32::from_rgb(255, 160, 40) };
         let handle_col = egui::Color32::from_rgb(150, 150, 150);
         let sel = n.sel.clone();
         for (si, sp) in n.subs.iter().enumerate() {
@@ -878,6 +883,9 @@ impl OpenLaserApp {
                 i.events.retain(|e| !matches!(e, egui::Event::Key { key: egui::Key::Escape, pressed: true, .. }));
             });
             return;
+        }
+        if self.ui.nodes.as_ref().is_some_and(|n| n.locked) {
+            return; // Locked: paint-only, no click/drag/key edits can start.
         }
         let xform = self.node_world();
         let inv = xform.inverse();

@@ -1889,9 +1889,9 @@ fn trace_image_draws_the_square_in_object_space() {
     let p = project(&s);
     assert!(p.shapes.iter().any(|sh| sh.id.0 == id && matches!(sh.geom, openlaser_doc::Geom::Path(_))));
     assert_eq!(s.active().unwrap().selection.ids, vec![openlaser_types::ObjectId(id)]);
-    // Bad targets refuse — the enabled gate fires first while a non-bitmap is selected.
-    assert_eq!(s.execute("tools.traceImage", json!({})).unwrap_err().code(), "disabled");
-    assert_eq!(s.execute("tools.traceImage", json!({ "id": 999 })).unwrap_err().code(), "disabled");
+    // Bad targets refuse.
+    assert_eq!(s.execute("tools.traceImage", json!({})).unwrap_err().code(), "bad_params"); // selection is the path
+    assert_eq!(s.execute("tools.traceImage", json!({ "id": 999 })).unwrap_err().code(), "bad_params");
     // Nothing at this threshold: a white image.
     let bid2 = add_bitmap(&mut s, vec![255u8; 4], [2, 2], [4.0, 4.0]);
     assert_eq!(s.execute("tools.traceImage", json!({ "id": bid2 })).unwrap_err().code(), "bad_params");
@@ -1928,4 +1928,55 @@ fn trace_image_maps_through_the_bitmap_transform() {
         },
     );
     assert!(plan.is_ok(), "{plan:?}");
+}
+
+#[test]
+fn trace_by_id_works_whatever_is_selected() {
+    // Agents pass `id` without a selection habit: the enabled gate is only needs_doc, the run resolves `id`.
+    let mut s = headless();
+    with_doc(&mut s);
+    let rect = s.execute("tools.rectangle", json!({ "xMm": 0.0, "yMm": 0.0, "wMm": 10.0, "hMm": 10.0 })).unwrap();
+    let rid = rect["ids"][0].as_u64().unwrap(); // the rectangle is now the selection
+    let bid = {
+        let mut g = vec![255u8; 20 * 20];
+        for r in 5..15 {
+            for c in 5..15 {
+                g[r * 20 + c] = 0;
+            }
+        }
+        use std::sync::Arc;
+        s.edit(Label::new("bitmap"), None, move |project, _| {
+            let id = project.alloc_id().map_err(geomx::doc_error)?;
+            project.shapes.push(Arc::new(openlaser_doc::Shape {
+                id,
+                name: None,
+                layer: LayerKey::Color(0),
+                xform: openlaser_doc::Affine::IDENTITY,
+                geom: openlaser_doc::Geom::Bitmap(Arc::new(openlaser_doc::BitmapData {
+                    asset: openlaser_doc::AssetId([3; 32]),
+                    px: [20, 20],
+                    size_mm: [40.0, 40.0],
+                    gray: Arc::from(g.as_slice()),
+                    source_ext: "png".to_owned(),
+                })),
+                locked: false,
+                power_scale: openlaser_types::Percent::new(100.0).unwrap(),
+                priority: 0,
+            }));
+            Ok(())
+        })
+        .unwrap();
+        project(&s).shapes.iter().find(|sh| matches!(sh.geom, openlaser_doc::Geom::Bitmap(_))).unwrap().id.0
+    };
+    s.execute("edit.select", json!({ "ids": [rid] })).unwrap(); // rectangle selected
+    let v = s.execute("tools.traceImage", json!({ "id": bid, "smoothness": 0 })).unwrap();
+    let tid = v["ids"][0].as_u64().unwrap();
+    let b = bounds_of(&s, tid);
+    assert!((b.min[0] + 10.0).abs() < 1e-9 && (b.max[0] - 10.0).abs() < 1e-9, "{b:?}");
+    // `id` must still be a Bitmap.
+    let rect2 = s.execute("tools.rectangle", json!({ "xMm": 0.0, "yMm": 0.0, "wMm": 5.0, "hMm": 5.0 })).unwrap();
+    assert_eq!(s.execute("tools.traceImage", json!({ "id": rect2["ids"][0].as_u64().unwrap() })).unwrap_err().code(), "bad_params");
+    // And without `id`, a wrong selection is the bad-params "select one image to trace".
+    s.execute("edit.select", json!({ "ids": [rid] })).unwrap();
+    assert_eq!(s.execute("tools.traceImage", json!({})).unwrap_err().code(), "bad_params");
 }
