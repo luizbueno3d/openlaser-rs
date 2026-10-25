@@ -37,6 +37,8 @@ pub struct UiState {
     pub offset: Option<OffsetUi>,
     /// The inline text editor: `Some` while a canvas text box is open (new text when `editing` is `None`,
     /// re-editing an existing shape when it is `Some(id)`).
+    /// The Edit Nodes state while the tool is armed.
+    pub nodes: Option<NodeEditUi>,
     pub text: Option<TextUi>,
     /// The last-used text settings: defaults for the next text the armed tool creates.
     pub text_defaults: TextDefaults,
@@ -90,6 +92,28 @@ pub struct TextDefaults {
     pub letter_spacing: f64,
     pub line_spacing: f64,
     pub align: u8,
+}
+
+/// The Edit Nodes tool's live state: `subs` mirrors the shape's object-space path and is the drag ghost.
+#[derive(Debug, Clone)]
+pub struct NodeEditUi {
+    /// The shape being edited.
+    pub id: u64,
+    pub subs: Vec<crate::node_edit::Subpath>,
+    /// Selected (subpath, node) pairs.
+    pub sel: Vec<(usize, usize)>,
+    /// An in-flight drag: moving the selected nodes (the last pointer world pos) or one handle.
+    pub drag: Option<NodeDrag>,
+    /// A marquee in progress (world-space start).
+    pub marquee: Option<[f64; 2]>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum NodeDrag {
+    /// Move every selected node; `last` is the pointer's previous world position.
+    Move { last: [f64; 2] },
+    /// Move one control handle.
+    Handle { sub: usize, idx: usize, inn: bool },
 }
 
 impl Default for TextDefaults {
@@ -165,6 +189,7 @@ impl Default for UiState {
             polygon_sides: 6,
             lock_ratio: true,
             offset: None,
+            nodes: None,
             text: None,
             text_defaults: TextDefaults::default(),
             anchor: 4,
@@ -591,6 +616,12 @@ impl OpenLaserApp {
                 self.ui.text = None; // arming closes any open editor without committing via the tool click
                 self.ui.selected_tool = "Edit Text";
             }
+            "tools.editNodes" => {
+                self.ui.selected_tool = "Edit Nodes";
+                if openlaser_engine::registry().find(id).is_some() {
+                    self.execute_widget(id, serde_json::Value::Null);
+                }
+            }
             "edit.paste" => {
                 // Paste lands at the canvas pointer (LightBurn); with no pointer over the canvas it offsets.
                 let params = self.ui.pointer_mm.map_or_else(|| serde_json::json!({}), |[x, y]| serde_json::json!({ "xMm": x, "yMm": y }));
@@ -890,6 +921,7 @@ impl eframe::App for OpenLaserApp {
         if idle_esc
             && !canvas_drag
             && self.ui.text.is_none()
+            && self.ui.nodes.is_none()
             && !self.safety_active()
             && !text_focus
             && !ctx.any_popup_open()
@@ -899,7 +931,7 @@ impl eframe::App for OpenLaserApp {
         }
         // Arrow keys nudge the selection: 1 mm, Shift = 10 mm (Y up, so Up is +dyMm). Only while no text
         // field has focus; consecutive nudges coalesce into one undo step inside the engine.
-        if !text_focus && !self.safety_active() && !ctx.any_popup_open() && !self.selection().is_empty() {
+        if !text_focus && self.ui.nodes.is_none() && !self.safety_active() && !ctx.any_popup_open() && !self.selection().is_empty() {
             let (shift, left, right, up, down) = ctx.input(|i| {
                 (
                     i.modifiers.shift,

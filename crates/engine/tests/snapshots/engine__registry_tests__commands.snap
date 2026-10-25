@@ -842,6 +842,81 @@ expression: rows
     }
   },
   {
+    "id": "path.get",
+    "label": "Get Path Data",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{id} → {d, xform:[a,b,c,d,e,f]} (object space)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`path.get` parameters.",
+      "properties": {
+        "id": {
+          "description": "The shape id.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "PathGetParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "path.set",
+    "label": "Set Path Data",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{id, d, coalesce?} replaces the object-space path; one undo step",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`path.set` parameters.",
+      "properties": {
+        "coalesce": {
+          "default": null,
+          "description": "Consecutive sets sharing a key merge into one history entry (arrow-key nudges).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "d": {
+          "description": "SVG path data in the shape's object space (\"M…Z…\"). Must start with MoveTo; every number finite.",
+          "type": "string"
+        },
+        "id": {
+          "description": "The shape id.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "d"
+      ],
+      "title": "PathSetParams",
+      "type": "object"
+    }
+  },
+  {
     "id": "tools.text",
     "label": "Edit Text",
     "menu": [
@@ -1277,6 +1352,28 @@ expression: rows
         "hMm"
       ],
       "title": "EllipseParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.editNodes",
+    "label": "Edit Nodes",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Ctrl+Backtick",
+    "defaultShortcut": "Ctrl+Backtick",
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
       "type": "object"
     }
   },

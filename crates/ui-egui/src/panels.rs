@@ -551,6 +551,33 @@ impl OpenLaserApp {
                     self.execute_widget("arrange.transform", params);
                 }
             }
+            // Edit Nodes on a parametric/text shape: LightBurn asks to convert first.
+            if self.ui.selected_tool == "Edit Nodes" && self.ui.nodes.is_none() {
+                let sel = self.selection();
+                let convertible = sel.len() == 1
+                    && sel.first().is_some_and(|id| {
+                        self.project().is_some_and(|p| {
+                            matches!(
+                                p.shape(*id).map(|s| &s.geom),
+                                Some(
+                                    openlaser_doc::Geom::Rect { .. }
+                                        | openlaser_doc::Geom::Ellipse { .. }
+                                        | openlaser_doc::Geom::Polygon { .. }
+                                        | openlaser_doc::Geom::Text(_)
+                                )
+                            )
+                        })
+                    });
+                if convertible {
+                    let r = ui.add(egui::Button::new("Convert to Path"));
+                    self.labeled(&r, egui::WidgetType::Button, "Convert to Path", false);
+                    if r.on_hover_text("Convert the shape to a path so its nodes can be edited").clicked()
+                        && let Some(id) = sel.first()
+                    {
+                        self.execute_widget("edit.convertToPath", serde_json::json!({ "ids": [id.0] }));
+                    }
+                }
+            }
             // The Polygon tool's side count, set before the drag as LightBurn's shape properties do.
             if self.ui.selected_tool == "Polygon" {
                 caption(ui, "Sides");

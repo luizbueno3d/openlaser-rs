@@ -20,7 +20,7 @@ use crate::{command, geomx};
 /// Largest drawn size per axis (mm).
 const MAX_SIZE_MM: f64 = 100_000.0;
 /// Most points one `tools.drawLines` call may add.
-const MAX_POINTS: usize = 100_000;
+pub(crate) const MAX_POINTS: usize = 100_000;
 
 const FULL_POWER: Percent = match Percent::new_const(100.0) {
     Some(p) => p,
@@ -35,6 +35,8 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             enabled: needs_doc, params: RectangleParams, run: rectangle, doc: "{xMm, yMm, wMm, hMm, cornerRadiusMm?, layer?} (x, y = lower-left corner)"),
         command!("tools.ellipse", "Ellipse", menu: ["Tools"], shortcut: Some("Cmd+E"), kind: Kind::Edit, access: Access::Agent,
             enabled: needs_doc, params: EllipseParams, run: ellipse, doc: "{cxMm, cyMm, wMm, hMm, layer?}"),
+        command!("tools.editNodes", "Edit Nodes", menu: ["Tools"], shortcut: Some("Ctrl+Backtick"), kind: Kind::View, access: Access::Agent,
+            enabled: needs_doc, params: NoParams, run: |_s: &mut Session, _p: NoParams| Ok::<_, EngineError>(json!({ "ui": "tools.editNodes" })), doc: "{}"),
         command!("tools.drawLines", "Draw Lines", menu: ["Tools"], shortcut: Some("Cmd+L"), kind: Kind::Edit, access: Access::Agent,
             enabled: needs_doc, params: DrawLinesParams, run: draw_lines, doc: "{pointsMm?:[[x,y],…] | d?:\"M0 0L10 0…\", closed?, layer?}"),
         command!("tools.polygon", "Polygon", menu: ["Tools", "Shape"], shortcut: None, kind: Kind::Edit, access: Access::Agent,

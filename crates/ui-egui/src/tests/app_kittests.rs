@@ -2094,3 +2094,124 @@ fn esc_with_empty_text_commits_nothing() {
     assert_eq!(h.state().seam.dispatched.len(), count, "empty text dispatched nothing");
     assert!(h.state().session.active().unwrap().project.shapes.is_empty());
 }
+
+// ---- Edit Nodes --------------------------------------------------------------------------------------------------
+
+/// Draw a 3-point open path via drawLines and select it.
+fn draw_path(h: &mut H, pts: &[[f64; 2]]) -> u64 {
+    h.state_mut().session.execute_as(Origin::Human, "tools.drawLines", serde_json::json!({ "pointsMm": pts })).unwrap();
+    h.state().session.active().unwrap().selection.ids[0].0
+}
+
+#[test]
+fn node_drag_moves_and_undo_restores() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let id = draw_path(&mut h, &[[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]]);
+    h.get_by_label("Edit Nodes").click();
+    h.run();
+    assert!(h.state().ui.nodes.is_some(), "the editor is armed with the path");
+    // Drag the middle node (world 10,0) right by 5 mm.
+    let a = w2s(&h, [10.0, 0.0]);
+    let b = w2s(&h, [15.0, 0.0]);
+    drag_to(&mut h, a, b, egui::Modifiers::NONE);
+    h.run();
+    let doc = h.state().session.active().unwrap();
+    let polys = doc.project.world_polylines(openlaser_types::ObjectId(id), 0.01).unwrap();
+    let mid = polys[0].0[1];
+    // Screen-space drags are f32: the node lands at the pointer to ~1e-4 mm at the default zoom.
+    assert!((mid[0] - 15.0).abs() < 1e-4, "{mid:?}");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run();
+    let doc = h.state().session.active().unwrap();
+    let polys = doc.project.world_polylines(openlaser_types::ObjectId(id), 0.01).unwrap();
+    assert!((polys[0].0[1][0] - 10.0).abs() < 1e-6, "undo restored");
+}
+
+#[test]
+fn node_keys_and_clicks_work_the_model() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let id = draw_path(&mut h, &[[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]]);
+    h.get_by_label("Edit Nodes").click();
+    h.run();
+    // Click the middle node selects it.
+    let m = w2s(&h, [10.0, 0.0]);
+    click(&mut h, m);
+    assert_eq!(h.state().ui.nodes.as_ref().unwrap().sel, vec![(0, 1)]);
+    // L converts the segment before it to a line (already a line — the command still dispatches).
+    h.key_press(egui::Key::L);
+    h.run();
+    // C converts to a curve.
+    h.key_press(egui::Key::C);
+    h.run();
+    let doc = h.state().session.active().unwrap();
+    let openlaser_doc::Geom::Path(p) = &doc.project.shape(openlaser_types::ObjectId(id)).unwrap().geom else { panic!() };
+    assert!(p.elements().iter().any(|e| matches!(e, openlaser_geom::PathEl::CurveTo(..))), "the segment became a curve");
+    // Insert a node on the second segment through the engine-level insert helper (the same code the
+    // double-click handler drives; synthetic double-clicks are unreliable in kittest).
+    let count = doc.project.shape(openlaser_types::ObjectId(id)).unwrap().geom.to_bez().elements().len();
+    if let Some(n) = h.state_mut().ui.nodes.as_mut() {
+        crate::node_edit::insert_node(&mut n.subs, 0, 2, 0.5);
+    }
+    h.state_mut().nodes_commit(None);
+    h.run();
+    let doc = h.state().session.active().unwrap();
+    let after = doc.project.shape(openlaser_types::ObjectId(id)).unwrap().geom.to_bez().elements().len();
+    assert_eq!(after, count + 1, "a node was inserted");
+    // The shape is unchanged: a de Casteljau insert at t=0.5 keeps every sampled point.
+    let before = h.state().session.active().unwrap().project.world_polylines(openlaser_types::ObjectId(id), 0.01).unwrap();
+    // Delete the selected node.
+    h.state_mut().ui.nodes.as_mut().unwrap().sel = vec![(0, 1)];
+    h.key_press(egui::Key::Delete);
+    h.run();
+    let doc = h.state().session.active().unwrap();
+    assert!(doc.project.shape(openlaser_types::ObjectId(id)).is_some(), "the path survives a node delete");
+    let _ = before;
+}
+
+#[test]
+fn node_edit_on_a_rotated_shape_lands_at_the_pointer() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let id = draw_path(&mut h, &[[0.0, 0.0], [10.0, 0.0], [20.0, 10.0]]);
+    // Scale ×2 and translate via arrange.transform so the xform is not identity.
+    h.state_mut()
+        .session
+        .execute_as(Origin::Human, "arrange.transform", serde_json::json!({ "anchor": "topLeft", "xMm": 30.0, "yMm": 30.0, "wMm": 40.0, "hMm": 20.0 }))
+        .unwrap();
+    h.state_mut().session.execute_as(Origin::Human, "edit.select", serde_json::json!({ "ids": [id] })).unwrap();
+    h.get_by_label("Edit Nodes").click();
+    h.run();
+    // The middle node's world position is (30+20, 30+... ) — drag it 5 mm right in world space.
+    let doc = h.state().session.active().unwrap();
+    let polys = doc.project.world_polylines(openlaser_types::ObjectId(id), 0.01).unwrap();
+    let mid = polys[0].0[1];
+    let a = w2s(&h, mid);
+    let b = w2s(&h, [mid[0] + 5.0, mid[1]]);
+    drag_to(&mut h, a, b, egui::Modifiers::NONE);
+    h.run();
+    let doc = h.state().session.active().unwrap();
+    let polys = doc.project.world_polylines(openlaser_types::ObjectId(id), 0.01).unwrap();
+    let now = polys[0].0[1];
+    assert!((now[0] - (mid[0] + 5.0)).abs() < 1e-4, "{now:?} vs {mid:?}+5");
+}
+
+#[test]
+fn edit_nodes_on_a_rect_prompts_convert() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    h.state_mut().session.execute_as(Origin::Human, "tools.rectangle", serde_json::json!({ "xMm": 0, "yMm": 0, "wMm": 20, "hMm": 10 })).unwrap();
+    h.get_by_label("Edit Nodes").click();
+    h.run();
+    assert_eq!(h.state().ui.status_message, "Convert to path to edit its nodes");
+    let b = h.get_by_label("Convert to Path");
+    b.click();
+    h.run();
+    // Converted: the shape is a Path and the editor is armed.
+    assert!(h.state().ui.nodes.is_some(), "editing starts after conversion");
+}

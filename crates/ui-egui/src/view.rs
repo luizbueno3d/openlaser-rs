@@ -361,7 +361,9 @@ impl OpenLaserApp {
         }
 
         self.canvas_selection(ui, &response, &view);
+        self.canvas_nodes(ui, &response, &view);
         self.canvas_draw(ui, &response, &view, hover);
+        self.paint_nodes(ui, &view);
 
         // ---- the inline text editor: an Area at the anchor, live outline ghost, commit on Esc/outside/Enter.
         if let Some(mut edit) = self.ui.text.take() {
@@ -465,8 +467,8 @@ impl OpenLaserApp {
     /// progress and returns to Select; a placed shape does too, as LightBurn does. The command runs only once the
     /// drag or clicks produced real millimetre parameters — a bare tool click never fires it.
     fn canvas_draw(&mut self, ui: &egui::Ui, response: &egui::Response, view: &ViewXform, hover: Option<egui::Pos2>) {
-        let armed = self.ui.selected_tool == "Edit Text" || DRAW_TOOLS.iter().any(|(_, label)| *label == self.ui.selected_tool);
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) && armed {
+        let armed = ["Edit Text", "Edit Nodes"].contains(&self.ui.selected_tool) || DRAW_TOOLS.iter().any(|(_, label)| *label == self.ui.selected_tool);
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) && armed && self.ui.nodes.is_none() {
             self.ui.selected_tool = "Select";
             self.view.draw_from = None;
             self.view.draw_points.clear();
@@ -708,6 +710,479 @@ impl OpenLaserApp {
     fn handle_hit(&self, press: egui::Pos2, b: &openlaser_types::Bounds, view: &ViewXform) -> Option<usize> {
         let indices: &[usize] = if self.view.rotate_handles { &crate::canvas_xform::CORNERS } else { &[0, 1, 2, 3, 4, 5, 6, 7] };
         indices.iter().copied().find(|i| view.world_to_screen(crate::canvas_xform::handle_point(b, *i)).distance(press) <= HANDLE_GRAB)
+    }
+
+    // ---- Edit Nodes -----------------------------------------------------------------------------------------------
+
+    /// The shape the node editor holds, in object space, mirroring `Geom::Path`. Selection or shape changes
+    /// (undo, conversions) re-sync it; a missing/converted shape closes the editor.
+    fn nodes_sync(&mut self) {
+        if self.ui.selected_tool != "Edit Nodes" {
+            self.ui.nodes = None;
+            return;
+        }
+        let sel = self.selection();
+        if sel.len() != 1 {
+            self.ui.nodes = None;
+            if sel.is_empty() {
+                self.ui.status_message = "Edit Nodes: select one shape".to_owned();
+            } else {
+                self.ui.status_message = "Edit Nodes edits one shape at a time".to_owned();
+            }
+            return;
+        }
+        let Some(&id) = sel.first() else {
+            self.ui.nodes = None;
+            return;
+        };
+        let Some(project) = self.project() else { return };
+        let Some(shape) = project.shape(id) else {
+            self.ui.nodes = None;
+            return;
+        };
+        match &shape.geom {
+            openlaser_doc::Geom::Path(path) => {
+                let keep = self.ui.nodes.as_ref().is_some_and(|n| n.id == id.0);
+                if !keep {
+                    self.ui.nodes =
+                        Some(crate::app::NodeEditUi { id: id.0, subs: crate::node_edit::to_nodes(path), sel: Vec::new(), drag: None, marquee: None });
+                }
+            }
+            openlaser_doc::Geom::Rect { .. }
+            | openlaser_doc::Geom::Ellipse { .. }
+            | openlaser_doc::Geom::Polygon { .. }
+            | openlaser_doc::Geom::Text(_)
+            | openlaser_doc::Geom::Bitmap(_) => {
+                self.ui.nodes = None;
+                self.ui.status_message = "Convert to path to edit its nodes".to_owned();
+            }
+            openlaser_doc::Geom::Group(_) => {
+                self.ui.nodes = None;
+                self.ui.status_message = "Edit Nodes works on a single path; ungroup first".to_owned();
+            }
+        }
+    }
+
+    /// The shape's object → world transform while node editing.
+    fn node_world(&self) -> openlaser_doc::Affine {
+        let (p, id) = (self.project(), self.ui.nodes.as_ref().map(|n| n.id));
+        match (p, id) {
+            (Some(p), Some(id)) => p.world_transform(openlaser_types::ObjectId(id)).ok().flatten().unwrap_or(openlaser_doc::Affine::IDENTITY),
+            _ => openlaser_doc::Affine::IDENTITY,
+        }
+    }
+
+    /// Serialize the edited subpaths and dispatch one `path.set` (one undo step; `coalesce` merges runs).
+    pub(crate) fn nodes_commit(&mut self, coalesce: Option<&str>) {
+        let Some(n) = self.ui.nodes.take() else { return };
+        let (id, d) = (n.id, crate::node_edit::to_path(&n.subs).to_svg());
+        self.ui.nodes = Some(n);
+        let mut params = serde_json::json!({ "id": id, "d": d });
+        if let Some(c) = coalesce
+            && let Some(m) = params.as_object_mut()
+        {
+            m.insert("coalesce".to_owned(), c.into());
+        }
+        self.execute_widget("path.set", params);
+    }
+
+    /// Paint the ghost + anchors + handles; called from `paint_canvas` while `ui.nodes` is `Some`.
+    fn paint_nodes(&mut self, ui: &egui::Ui, view: &ViewXform) {
+        let Some(n) = &self.ui.nodes else { return };
+        let xform = self.node_world();
+        let painter = ui.painter().with_clip_rect(view.rect);
+        // Ghost: the live path in world space.
+        let world_path = {
+            let mut p = crate::node_edit::to_path(&n.subs);
+            p.apply_affine(xform);
+            p
+        };
+        if let Ok(polys) = openlaser_geom::flatten(&world_path, 0.01) {
+            let stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(60, 200, 120));
+            for line in &polys {
+                let pts: Vec<egui::Pos2> = line.0.iter().map(|pt| view.world_to_screen(*pt)).collect();
+                painter.add(egui::Shape::line(pts, stroke));
+            }
+        }
+        // Anchors (squares) and the handles of curves adjacent to selected nodes (circles + thin lines).
+        let anchor_col = egui::Color32::from_rgb(30, 90, 200);
+        let sel_fill = egui::Color32::from_rgb(255, 160, 40);
+        let handle_col = egui::Color32::from_rgb(150, 150, 150);
+        let sel = n.sel.clone();
+        for (si, sp) in n.subs.iter().enumerate() {
+            for (i, node) in sp.nodes.iter().enumerate() {
+                let w = xform * node.p;
+                let c = view.world_to_screen([w.x, w.y]);
+                let chosen = sel.contains(&(si, i));
+                let size = egui::vec2(6.0, 6.0);
+                let rect = egui::Rect::from_center_size(c, size);
+                painter.rect_filled(rect, 1.0, if chosen { sel_fill } else { egui::Color32::WHITE });
+                painter.rect_stroke(rect, 1.0, egui::Stroke::new(1.0, anchor_col), egui::StrokeKind::Outside);
+                // Handles of the node's own curve ends, drawn when selected.
+                if chosen {
+                    for h in [node.out, node.inn].into_iter().flatten() {
+                        let hw = xform * h;
+                        let hc = view.world_to_screen([hw.x, hw.y]);
+                        painter.line_segment([c, hc], egui::Stroke::new(0.8, handle_col));
+                        painter.circle(hc, 3.0, egui::Color32::WHITE, egui::Stroke::new(1.0, handle_col));
+                    }
+                }
+            }
+        }
+        // The marquee.
+        if let Some(from) = n.marquee
+            && let Some(to) = ui.input(|i| i.pointer.latest_pos())
+        {
+            let a = view.world_to_screen(from);
+            let rect = egui::Rect::from_two_pos(a, to);
+            painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 150, 255)), egui::StrokeKind::Outside);
+        }
+    }
+
+    /// Edit Nodes interaction: click selects nodes (Shift toggles), a drag moves them, a handle drag reshapes,
+    /// a marquee selects inside it, a double-click on a segment inserts a node, keys do the model ops.
+    fn canvas_nodes(&mut self, ui: &egui::Ui, response: &egui::Response, view: &ViewXform) {
+        self.nodes_sync();
+        if self.ui.nodes.is_none() {
+            return;
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            // Esc: a drag/marquee cancels; otherwise the tool leaves to Select.
+            let had = self.ui.nodes.as_ref().is_some_and(|n| n.drag.is_some() || n.marquee.is_some());
+            if had {
+                self.nodes_sync_forget();
+            } else {
+                self.ui.nodes = None;
+                self.ui.selected_tool = "Select";
+            }
+            ui.ctx().input_mut(|i| {
+                i.events.retain(|e| !matches!(e, egui::Event::Key { key: egui::Key::Escape, pressed: true, .. }));
+            });
+            return;
+        }
+        let xform = self.node_world();
+        let inv = xform.inverse();
+        let painter = ui.painter().with_clip_rect(view.rect);
+        let _ = painter;
+
+        // ---- keys while the tool is active ---------------------------------------------------------------------
+        if ui.ctx().memory(|m| m.focused().is_none()) {
+            let (shift, cmd) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+            if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
+                && self.ui.nodes.as_ref().is_some_and(|n| !n.sel.is_empty())
+            {
+                if let Some(n) = &mut self.ui.nodes {
+                    crate::node_edit::delete_nodes(&mut n.subs, &n.sel.clone());
+                    n.sel.clear();
+                }
+                self.nodes_commit(None);
+            } else if ui.input(|i| i.key_pressed(egui::Key::L)) {
+                let sel = self.ui.nodes.as_ref().map(|n| n.sel.clone()).unwrap_or_default();
+                if let Some(n) = &mut self.ui.nodes {
+                    for &(s, i) in &sel {
+                        crate::node_edit::convert_segment(&mut n.subs, s, i, true);
+                    }
+                }
+                if !sel.is_empty() {
+                    self.nodes_commit(None);
+                }
+            } else if ui.input(|i| i.key_pressed(egui::Key::C)) {
+                let sel = self.ui.nodes.as_ref().map(|n| n.sel.clone()).unwrap_or_default();
+                if let Some(n) = &mut self.ui.nodes {
+                    for &(s, i) in &sel {
+                        crate::node_edit::convert_segment(&mut n.subs, s, i, false);
+                    }
+                }
+                if !sel.is_empty() {
+                    self.nodes_commit(None);
+                }
+            } else if ui.input(|i| i.key_pressed(egui::Key::B)) {
+                let sel = self.ui.nodes.as_ref().map(|n| n.sel.clone()).unwrap_or_default();
+                if let Some(n) = &mut self.ui.nodes {
+                    for &(s, i) in &sel {
+                        crate::node_edit::break_subpath(&mut n.subs, s, i);
+                    }
+                    n.sel.clear();
+                }
+                if !sel.is_empty() {
+                    self.nodes_commit(None);
+                }
+            } else if ui.input(|i| i.key_pressed(egui::Key::J)) {
+                let sel = self.ui.nodes.as_ref().map(|n| n.sel.clone()).unwrap_or_default();
+                if sel.len() == 2
+                    && let Some(n) = &mut self.ui.nodes
+                {
+                    crate::node_edit::join_endpoints(&mut n.subs, sel.first().copied().unwrap_or((0, 0)), sel.get(1).copied().unwrap_or((0, 0)), 0.01);
+                    n.sel.clear();
+                }
+                if sel.len() == 2 {
+                    self.nodes_commit(None);
+                }
+            } else {
+                // Arrow nudge: 0.1 mm (Shift: 1 mm), coalesced per run.
+                let step = if shift { 1.0 } else { 0.1 };
+                let delta = if ui.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                    Some([-step, 0.0])
+                } else if ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                    Some([step, 0.0])
+                } else if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                    Some([0.0, step])
+                } else if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                    Some([0.0, -step])
+                } else {
+                    None
+                };
+                if let Some(d) = delta
+                    && !self.ui.nodes.as_ref().is_none_or(|n| n.sel.is_empty())
+                {
+                    let v = lin(&inv, d);
+                    if let Some(n) = &mut self.ui.nodes {
+                        crate::node_edit::move_nodes(&mut n.subs, &n.sel.clone(), v);
+                    }
+                    self.nodes_commit(Some("nodes-nudge"));
+                }
+                let _ = cmd;
+            }
+        }
+
+        // ---- double-click on a segment inserts a node -------------------------------------------------------
+        if response.double_clicked_by(egui::PointerButton::Primary)
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let world = view.screen_to_world(pos);
+            let tol_px = 6.0 / view.zoom;
+            if let Some((s, i, t)) = self.nearest_segment(&xform, world, tol_px) {
+                if let Some(n) = &mut self.ui.nodes {
+                    crate::node_edit::insert_node(&mut n.subs, s, i, t);
+                    n.sel = vec![(s, i)];
+                }
+                self.nodes_commit(None);
+                return;
+            }
+        }
+
+        // ---- press / drag / release --------------------------------------------------------------------------
+        let Some(n_ref) = self.ui.nodes.as_ref() else { return };
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            let press = ui.input(|i| i.pointer.press_origin()).or_else(|| response.interact_pointer_pos());
+            if let Some(press) = press {
+                let world = view.screen_to_world(press);
+                // Handle hit first (6 px screen).
+                let handle = n_ref.subs.iter().enumerate().find_map(|(si, sp)| {
+                    sp.nodes.iter().enumerate().find_map(|(i, node)| {
+                        for (inn, h) in [(true, node.inn), (false, node.out)] {
+                            if let Some(h) = h {
+                                let hw = xform * h;
+                                let c = view.world_to_screen([hw.x, hw.y]);
+                                if press.distance(c) <= 6.0 {
+                                    return Some((si, i, inn));
+                                }
+                            }
+                        }
+                        None
+                    })
+                });
+                if let Some((si, i, inn)) = handle {
+                    if let Some(n) = self.ui.nodes.as_mut() {
+                        n.drag = Some(crate::app::NodeDrag::Handle { sub: si, idx: i, inn });
+                    }
+                } else {
+                    let hit = self.node_hit(&xform, view, press);
+                    if let Some((si, i)) = hit {
+                        if let Some(n) = self.ui.nodes.as_mut() {
+                            let was = n.sel.contains(&(si, i));
+                            if ui.input(|i2| i2.modifiers.shift) {
+                                if !was {
+                                    n.sel.push((si, i));
+                                }
+                            } else if !was {
+                                n.sel = vec![(si, i)];
+                            }
+                            n.drag = Some(crate::app::NodeDrag::Move { last: world });
+                        }
+                    } else if let Some(n) = self.ui.nodes.as_mut() {
+                        n.marquee = Some(world);
+                    }
+                }
+            }
+        }
+        if let Some(n) = &mut self.ui.nodes {
+            match n.drag {
+                Some(crate::app::NodeDrag::Move { last }) => {
+                    if let Some(pos) = ui.input(|i| i.pointer.latest_pos()) {
+                        let world = view.screen_to_world(pos);
+                        let dw = [world[0] - last[0], world[1] - last[1]];
+                        if dw[0] != 0.0 || dw[1] != 0.0 {
+                            let dv = lin(&inv, dw);
+                            let sel = n.sel.clone();
+                            crate::node_edit::move_nodes(&mut n.subs, &sel, dv);
+                            n.drag = Some(crate::app::NodeDrag::Move { last: world });
+                            self.ui.status_message = format!("Node move: {:.2}, {:.2} mm", dv.x, dv.y);
+                        }
+                    }
+                }
+                Some(crate::app::NodeDrag::Handle { sub, idx, inn }) => {
+                    if let Some(pos) = ui.input(|i| i.pointer.latest_pos()) {
+                        let world = view.screen_to_world(pos);
+                        let op = inv * openlaser_geom::Point::new(world[0], world[1]);
+                        crate::node_edit::move_handle(&mut n.subs, sub, idx, inn, op);
+                    }
+                }
+                None => {}
+            }
+            // Marquee updates.
+            if let Some(from) = n.marquee
+                && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
+            {
+                let w = view.screen_to_world(pos);
+                let rect = egui::Rect::from_two_pos(view.world_to_screen(from), pos);
+                let shift = ui.input(|i| i.modifiers.shift);
+                if !shift {
+                    n.sel.clear();
+                }
+                for (si, sp) in n.subs.iter().enumerate() {
+                    for (i, node) in sp.nodes.iter().enumerate() {
+                        let wp = xform * node.p;
+                        if rect.contains(view.world_to_screen([wp.x, wp.y])) && !n.sel.contains(&(si, i)) {
+                            n.sel.push((si, i));
+                        }
+                    }
+                }
+                let _ = w;
+            }
+        }
+        if response.drag_stopped() {
+            let was_drag = if let Some(n) = self.ui.nodes.as_mut() {
+                let was_drag = n.drag.is_some();
+                n.drag = None;
+                n.marquee = None;
+                was_drag
+            } else {
+                false
+            };
+            if was_drag {
+                self.nodes_commit(None);
+            }
+        }
+        // A plain click (no drag) on a node toggles selection only; an empty click clears it.
+        if response.clicked_by(egui::PointerButton::Primary)
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let press = pos;
+            if let Some((si, i)) = self.node_hit(&xform, view, press) {
+                if let Some(n) = self.ui.nodes.as_mut() {
+                    if ui.input(|i2| i2.modifiers.shift) {
+                        if let Some(at) = n.sel.iter().position(|x| *x == (si, i)) {
+                            n.sel.remove(at);
+                        } else {
+                            n.sel.push((si, i));
+                        }
+                    } else {
+                        n.sel = vec![(si, i)];
+                    }
+                }
+            } else if !ui.input(|i| i.modifiers.shift)
+                && let Some(n) = self.ui.nodes.as_mut()
+            {
+                n.sel.clear();
+            }
+        }
+    }
+
+    /// Discard the live edits (Esc mid-drag): re-sync drops `subs` back to the committed path.
+    fn nodes_sync_forget(&mut self) {
+        let Some(n) = &mut self.ui.nodes else { return };
+        n.drag = None;
+        n.marquee = None;
+        // Reload from the document so a cancelled drag leaves no residue.
+        let id = n.id;
+        if let Some(project) = self.project()
+            && let Some(openlaser_doc::Geom::Path(path)) = project.shape(openlaser_types::ObjectId(id)).map(|s| &s.geom)
+        {
+            let subs = crate::node_edit::to_nodes(path);
+            if let Some(n) = self.ui.nodes.as_mut() {
+                n.subs = subs;
+            }
+        }
+    }
+
+    /// The node nearest `press` (screen space), within 6 px.
+    fn node_hit(&self, xform: &openlaser_doc::Affine, view: &ViewXform, press: egui::Pos2) -> Option<(usize, usize)> {
+        let n = self.ui.nodes.as_ref()?;
+        n.subs.iter().enumerate().find_map(|(si, sp)| {
+            sp.nodes.iter().enumerate().find_map(|(i, node)| {
+                let w = *xform * node.p;
+                if press.distance(view.world_to_screen([w.x, w.y])) <= 6.0 { Some((si, i)) } else { None }
+            })
+        })
+    }
+
+    /// Nearest (subpath, node-index of the segment's end, t) to a world point, within a screen tolerance.
+    /// `i == nodes.len()` addresses a closed subpath's closing segment.
+    fn nearest_segment(&self, xform: &openlaser_doc::Affine, world: [f64; 2], tol_world: f64) -> Option<(usize, usize, f64)> {
+        let n = self.ui.nodes.as_ref()?;
+        let mut best: Option<(usize, usize, f64, f64)> = None;
+        for (si, sp) in n.subs.iter().enumerate() {
+            let count = sp.nodes.len();
+            let ends = if sp.closed { count + 1 } else { count };
+            for i in 1..ends {
+                let Some((a, b)) = sp.nodes.get(i - 1).zip(sp.nodes.get(i % count)) else { continue };
+                let (a, b) = (a.clone(), b.clone());
+                let seg = |t: f64| -> [f64; 2] {
+                    if b.line_in {
+                        let p = a.p + (b.p - a.p) * t;
+                        let w = *xform * p;
+                        [w.x, w.y]
+                    } else {
+                        let h0 = a.out.unwrap_or(a.p);
+                        let h1 = b.inn.unwrap_or(b.p);
+                        let q = a.p + (h0 - a.p) * t;
+                        let r = h0 + (h1 - h0) * t;
+                        let s2 = h1 + (b.p - h1) * t;
+                        let q2 = q + (r - q) * t;
+                        let r2 = r + (s2 - r) * t;
+                        let m = q2 + (r2 - q2) * t;
+                        let w = *xform * m;
+                        [w.x, w.y]
+                    }
+                };
+                // Coarse sample then refine around the best t.
+                let (mut bt, mut bd) = (0.0, f64::MAX);
+                for k in 0..=24 {
+                    let t = k as f64 / 24.0;
+                    let p = seg(t);
+                    let d = (p[0] - world[0]).hypot(p[1] - world[1]);
+                    if d < bd {
+                        bd = d;
+                        bt = t;
+                    }
+                }
+                let (mut lo, mut hi) = ((bt - 1.0 / 24.0).max(0.0), (bt + 1.0 / 24.0).min(1.0));
+                for _ in 0..16 {
+                    let m1 = lo + (hi - lo) / 3.0;
+                    let m2 = hi - (hi - lo) / 3.0;
+                    let d1 = {
+                        let p = seg(m1);
+                        (p[0] - world[0]).hypot(p[1] - world[1])
+                    };
+                    let d2 = {
+                        let p = seg(m2);
+                        (p[0] - world[0]).hypot(p[1] - world[1])
+                    };
+                    if d1 < d2 { hi = m2 } else { lo = m1 }
+                }
+                let p = seg((lo + hi) / 2.0);
+                let d = (p[0] - world[0]).hypot(p[1] - world[1]);
+                if d < bd {
+                    bd = d;
+                    bt = (lo + hi) / 2.0;
+                }
+                if bd <= tol_world && best.is_none_or(|(_, _, _, dd)| bd < dd) {
+                    best = Some((si, i, bt, bd));
+                }
+            }
+        }
+        best.map(|(s, i, t, _)| (s, i, t))
     }
 
     /// Selection interaction on the Select tool: move drags from a shape/box press, handle drags scale and
@@ -1012,6 +1487,12 @@ impl OpenLaserApp {
             painter.line_segment([egui::pos2(left.left(), p.y), egui::pos2(left.right(), p.y)], marker);
         }
     }
+}
+
+/// The linear part of an affine applied to a delta (translation ignored).
+fn lin(inv: &openlaser_doc::Affine, d: [f64; 2]) -> openlaser_geom::Vec2 {
+    let c = inv.as_coeffs();
+    openlaser_geom::Vec2::new(c[0] * d[0] + c[2] * d[1], c[1] * d[0] + c[3] * d[1])
 }
 
 #[cfg(test)]

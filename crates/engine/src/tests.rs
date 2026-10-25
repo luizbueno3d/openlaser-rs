@@ -15,11 +15,12 @@ use openlaser_machine::{GalvoMachine, GantryMachine, MachineProfile, jpt_m7_200,
 use openlaser_types::{Fingerprint, FrameMode, FrameOrigin, FrameReceipt, FrameSource, FrameStyle, LayerKey, MachineId, MonoTime, RefusalCode, VirtualClock};
 use serde_json::{Value, json};
 
+use crate::cmds::Created;
 use crate::command::{Access, EngineError, Kind, Origin, registry};
 use crate::devices::{DeviceAccess, Event, PendingArm};
 use crate::files::FsAuthority;
 use crate::jobs::Encoded;
-use crate::session::{Session, SessionConfig};
+use crate::session::{Label, Session, SessionConfig};
 
 // ---- fixtures -------------------------------------------------------------------------------------------------
 
@@ -1791,4 +1792,42 @@ fn a_text_shape_plans_its_outline() {
         }
     }
     assert!((lo[0] - b.min[0]).abs() < 0.02 && (hi[1] - b.max[1]).abs() < 0.02, "{lo:?} {hi:?} vs {b:?}");
+}
+
+// ---- path.get / path.set (node editing) ---------------------------------------------------------------------------
+
+#[test]
+fn path_get_and_set_round_trip_in_object_space() {
+    let mut s = headless();
+    with_doc(&mut s);
+    let id = rect(&mut s, 10.0, 10.0, 20.0, 10.0);
+    // A rect is parametric: path.set refuses with the convert message.
+    let e = s.execute("path.set", json!({ "id": id, "d": "M0 0L5 0" })).unwrap_err();
+    assert_eq!(e.code(), "bad_params");
+    assert!(e.to_string().contains("convert to path"), "{e}");
+    s.execute("edit.convertToPath", json!({ "ids": [id] })).unwrap();
+    let v = s.execute("path.get", json!({ "id": id })).unwrap();
+    let d = v["d"].as_str().unwrap();
+    assert!(d.starts_with("M"), "{d}");
+    // A world-size check: the path is object-space, the xform is unchanged.
+    s.execute("path.set", json!({ "id": id, "d": "M0 0L30 0L30 30L0 30Z" })).unwrap();
+    let b = bounds_of(&s, id);
+    assert!((b.max[0] - b.min[0] - 30.0).abs() < 1e-9 && (b.max[1] - b.min[1] - 30.0).abs() < 1e-9, "{b:?}");
+    // Undo restores the converted path.
+    s.execute("edit.undo", json!({})).unwrap();
+    let b2 = bounds_of(&s, id);
+    assert!((b2.max[0] - b2.min[0] - 20.0).abs() < 1e-9);
+    // Bad d and bad ids refuse.
+    assert_eq!(s.execute("path.set", json!({ "id": id, "d": "L1 1" })).unwrap_err().code(), "bad_params");
+    assert_eq!(s.execute("path.set", json!({ "id": 9999, "d": "M0 0L1 0" })).unwrap_err().code(), "bad_params");
+    assert_eq!(s.execute("path.get", json!({ "id": 9999 })).unwrap_err().code(), "bad_params");
+    // Locked shapes refuse.
+    s.edit(Label::new("lock"), None, move |project, _| {
+        if let Some(sh) = project.shapes.iter_mut().find(|sh| sh.id.0 == id) {
+            Arc::make_mut(sh).locked = true;
+        }
+        Ok(Created { ids: vec![] })
+    })
+    .unwrap();
+    assert_eq!(s.execute("path.set", json!({ "id": id, "d": "M0 0L1 0" })).unwrap_err().code(), "disabled");
 }

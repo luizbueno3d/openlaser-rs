@@ -17,6 +17,7 @@ mod dialogs;
 mod dock;
 mod icon_data;
 pub mod menu_catalog;
+pub mod node_edit;
 mod panels;
 pub mod parity;
 mod screenshot;
