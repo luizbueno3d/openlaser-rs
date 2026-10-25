@@ -1539,19 +1539,16 @@ fn polygon_params_are_validated_and_the_outline_has_the_sides() {
     let polys = project(&s).world_polylines(openlaser_types::ObjectId(id), 0.01).unwrap();
     assert_eq!(polys.len(), 1);
     assert_eq!(polys[0].0.len(), 6, "5 vertices + close");
-    // One vertex is straight up.
-    let top = polys[0].0.iter().max_by(|a, b| a[1].total_cmp(&b[1])).unwrap();
-    assert!(top[0].abs() < 1e-9, "the top vertex sits on the centre line: {top:?}");
-    let b = project(&s).bounds(&[openlaser_types::ObjectId(id)]).unwrap().unwrap();
-    assert!((b.min[0] + b.max[0]).abs() < 1e-9 && (b.min[1] + b.max[1]).abs() < 1e-9, "{b:?}");
-    // rotateDeg turns it: a 90°-rotated hexagon's top vertex moves onto +X of the bounds centre.
-    let v = s.execute("tools.polygon", json!({ "cxMm": 50, "cyMm": 0, "radiusMm": 10, "sides": 6, "rotateDeg": 90 })).unwrap();
+    // The polygon's own centre is (cx, cy): every vertex is exactly `radius` from it, and the first points up.
+    // (An odd-sided polygon's bounding box is NOT centred there; centring the box shifted it off the drag point.)
+    assert!(polys[0].0.iter().all(|p| (p[0].hypot(p[1]) - 10.0).abs() < 1e-9), "{:?}", polys[0].0);
+    assert!(polys[0].0.iter().any(|p| p[0].abs() < 1e-9 && (p[1] - 10.0).abs() < 1e-9), "a vertex straight up");
+    // rotateDeg turns it about that centre: a 90°-rotated pentagon at (50, 7) has a vertex at (40, 7) (CCW, Y up).
+    let v = s.execute("tools.polygon", json!({ "cxMm": 50, "cyMm": 7, "radiusMm": 10, "sides": 5, "rotateDeg": 90 })).unwrap();
     let id2 = v["ids"][0].as_u64().unwrap();
-    let b = project(&s).bounds(&[openlaser_types::ObjectId(id2)]).unwrap().unwrap();
-    let c = [(b.min[0] + b.max[0]) / 2.0, (b.min[1] + b.max[1]) / 2.0];
     let polys = project(&s).world_polylines(openlaser_types::ObjectId(id2), 0.01).unwrap();
-    let rel: Vec<[f64; 2]> = polys[0].0.iter().map(|p| [p[0] - c[0], p[1] - c[1]]).collect();
-    assert!(rel.iter().any(|p| (p[0] - 10.0).abs() < 1e-6 && p[1].abs() < 1e-6), "{rel:?}");
+    assert!(polys[0].0.iter().all(|p| ((p[0] - 50.0).hypot(p[1] - 7.0) - 10.0).abs() < 1e-9), "{:?}", polys[0].0);
+    assert!(polys[0].0.iter().any(|p| (p[0] - 40.0).abs() < 1e-9 && (p[1] - 7.0).abs() < 1e-9), "{:?}", polys[0].0);
     for (p, ptr) in [
         (json!({ "cxMm": 0, "cyMm": 0, "radiusMm": 0 }), "/radiusMm"),
         (json!({ "cxMm": 0, "cyMm": 0, "radiusMm": 5, "sides": 2 }), "/sides"),

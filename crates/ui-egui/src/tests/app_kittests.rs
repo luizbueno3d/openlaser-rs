@@ -1326,6 +1326,13 @@ fn polygon_drag_and_sides_field_produce_the_shape() {
     assert!((b.max[0] - b.min[0] - 18.09).abs() < 0.05, "{b:?}");
     assert!(h.state().session.active().unwrap().project.world_polylines(id, 0.01).unwrap()[0].0.iter().any(|p| (p[0] - b.max[0]).abs() < 1e-3));
     assert!(h.state().session.active().unwrap().project.shape(id).is_some_and(|s| matches!(s.geom, openlaser_doc::Geom::Polygon { sides: 5, .. })));
+    // It lands where it was dragged: centred on the press point (every vertex 10 mm from it), with the first vertex
+    // under the release point, exactly as the ghost showed (an odd polygon's bounding box is not centred there).
+    let poly = h.state().session.active().unwrap().project.world_polylines(id, 0.01).unwrap();
+    let pressed = [0.0, 0.0];
+    let r = last.2["radiusMm"].as_f64().unwrap();
+    assert!(poly[0].0.iter().all(|p| ((p[0] - pressed[0]).hypot(p[1] - pressed[1]) - r).abs() < 0.05), "{:?}", poly[0].0);
+    assert!(poly[0].0.iter().any(|p| (p[0] - 10.0).abs() < 0.05 && p[1].abs() < 0.05), "the first vertex is under the pointer: {:?}", poly[0].0);
 }
 
 #[test]

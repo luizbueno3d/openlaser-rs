@@ -108,18 +108,23 @@ fn layer_or_current(s: &Session, layer: Option<LayerKey>) -> Result<LayerKey, En
     })
 }
 
-/// Adds one shape whose object-space bounding box is centred on `centre` (design mm); selects it. `pre` is an
-/// extra object-space transform (e.g. a polygon's rotation) composed under the centring translate.
-fn add_centred(s: &mut Session, label: &'static str, layer: LayerKey, geom: Geom, centre: (f64, f64), pre: Option<Affine>) -> Result<Created, EngineError> {
+/// Adds one shape whose object-space bounding box is centred on `centre` (design mm); selects it.
+fn add_centred(s: &mut Session, label: &'static str, layer: LayerKey, geom: Geom, centre: (f64, f64)) -> Result<Created, EngineError> {
     let probe = Shape { id: ObjectId(0), name: None, layer, xform: Affine::IDENTITY, geom, locked: false, power_scale: FULL_POWER, priority: 0 };
     let offset = match geomx::shape_extent(&probe) {
         Some(b) => Vec2::new(centre.0 - (b.min[0] + b.max[0]) / 2.0, centre.1 - (b.min[1] + b.max[1]) / 2.0),
         None => Vec2::new(centre.0, centre.1),
     };
+    let geom = probe.geom;
+    add_placed(s, label, layer, geom, Affine::translate(offset))
+}
+
+/// Adds one shape with the exact transform `xform`; selects it.
+fn add_placed(s: &mut Session, label: &'static str, layer: LayerKey, geom: Geom, xform: Affine) -> Result<Created, EngineError> {
+    let probe = Shape { id: ObjectId(0), name: None, layer, xform, geom, locked: false, power_scale: FULL_POWER, priority: 0 };
     let ids = s.edit(Label::new(label), None, move |project, sel| {
         let mut shape = probe;
         shape.id = project.alloc_id().map_err(geomx::doc_error)?;
-        shape.xform = Affine::translate(offset) * pre.unwrap_or(Affine::IDENTITY);
         let id = shape.id;
         project.shapes.push(Arc::new(shape));
         sel.ids = vec![id];
@@ -145,7 +150,7 @@ fn rectangle(s: &mut Session, p: RectangleParams) -> Result<Created, EngineError
     }
     let layer = layer_or_current(s, p.layer)?;
     let geom = Geom::Rect { w: mm(ID, "/wMm", w)?, h: mm(ID, "/hMm", h)?, corner_radius: mm(ID, "/cornerRadiusMm", r)? };
-    add_centred(s, "Rectangle", layer, geom, (x + w / 2.0, y + h / 2.0), None)
+    add_centred(s, "Rectangle", layer, geom, (x + w / 2.0, y + h / 2.0))
 }
 
 fn ellipse(s: &mut Session, p: EllipseParams) -> Result<Created, EngineError> {
@@ -156,7 +161,7 @@ fn ellipse(s: &mut Session, p: EllipseParams) -> Result<Created, EngineError> {
     let h = positive(ID, "/hMm", p.h_mm, MAX_SIZE_MM)?;
     let layer = layer_or_current(s, p.layer)?;
     let geom = Geom::Ellipse { rx: mm(ID, "/wMm", w / 2.0)?, ry: mm(ID, "/hMm", h / 2.0)? };
-    add_centred(s, "Ellipse", layer, geom, (cx, cy), None)
+    add_centred(s, "Ellipse", layer, geom, (cx, cy))
 }
 
 /// `tools.polygon`: a regular polygon, first vertex straight up unless `rotateDeg` turns it (CCW, Y up).
@@ -193,7 +198,9 @@ fn polygon(s: &mut Session, p: PolygonParams) -> Result<Created, EngineError> {
     let rotate = finite(ID, "/rotateDeg", p.rotate_deg.unwrap_or(0.0))?;
     let layer = layer_or_current(s, p.layer)?;
     let geom = Geom::Polygon { sides, radius: mm(ID, "/radiusMm", radius)? };
-    add_centred(s, "Polygon", layer, geom, (cx, cy), if rotate == 0.0 { None } else { Some(Affine::rotate(rotate.to_radians())) })
+    // The polygon's own centre (its circumcentre, the model's origin) lands on cx/cy, so the canvas drag from that
+    // point and the shape agree. Centring the bounding box instead shifts an odd-sided or rotated polygon.
+    add_placed(s, "Polygon", layer, geom, Affine::translate((cx, cy)) * Affine::rotate(rotate.to_radians()))
 }
 
 /// `tools.measure`: a pure query — never touches the document or history.
