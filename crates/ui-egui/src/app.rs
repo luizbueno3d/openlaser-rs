@@ -33,10 +33,36 @@ pub struct UiState {
     pub lock_ratio: bool,
     /// Numeric edits: which of the 9 points of the selection bounds XPos/YPos name (0 = top-left … 8 = bottom-right).
     pub anchor: u8,
+    /// The Offset Shapes dialog's values (remembered between opens, like LightBurn).
+    pub offset: Option<OffsetUi>,
     /// A machine is framing, running or stopping, or the ARM dialog is open: STOP chrome is up, files are refused.
     pub machine_active: bool,
     pub status_message: String,
     pub pointer_mm: Option<[f64; 2]>,
+}
+
+/// Offset Shapes dialog state. `direction`/`corner` are combo indices: 0 outward / 1 inward / 2 both and
+/// 0 round / 1 sharp / 2 bevel.
+#[derive(Debug, Clone, Copy)]
+pub struct OffsetUi {
+    pub distance: f64,
+    pub direction: u8,
+    pub corner: u8,
+    pub delete_original: bool,
+}
+
+impl Default for OffsetUi {
+    fn default() -> Self {
+        OffsetUi { distance: 1.0, direction: 0, corner: 0, delete_original: false }
+    }
+}
+
+impl OffsetUi {
+    pub(crate) fn params(&self) -> serde_json::Value {
+        let direction = ["outward", "inward", "both"].get(usize::from(self.direction)).copied().unwrap_or("outward");
+        let corner = ["round", "sharp", "bevel"].get(usize::from(self.corner)).copied().unwrap_or("round");
+        serde_json::json!({ "distanceMm": self.distance, "direction": direction, "corner": corner, "deleteOriginal": self.delete_original })
+    }
 }
 
 impl Default for UiState {
@@ -53,6 +79,7 @@ impl Default for UiState {
             live_source: FrameSource::Job,
             polygon_sides: 6,
             lock_ratio: true,
+            offset: None,
             anchor: 4,
             machine_active: false,
             status_message: String::new(),
@@ -470,6 +497,7 @@ impl OpenLaserApp {
                 self.ui.selected_tool = "Select";
                 self.execute_widget(id, serde_json::json!({}));
             }
+            "tools.offsetShapes" => self.ui.offset = Some(self.ui.offset.unwrap_or_default()),
             "edit.paste" => {
                 // Paste lands at the canvas pointer (LightBurn); with no pointer over the canvas it offsets.
                 let params = self.ui.pointer_mm.map_or_else(|| serde_json::json!({}), |[x, y]| serde_json::json!({ "xMm": x, "yMm": y }));

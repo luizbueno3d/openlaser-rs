@@ -1386,6 +1386,64 @@ fn group_paste_and_cut_go_through_the_real_engine() {
 }
 
 #[test]
+fn weld_from_the_palette_unions_and_undoes() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    doc_with_rect(&mut h, 0.0, 0.0, 10.0, 10.0);
+    h.state_mut().session.execute_as(Origin::Human, "tools.rectangle", serde_json::json!({ "xMm": 5, "yMm": 5, "wMm": 10, "hMm": 10 })).unwrap();
+    h.state_mut().session.execute_as(Origin::Human, "edit.selectAll", serde_json::json!({})).unwrap();
+    h.run();
+    // The Weld row is live now that the engine registers it.
+    h.get_by_label("Weld Shapes").click();
+    h.run();
+    let p = &h.state().session.active().unwrap().project;
+    assert_eq!(p.shapes.len(), 1, "weld left one shape");
+    let b = h.state().session.active().unwrap().project.bounds(&[h.state().session.active().unwrap().selection.ids[0]]).unwrap().unwrap();
+    assert_eq!((b.min, b.max), ([0.0, 0.0], [15.0, 15.0]));
+    // One undo restores both rectangles.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().session.active().unwrap().project.shapes.len(), 2);
+}
+
+#[test]
+fn the_offset_dialog_ghosts_then_commits_once() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    doc_with_rect(&mut h, 0.0, 0.0, 10.0, 10.0);
+    h.state_mut().session.execute_as(Origin::Human, "edit.selectAll", serde_json::json!({})).unwrap();
+    h.run();
+    let count = h.state().seam.dispatched.len();
+    // The Tools menu opens the dialog; the ghost state is live but nothing is dispatched yet.
+    h.state_mut().invoke_ui_action("tools.offsetShapes");
+    h.run();
+    assert!(h.state().ui.offset.is_some(), "the dialog is open");
+    assert_eq!(h.state().seam.dispatched.len(), count, "nothing dispatched before OK");
+    // 2 mm outward, round corners: OK dispatches exactly one offsetShapes.
+    h.state_mut().ui.offset.as_mut().unwrap().distance = 2.0;
+    h.get_by_label("OK").click();
+    h.run();
+    let dispatched = &h.state().seam.dispatched;
+    let offsets: Vec<_> = dispatched.iter().filter(|(_, id, _)| id == "tools.offsetShapes").collect();
+    assert_eq!(offsets.len(), 1, "{dispatched:?}");
+    assert_eq!(offsets[0].2["distanceMm"], 2.0);
+    let doc = h.state().session.active().unwrap();
+    assert_eq!(doc.project.shapes.len(), 2, "the original stays by default");
+    let id = doc.selection.ids[0];
+    let b = doc.project.bounds(&[id]).unwrap().unwrap();
+    assert!((b.min[0] + 2.0).abs() < 0.01 && (b.max[0] - 12.0).abs() < 0.01, "{b:?}");
+    // Reopen on the (selected) offset result with delete-original: it is replaced by its own offset.
+    h.state_mut().invoke_ui_action("tools.offsetShapes");
+    h.run();
+    h.state_mut().ui.offset.as_mut().unwrap().delete_original = true;
+    h.get_by_label("OK").click();
+    h.run();
+    let doc = h.state().session.active().unwrap();
+    assert!(doc.project.shape(id).is_none(), "deleteOriginal removed the source");
+    assert_eq!(doc.project.shapes.len(), 2, "the rect + the newest offset remain");
+}
+
+#[test]
 fn hidden_window_still_polls_while_active() {
     let mut h = harness();
     h.state_mut().seam.machine_state = Some(MachineState::Framing);

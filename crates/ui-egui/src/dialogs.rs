@@ -7,6 +7,60 @@ use openlaser_types::LayerKey;
 use crate::app::{OpenLaserApp, PlanView};
 
 impl OpenLaserApp {
+    /// The Offset Shapes dialog (LightBurn's): distance, direction, corner style and delete-original, with a live
+    /// ghost on the canvas (view.rs paints it while this is open). OK dispatches exactly one tools.offsetShapes.
+    fn offset_dialog(&mut self, ctx: &egui::Context) {
+        let Some(o) = self.ui.offset else { return };
+        let mut o = o;
+        let mut open = true;
+        let mut ok = false;
+        let mut cancel = false;
+        egui::Window::new("Offset Shapes").open(&mut open).collapsible(false).auto_sized().show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Offset distance");
+                ui.add(egui::DragValue::new(&mut o.distance).speed(0.1).range(0.001..=1000.0).suffix(" mm"));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Direction");
+                egui::ComboBox::from_id_salt("offset-direction").selected_text(["Outward", "Inward", "Both"].get(usize::from(o.direction)).copied().unwrap_or("Outward")).show_ui(ui, |ui| {
+                    for (i, name) in ["Outward", "Inward", "Both"].iter().enumerate() {
+                        if ui.selectable_label(o.direction as usize == i, *name).clicked() {
+                            o.direction = i as u8;
+                        }
+                    }
+                });
+                ui.label("Corner");
+                egui::ComboBox::from_id_salt("offset-corner").selected_text(["Round", "Sharp", "Bevel"].get(usize::from(o.corner)).copied().unwrap_or("Round")).show_ui(ui, |ui| {
+                    for (i, name) in ["Round", "Sharp", "Bevel"].iter().enumerate() {
+                        if ui.selectable_label(o.corner as usize == i, *name).clicked() {
+                            o.corner = i as u8;
+                        }
+                    }
+                });
+            });
+            ui.checkbox(&mut o.delete_original, "Delete original shapes");
+            ui.horizontal(|ui| {
+                let ok_btn = ui.add(egui::Button::new("OK"));
+                self.labeled(&ok_btn, egui::WidgetType::Button, "OK", false);
+                if ok_btn.clicked() {
+                    ok = true;
+                }
+                let cancel_btn = ui.add(egui::Button::new("Cancel"));
+                self.labeled(&cancel_btn, egui::WidgetType::Button, "Cancel", false);
+                if cancel_btn.clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        self.ui.offset = Some(o);
+        if ok {
+            self.execute_widget("tools.offsetShapes", o.params());
+        }
+        if ok || !open || cancel {
+            self.ui.offset = None;
+        }
+    }
+
     pub(crate) fn dialogs(&mut self, ctx: &egui::Context) {
         if self.ui.cut_settings_open {
             self.cut_settings_dialog(ctx);
@@ -16,6 +70,7 @@ impl OpenLaserApp {
         if self.ui.settings_open {
             self.settings_window(ctx);
         }
+        self.offset_dialog(ctx);
         if self.ui.device_settings_open {
             self.device_settings_window(ctx);
         } else {

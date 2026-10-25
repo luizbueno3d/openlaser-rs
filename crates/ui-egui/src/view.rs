@@ -328,6 +328,38 @@ impl OpenLaserApp {
             self.view.renderer.paint(&painter, &list, &view);
         }
 
+        // Live ghost of the Offset Shapes dialog's result, computed with the same kernel the command commits.
+        if let Some(o) = self.ui.offset {
+            use openlaser_geom::boolean::{Cap, Join};
+            let join = match o.corner {
+                1 => Join::Miter { limit: 4.0 },
+                2 => Join::Bevel,
+                _ => Join::Round,
+            };
+            let ghost = egui::Stroke::new(1.5, egui::Color32::from_rgb(90, 150, 255));
+            for oid in self.selection() {
+                if let Some(polys) = self.project().and_then(|p| p.world_polylines(oid, 0.01).ok()) {
+                    let closed: Vec<openlaser_geom::Polyline> = polys.iter().filter(|pl| pl.is_closed(openlaser_geom::CLOSURE_TOL_MM)).cloned().collect();
+                    let mut rings = Vec::new();
+                    if closed.is_empty() {
+                        rings.extend(openlaser_geom::boolean::stroke_outline(&polys, o.distance / 2.0, join, Cap::Round, 0.01).unwrap_or_default());
+                    } else {
+                        for sign in match o.direction {
+                            2 => vec![o.distance, -o.distance],
+                            1 => vec![-o.distance],
+                            _ => vec![o.distance],
+                        } {
+                            rings.extend(openlaser_geom::boolean::offset(&closed, sign, join, 0.01).unwrap_or_default());
+                        }
+                    }
+                    for r in rings {
+                        let pts: Vec<egui::Pos2> = r.0.iter().map(|p| view.world_to_screen(*p)).collect();
+                        painter.add(egui::Shape::line(pts, ghost));
+                    }
+                }
+            }
+        }
+
         self.canvas_selection(ui, &response, &view);
         self.canvas_draw(ui, &response, &view, hover);
         self.paint_rulers(ui, full, canvas, &view, hover, &colors);
