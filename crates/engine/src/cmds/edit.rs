@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use openlaser_doc::{Geom, Shape};
-use openlaser_geom::{BezPath, HitIndex, Polyline};
+use openlaser_geom::{Affine, BezPath, HitIndex, Polyline};
 use openlaser_types::{Bounds, LayerKey, ObjectId, Percent};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -33,6 +33,14 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             enabled: needs_doc, params: IdsParams, run: delete, doc: "{ids?}"),
         command!("edit.duplicate", "Duplicate", menu: ["Edit"], shortcut: Some("Cmd+D"), kind: Kind::Edit, access: Access::Agent,
             enabled: needs_doc, params: IdsParams, run: duplicate, doc: "{ids?}"),
+        command!("edit.cut", "Cut", menu: ["Edit"], shortcut: Some("Cmd+X"), kind: Kind::Edit, access: Access::Agent,
+            enabled: needs_doc, params: IdsParams, run: cut, doc: "{ids?} (copy to the session clipboard, then delete: one undo step)"),
+        command!("edit.copy", "Copy", menu: ["Edit"], shortcut: Some("Cmd+C"), kind: Kind::Edit, access: Access::Agent,
+            enabled: needs_doc, params: IdsParams, run: copy, doc: "{ids?} (session clipboard; no undo step)"),
+        command!("edit.paste", "Paste", menu: ["Edit"], shortcut: Some("Cmd+V"), kind: Kind::Edit, access: Access::Agent,
+            enabled: can_paste, params: PasteParams, run: paste, doc: "{xMm?, yMm?} (centre lands there; default +5, -5 mm from the copy)"),
+        command!("edit.pasteInPlace", "Paste in Place", menu: ["Edit"], shortcut: Some("Alt+V"), kind: Kind::Edit, access: Access::Agent,
+            enabled: can_paste, params: NoParams, run: paste_in_place, doc: "{}"),
         command!("edit.closePath", "Close Path", menu: ["Edit"], shortcut: None, kind: Kind::Edit, access: Access::Agent,
             enabled: needs_doc, params: ToleranceParams, run: close_path, doc: "{ids?, toleranceMm?: 0.5}"),
         command!("edit.autoJoin", "Auto-Join Selected Shapes", menu: ["Edit"], shortcut: Some("Alt+J"), kind: Kind::Edit, access: Access::Agent,
@@ -174,6 +182,91 @@ fn duplicate(s: &mut Session, p: IdsParams) -> Result<Created, EngineError> {
         Ok(fresh)
     })?;
     Ok(Created { ids })
+}
+
+// ---- clipboard (the session's own; GUI, CLI and MCP share it) ---------------------------------------------------
+
+/// Snapshot the top-level targets and their combined bounds into the session clipboard.
+fn fill_clipboard(s: &mut Session, ids: &[ObjectId]) -> Result<(), EngineError> {
+    let tol = s.prefs().curve_tolerance_mm();
+    let doc = s.doc()?;
+    let shapes: Vec<Arc<Shape>> = doc.project.shapes.iter().filter(|sh| ids.contains(&sh.id)).cloned().collect();
+    let bounds = geomx::bounds(&doc.project, ids, tol)?;
+    s.clipboard = Some(crate::session::Clipboard { shapes, bounds });
+    Ok(())
+}
+
+/// `edit.copy` stores only session state: no `s.edit`, so no history entry and no document change.
+fn copy(s: &mut Session, p: IdsParams) -> Result<Changed, EngineError> {
+    const ID: &str = "edit.copy";
+    let ids = target_ids(s, ID, p.ids)?;
+    fill_clipboard(s, &ids)?;
+    Ok(Changed { changed: ids.len() })
+}
+
+fn cut(s: &mut Session, p: IdsParams) -> Result<Changed, EngineError> {
+    const ID: &str = "edit.cut";
+    let ids = target_ids(s, ID, p.ids)?;
+    fill_clipboard(s, &ids)?;
+    let removed = s.edit(Label::new("Cut"), None, |project, sel| {
+        let before = project.shapes.len();
+        project.shapes.retain(|sh| !ids.contains(&sh.id));
+        sel.ids.retain(|i| !ids.contains(i));
+        Ok(before - project.shapes.len())
+    })?;
+    Ok(Changed { changed: removed })
+}
+
+fn can_paste(s: &Session) -> Result<(), Disabled> {
+    needs_doc(s)?;
+    match &s.clipboard {
+        Some(c) if !c.shapes.is_empty() => Ok(()),
+        _ => Err(Disabled::new("the clipboard is empty")),
+    }
+}
+
+/// `edit.paste`.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PasteParams {
+    /// x the pasted set's bounding-box centre lands on (default: the copied centre + 5 mm).
+    #[serde(default)]
+    pub x_mm: Option<f64>,
+    /// y the centre lands on (default: the copied centre - 5 mm).
+    #[serde(default)]
+    pub y_mm: Option<f64>,
+}
+
+/// Paste with `offset` as the translation applied to every fresh copy's transform.
+fn paste_with(s: &mut Session, offset: Affine) -> Result<Created, EngineError> {
+    let clip = s.clipboard.clone().unwrap_or(crate::session::Clipboard { shapes: Vec::new(), bounds: None });
+    let ids = s.edit(Label::new("Paste"), None, move |project, sel| {
+        let mut fresh = Vec::with_capacity(clip.shapes.len());
+        for sh in &clip.shapes {
+            let mut copy = geomx::assign_ids(project, (**sh).clone())?;
+            copy.xform = offset * copy.xform;
+            fresh.push(copy.id);
+            project.shapes.push(Arc::new(copy));
+        }
+        sel.ids = fresh.clone();
+        sel.key = fresh.last().copied();
+        Ok(fresh)
+    })?;
+    Ok(Created { ids })
+}
+
+fn paste(s: &mut Session, p: PasteParams) -> Result<Created, EngineError> {
+    const ID: &str = "edit.paste";
+    let x = p.x_mm.map(|v| finite(ID, "/xMm", v)).transpose()?;
+    let y = p.y_mm.map(|v| finite(ID, "/yMm", v)).transpose()?;
+    let c = s.clipboard.as_ref().and_then(|c| c.bounds);
+    let (cx, cy) = c.map(|b| ((b.min[0] + b.max[0]) / 2.0, (b.min[1] + b.max[1]) / 2.0)).unwrap_or((0.0, 0.0));
+    let offset = Affine::translate((x.unwrap_or(cx + 5.0) - cx, y.unwrap_or(cy - 5.0) - cy));
+    paste_with(s, offset)
+}
+
+fn paste_in_place(s: &mut Session, _: NoParams) -> Result<Created, EngineError> {
+    paste_with(s, Affine::IDENTITY)
 }
 
 /// `edit.closePath`, `edit.autoJoin`.

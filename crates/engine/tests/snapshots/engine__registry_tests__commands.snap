@@ -531,6 +531,144 @@ expression: rows
     }
   },
   {
+    "id": "edit.cut",
+    "label": "Cut",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": "Cmd+X",
+    "defaultShortcut": "Cmd+X",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (copy to the session clipboard, then delete: one undo step)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.copy",
+    "label": "Copy",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": "Cmd+C",
+    "defaultShortcut": "Cmd+C",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (session clipboard; no undo step)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.paste",
+    "label": "Paste",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": "Cmd+V",
+    "defaultShortcut": "Cmd+V",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{xMm?, yMm?} (centre lands there; default +5, -5 mm from the copy)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`edit.paste`.",
+      "properties": {
+        "xMm": {
+          "default": null,
+          "description": "x the pasted set's bounding-box centre lands on (default: the copied centre + 5 mm).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "yMm": {
+          "default": null,
+          "description": "y the centre lands on (default: the copied centre - 5 mm).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "title": "PasteParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.pasteInPlace",
+    "label": "Paste in Place",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": "Alt+V",
+    "defaultShortcut": "Alt+V",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
     "id": "edit.closePath",
     "label": "Close Path",
     "menu": [
@@ -961,6 +1099,142 @@ expression: rows
     }
   },
   {
+    "id": "tools.polygon",
+    "label": "Polygon",
+    "menu": [
+      "Tools",
+      "Shape"
+    ],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{cxMm, cyMm, radiusMm, sides? (3..=64, default 6), rotateDeg?, layer?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`tools.polygon`: a regular polygon, first vertex straight up unless `rotateDeg` turns it (CCW, Y up).",
+      "properties": {
+        "cxMm": {
+          "description": "Centre x (design mm).",
+          "format": "double",
+          "type": "number"
+        },
+        "cyMm": {
+          "description": "Centre y.",
+          "format": "double",
+          "type": "number"
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "description": "A LightBurn layer: colour 0..=29, or \"C05\", \"05\", \"T1\", \"T2\" (case-insensitive).",
+              "oneOf": [
+                {
+                  "maximum": 29,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "^([CcTt]?[0-9]{1,2})$",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Layer. Default: the current layer."
+        },
+        "radiusMm": {
+          "description": "Vertex radius (> 0).",
+          "format": "double",
+          "type": "number"
+        },
+        "rotateDeg": {
+          "default": null,
+          "description": "Rotation about the centre, degrees counter-clockwise. Default 0.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "sides": {
+          "default": null,
+          "description": "Vertex count, 3..=64. Default 6.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cxMm",
+        "cyMm",
+        "radiusMm"
+      ],
+      "title": "PolygonParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.measure",
+    "label": "Measure",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Alt+M",
+    "defaultShortcut": "Alt+M",
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{fromMm:[x,y], toMm:[x,y]} → {distanceMm, dxMm, dyMm, angleDeg (CCW from +X, Y up)}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`tools.measure`: a pure query — never touches the document or history.",
+      "properties": {
+        "fromMm": {
+          "description": "Start point, design mm.",
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "toMm": {
+          "description": "End point, design mm.",
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        }
+      },
+      "required": [
+        "fromMm",
+        "toMm"
+      ],
+      "title": "MeasureParams",
+      "type": "object"
+    }
+  },
+  {
     "id": "arrange.flipH",
     "label": "Flip Horizontal",
     "menu": [
@@ -1349,6 +1623,80 @@ expression: rows
     "kind": "edit",
     "agent": "allowed",
     "params": "{ids?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "arrange.group",
+    "label": "Group",
+    "menu": [
+      "Arrange"
+    ],
+    "shortcut": "Cmd+G",
+    "defaultShortcut": "Cmd+G",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (≥ 2 top-level objects)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "arrange.ungroup",
+    "label": "Ungroup",
+    "menu": [
+      "Arrange"
+    ],
+    "shortcut": "Cmd+U",
+    "defaultShortcut": "Cmd+U",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (every group target is replaced by its children)",
     "enabled": false,
     "disabledReason": "no document open",
     "needsDocument": true,

@@ -69,6 +69,15 @@ pub(crate) struct Ctx {
 /// An atomic batch in progress: edits record no history of their own; one state is recorded at the end.
 pub(crate) struct Group;
 
+/// The app-wide clipboard (`edit.copy`/`edit.cut`): deep copies of the top-level targets plus their combined
+/// world bounds, shared by the GUI, CLI and MCP because it lives on the Session, not the OS clipboard. Not part
+/// of a document, so undo and `file.new`/`file.open` never touch it.
+#[derive(Debug, Clone)]
+pub(crate) struct Clipboard {
+    pub shapes: Vec<Arc<openlaser_doc::Shape>>,
+    pub bounds: Option<openlaser_types::Bounds>,
+}
+
 #[derive(Clone)]
 pub(crate) struct Snapshot {
     docs: Vec<DocState>,
@@ -96,6 +105,7 @@ pub struct Session {
     pub(crate) live_key: Option<(usize, u64, MachineId)>,
     pub(crate) ctx: Option<Ctx>,
     pub(crate) group: Option<Group>,
+    pub(crate) clipboard: Option<Clipboard>,
 }
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -122,6 +132,7 @@ impl Session {
             live_key: None,
             ctx: None,
             group: None,
+            clipboard: None,
         }
     }
 

@@ -340,6 +340,8 @@ mod undo {
         let a = ids_of(&s.execute("tools.drawLines", json!({ "pointsMm": [[0, 0], [10, 0], [10, 10], [0, 0.2]] })).unwrap())[0];
         let b = ids_of(&s.execute("tools.rectangle", json!({ "xMm": 20, "yMm": 20, "wMm": 10, "hMm": 5, "layer": 1 })).unwrap())[0];
         s.execute("edit.selectAll", json!({})).unwrap();
+        // The session clipboard holds the selection so paste cases have something to land.
+        s.execute("edit.copy", json!({})).unwrap();
         (s, a, b)
     }
 
@@ -364,10 +366,15 @@ mod undo {
         vec![
             ("edit.delete", json!({})),
             ("edit.duplicate", json!({})),
+            ("edit.cut", json!({})),
+            ("edit.paste", json!({})),
+            ("edit.pasteInPlace", json!({})),
             ("edit.closePath", json!({ "ids": [a] })),
             ("tools.rectangle", json!({ "xMm": 0, "yMm": 0, "wMm": 5, "hMm": 5 })),
             ("tools.ellipse", json!({ "cxMm": 0, "cyMm": 0, "wMm": 4, "hMm": 2 })),
             ("tools.drawLines", json!({ "pointsMm": [[1, 1], [2, 3]] })),
+            ("tools.polygon", json!({ "cxMm": 5, "cyMm": 5, "radiusMm": 5, "sides": 5 })),
+            ("arrange.group", json!({})),
             ("arrange.flipH", json!({})),
             ("arrange.flipV", json!({})),
             ("arrange.rotateCw90", json!({})),
@@ -387,8 +394,10 @@ mod undo {
         ]
     }
 
-    const NEEDS_I1: [&str; 3] = ["file.import", "edit.autoJoin", "edit.deleteDuplicates"];
-    const NOT_UNDOABLE: [&str; 3] = ["file.new", "edit.undo", "edit.redo"];
+    /// `arrange.ungroup` needs a grouped scene (covered in `undo_roundtrip_edit_commands_needing_geometry_and_import`).
+    const NEEDS_I1: [&str; 4] = ["file.import", "edit.autoJoin", "edit.deleteDuplicates", "arrange.ungroup"];
+    /// `edit.copy` only writes the session clipboard: it changes no document and records no history step.
+    const NOT_UNDOABLE: [&str; 4] = ["file.new", "edit.undo", "edit.redo", "edit.copy"];
 
     #[test]
     fn undo_roundtrip_every_edit_command() {
@@ -420,6 +429,10 @@ mod undo {
         let d1 = ids_of(&s.execute("tools.drawLines", json!({ "pointsMm": [[50, 0], [60, 0]] })).unwrap())[0];
         let d2 = ids_of(&s.execute("tools.drawLines", json!({ "pointsMm": [[50, 0], [60, 0]] })).unwrap())[0];
         assert_undo_roundtrip(&mut s, "edit.deleteDuplicates", json!({ "ids": [d1, d2] }));
+        // A grouped scene for ungroup: group the selection first (outside the round-trip), then undo through it.
+        let (mut s, _, _) = scene();
+        let g = ids_of(&s.execute("arrange.group", json!({})).unwrap())[0];
+        assert_undo_roundtrip(&mut s, "arrange.ungroup", json!({ "ids": [g] }));
     }
 
     #[derive(Debug, Clone)]

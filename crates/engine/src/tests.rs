@@ -1338,3 +1338,241 @@ fn field_wider_than_rated_is_refused() {
     assert_eq!(e.code(), "bad_params", "{e}");
     assert!(store.saved.lock().unwrap().is_empty());
 }
+
+// ---- arrange.group / arrange.ungroup -----------------------------------------------------------------------------
+
+fn rect(s: &mut Session, x: f64, y: f64, w: f64, h: f64) -> u64 {
+    let v = s.execute("tools.rectangle", json!({ "xMm": x, "yMm": y, "wMm": w, "hMm": h })).unwrap();
+    v["ids"][0].as_u64().unwrap()
+}
+
+#[test]
+fn group_wraps_targets_and_ungroup_restores_them() {
+    let mut s = headless();
+    with_doc(&mut s);
+    let a = rect(&mut s, 0.0, 0.0, 10.0, 10.0);
+    let b = rect(&mut s, 20.0, 0.0, 5.0, 5.0);
+    let c = rect(&mut s, 40.0, 0.0, 2.0, 2.0); // stays top-level
+    let before = project(&s).bounds(&[openlaser_types::ObjectId(a), openlaser_types::ObjectId(b)]).unwrap();
+    // One object is not enough; ids inside a group are not top-level targets.
+    assert!(s.execute("arrange.group", json!({ "ids": [a] })).unwrap_err().code() == "bad_params");
+    let v = s.execute("arrange.group", json!({ "ids": [a, b] })).unwrap();
+    let g = v["ids"][0].as_u64().unwrap();
+    assert_eq!(s.active().unwrap().selection.ids, vec![openlaser_types::ObjectId(g)]);
+    // The group sits at the topmost child's slot, keeping draw order; the bounds are unchanged.
+    {
+        let p = project(&s);
+        assert_eq!(p.shapes.len(), 2);
+        assert_eq!(p.shapes[0].id.0, g, "the group takes the topmost child's slot (below the untouched shape)");
+        assert_eq!(p.shapes[1].id.0, c);
+        match &p.shapes[0].geom {
+            openlaser_doc::Geom::Group(kids) => {
+                assert_eq!(kids.len(), 2);
+                assert_eq!(kids.iter().map(|k| k.id.0).collect::<Vec<_>>(), vec![a, b], "relative order kept");
+                assert_eq!(kids[0].xform, openlaser_geom::Affine::translate((5.0, 5.0)), "children keep their own transforms");
+            }
+            other => panic!("not a group: {other:?}"),
+        }
+        assert_eq!(p.bounds(&[openlaser_types::ObjectId(g)]).unwrap(), before, "grouping never moves geometry");
+    }
+    // Ungroup restores, in place.
+    let v = s.execute("arrange.ungroup", json!({ "ids": [g] })).unwrap();
+    assert_eq!(v["changed"], 2);
+    {
+        let p = project(&s);
+        assert_eq!(p.shapes.len(), 3);
+        assert_eq!(p.bounds(&[openlaser_types::ObjectId(a), openlaser_types::ObjectId(b)]).unwrap(), before);
+        assert_eq!(s.active().unwrap().selection.ids.len(), 2);
+    }
+    // Nothing to ungroup and a bad id both refuse.
+    assert!(s.execute("arrange.ungroup", json!({ "ids": [a] })).unwrap_err().code() == "bad_params");
+    // Undo puts the group back.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(project(&s).shapes.len(), 2);
+    assert!(s.execute("edit.redo", json!({})).is_ok());
+}
+
+#[test]
+fn ungroup_composes_the_group_transform_and_ungrouping_keeps_z_order() {
+    let mut s = headless();
+    with_doc(&mut s);
+    let a = rect(&mut s, 0.0, 0.0, 10.0, 10.0);
+    let b = rect(&mut s, 20.0, 20.0, 4.0, 4.0);
+    let v = s.execute("arrange.group", json!({ "ids": [a, b] })).unwrap();
+    let g = v["ids"][0].as_u64().unwrap();
+    // Translate the whole group 7 right, 3 up; releasing the children bakes it into their xforms.
+    s.execute("arrange.transform", json!({ "ids": [g], "xMm": 20.0, "yMm": 20.0, "anchor": "bottomLeft" })).unwrap();
+    s.execute("arrange.ungroup", json!({ "ids": [g] })).unwrap();
+    let p = project(&s);
+    assert_eq!(p.bounds(&[openlaser_types::ObjectId(a)]).unwrap().unwrap().min, [20.0, 20.0], "the child landed at the composed position");
+    // A second group/ungroup round trip leaves the order and bounds exact.
+    let order: Vec<u64> = p.shapes.iter().map(|sh| sh.id.0).collect();
+    let bounds = p.bounds(&order.iter().map(|i| openlaser_types::ObjectId(*i)).collect::<Vec<_>>()).unwrap();
+    let v = s.execute("arrange.group", json!({ "ids": order })).unwrap();
+    let g = v["ids"][0].as_u64().unwrap();
+    s.execute("arrange.ungroup", json!({ "ids": [g] })).unwrap();
+    let p = project(&s);
+    assert_eq!(p.shapes.iter().map(|sh| sh.id.0).collect::<Vec<_>>(), order, "z-order preserved");
+    assert_eq!(p.bounds(&order.iter().map(|i| openlaser_types::ObjectId(*i)).collect::<Vec<_>>()).unwrap(), bounds);
+}
+
+#[test]
+fn a_grouped_design_plans_the_same_sections() {
+    let mut s = headless();
+    with_doc(&mut s);
+    let a = rect(&mut s, -20.0, -20.0, 10.0, 10.0);
+    let b = rect(&mut s, 5.0, 5.0, 10.0, 10.0);
+    let m = openlaser_machine::jpt_m7_200_sim();
+    let ungrouped = openlaser_plan::plan(
+        &project(&s),
+        &m,
+        &openlaser_plan::PlanOptions {
+            selected: None,
+            repeats: 1,
+            frame_style: openlaser_types::FrameStyle::Contour,
+            frame_source: openlaser_types::FrameSource::Job,
+            flatten_tol_mm: 0.01,
+        },
+    )
+    .unwrap();
+    let v = s.execute("arrange.group", json!({ "ids": [a, b] })).unwrap();
+    let g = v["ids"][0].as_u64().unwrap();
+    let grouped = openlaser_plan::plan(
+        &project(&s),
+        &m,
+        &openlaser_plan::PlanOptions {
+            selected: None,
+            repeats: 1,
+            frame_style: openlaser_types::FrameStyle::Contour,
+            frame_source: openlaser_types::FrameSource::Job,
+            flatten_tol_mm: 0.01,
+        },
+    )
+    .unwrap();
+    assert_eq!(grouped.sections, ungrouped.sections, "a group plans as its children");
+    s.execute("arrange.ungroup", json!({ "ids": [g] })).unwrap();
+    let after = openlaser_plan::plan(
+        &project(&s),
+        &m,
+        &openlaser_plan::PlanOptions {
+            selected: None,
+            repeats: 1,
+            frame_style: openlaser_types::FrameStyle::Contour,
+            frame_source: openlaser_types::FrameSource::Job,
+            flatten_tol_mm: 0.01,
+        },
+    )
+    .unwrap();
+    assert_eq!(after.sections, ungrouped.sections);
+}
+
+// ---- clipboard ---------------------------------------------------------------------------------------------------
+
+#[test]
+fn copy_paste_duplicates_with_new_ids_at_the_offset() {
+    let mut s = headless();
+    with_doc(&mut s);
+    let a = rect(&mut s, 0.0, 0.0, 10.0, 10.0);
+    let history_len = s.active().unwrap().history.undo.len();
+    let v = s.execute("edit.copy", json!({ "ids": [a] })).unwrap();
+    assert_eq!(v["changed"], 1);
+    assert_eq!(s.active().unwrap().history.undo.len(), history_len, "copy adds no history entry");
+    // Default paste: +5 right, -5 down from the copied centre (5,5) → new centre (10,0).
+    let v = s.execute("edit.paste", json!({})).unwrap();
+    let p1 = v["ids"][0].as_u64().unwrap();
+    assert_ne!(p1, a, "fresh id");
+    let b = project(&s).bounds(&[openlaser_types::ObjectId(p1)]).unwrap().unwrap();
+    assert_eq!(b.min, [5.0, -5.0], "{b:?}");
+    assert_eq!(s.active().unwrap().selection.ids, vec![openlaser_types::ObjectId(p1)]);
+    // A second paste is a second, independent copy.
+    let v = s.execute("edit.paste", json!({})).unwrap();
+    let p2 = v["ids"][0].as_u64().unwrap();
+    assert_ne!(p2, p1);
+    let b2 = project(&s).bounds(&[openlaser_types::ObjectId(p2)]).unwrap().unwrap();
+    assert_eq!(b2, b);
+    // Paste at a point centres the set there; pasteInPlace keeps the copied position exactly.
+    let v = s.execute("edit.paste", json!({ "xMm": 50.0, "yMm": 50.0 })).unwrap();
+    let p3 = v["ids"][0].as_u64().unwrap();
+    let b = project(&s).bounds(&[openlaser_types::ObjectId(p3)]).unwrap().unwrap();
+    assert_eq!((b.min[0] + b.max[0]) / 2.0, 50.0);
+    assert_eq!((b.min[1] + b.max[1]) / 2.0, 50.0);
+    let v = s.execute("edit.pasteInPlace", json!({})).unwrap();
+    let p4 = v["ids"][0].as_u64().unwrap();
+    let b = project(&s).bounds(&[openlaser_types::ObjectId(p4)]).unwrap().unwrap();
+    assert_eq!(b.min, [0.0, 0.0]);
+    // Cut removes in one undo step; the copy survives in the clipboard.
+    let history = s.active().unwrap().history.undo.len();
+    let v = s.execute("edit.cut", json!({ "ids": [a] })).unwrap();
+    assert_eq!(v["changed"], 1);
+    assert_eq!(s.active().unwrap().history.undo.len(), history + 1, "one undo step");
+    assert!(project(&s).shape(openlaser_types::ObjectId(a)).is_none());
+    let v = s.execute("edit.pasteInPlace", json!({})).unwrap();
+    let back = v["ids"][0].as_u64().unwrap();
+    assert_eq!(project(&s).bounds(&[openlaser_types::ObjectId(back)]).unwrap().unwrap().min, [0.0, 0.0], "the cut shape pastes back exactly");
+}
+
+#[test]
+fn paste_works_into_a_fresh_document_and_an_empty_clipboard_is_disabled() {
+    let mut s = headless();
+    with_doc(&mut s);
+    let e = s.execute("edit.paste", json!({})).unwrap_err();
+    assert!(matches!(e, EngineError::Disabled { ref reason, .. } if reason.contains("clipboard")), "{e}");
+    let a = rect(&mut s, 10.0, 10.0, 10.0, 10.0);
+    s.execute("edit.copy", json!({ "ids": [a] })).unwrap();
+    // A whole new document: the paste still lands and the layer stays valid.
+    s.execute("file.new", json!({})).unwrap();
+    let v = s.execute("edit.pasteInPlace", json!({})).unwrap();
+    let p = v["ids"][0].as_u64().unwrap();
+    let doc = s.active().unwrap();
+    assert_eq!(doc.project.bounds(&[openlaser_types::ObjectId(p)]).unwrap().unwrap().min, [10.0, 10.0]);
+    assert_eq!(doc.project.shape(openlaser_types::ObjectId(p)).unwrap().layer, openlaser_types::LayerKey::Color(0));
+}
+
+// ---- tools.polygon, tools.measure --------------------------------------------------------------------------------
+
+#[test]
+fn polygon_params_are_validated_and_the_outline_has_the_sides() {
+    let mut s = headless();
+    with_doc(&mut s);
+    let v = s.execute("tools.polygon", json!({ "cxMm": 0, "cyMm": 0, "radiusMm": 10, "sides": 5 })).unwrap();
+    let id = v["ids"][0].as_u64().unwrap();
+    let polys = project(&s).world_polylines(openlaser_types::ObjectId(id), 0.01).unwrap();
+    assert_eq!(polys.len(), 1);
+    assert_eq!(polys[0].0.len(), 6, "5 vertices + close");
+    // One vertex is straight up.
+    let top = polys[0].0.iter().max_by(|a, b| a[1].total_cmp(&b[1])).unwrap();
+    assert!(top[0].abs() < 1e-9, "the top vertex sits on the centre line: {top:?}");
+    let b = project(&s).bounds(&[openlaser_types::ObjectId(id)]).unwrap().unwrap();
+    assert!((b.min[0] + b.max[0]).abs() < 1e-9 && (b.min[1] + b.max[1]).abs() < 1e-9, "{b:?}");
+    // rotateDeg turns it: a 90°-rotated hexagon's top vertex moves onto +X of the bounds centre.
+    let v = s.execute("tools.polygon", json!({ "cxMm": 50, "cyMm": 0, "radiusMm": 10, "sides": 6, "rotateDeg": 90 })).unwrap();
+    let id2 = v["ids"][0].as_u64().unwrap();
+    let b = project(&s).bounds(&[openlaser_types::ObjectId(id2)]).unwrap().unwrap();
+    let c = [(b.min[0] + b.max[0]) / 2.0, (b.min[1] + b.max[1]) / 2.0];
+    let polys = project(&s).world_polylines(openlaser_types::ObjectId(id2), 0.01).unwrap();
+    let rel: Vec<[f64; 2]> = polys[0].0.iter().map(|p| [p[0] - c[0], p[1] - c[1]]).collect();
+    assert!(rel.iter().any(|p| (p[0] - 10.0).abs() < 1e-6 && p[1].abs() < 1e-6), "{rel:?}");
+    for (p, ptr) in [
+        (json!({ "cxMm": 0, "cyMm": 0, "radiusMm": 0 }), "/radiusMm"),
+        (json!({ "cxMm": 0, "cyMm": 0, "radiusMm": 5, "sides": 2 }), "/sides"),
+        (json!({ "cxMm": 0, "cyMm": 0, "radiusMm": 5, "sides": 100 }), "/sides"),
+        (json!({ "cxMm": 0, "cyMm": 0, "radiusMm": 5, "bogus": 1 }), ""),
+    ] {
+        assert_eq!(s.execute("tools.polygon", p.clone()).unwrap_err().code(), "bad_params", "{p}: expected {ptr}");
+    }
+    assert!(s.active().unwrap().history.can_undo(), "valid polygons were created above");
+}
+
+#[test]
+fn measure_reports_distance_and_angle() {
+    let mut s = headless();
+    let v = s.execute("tools.measure", json!({ "fromMm": [0, 0], "toMm": [3, 4] })).unwrap();
+    assert_eq!(v["distanceMm"], 5.0);
+    assert_eq!((v["dxMm"].as_f64().unwrap(), v["dyMm"].as_f64().unwrap()), (3.0, 4.0));
+    assert!((v["angleDeg"].as_f64().unwrap() - 53.130102).abs() < 1e-4, "{v}");
+    for (to, want) in [([0.0, 5.0], 90.0), ([-5.0, 0.0], 180.0), ([0.0, -5.0], -90.0), ([1.0, -1.0], -45.0)] {
+        let v = s.execute("tools.measure", json!({ "fromMm": [0, 0], "toMm": to })).unwrap();
+        assert!((v["angleDeg"].as_f64().unwrap() - want).abs() < 1e-9, "{v} vs {want}");
+    }
+    assert_eq!(s.execute("tools.measure", json!({ "fromMm": [0, 0], "toMm": ["x", 1] })).unwrap_err().code(), "bad_params");
+}

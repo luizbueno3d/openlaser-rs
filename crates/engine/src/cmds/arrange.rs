@@ -1,6 +1,8 @@
 //! Arrange menu, Numeric Edits and arrow keys: flips, quarter turns, transform, nudge, rotate, page centre
 //! (Appendix A). Every transform is one `edit`; locked objects never move.
 
+use std::sync::Arc;
+
 use openlaser_doc::WorkspaceOrigin;
 use openlaser_geom::{Affine, Vec2};
 use openlaser_types::Bounds;
@@ -33,6 +35,10 @@ pub(super) fn specs() -> Vec<CommandSpec> {
         command!("arrange.moveSelection.pageCenter", "Move Selected Objects to Page Center", menu: ["Arrange", "Move Selected Objects"],
             shortcut: Some("P"), kind: Kind::Edit, access: Access::Agent,
             enabled: needs_doc, params: IdsParams, run: page_center, doc: "{ids?}"),
+        command!("arrange.group", "Group", menu: ["Arrange"], shortcut: Some("Cmd+G"), kind: Kind::Edit, access: Access::Agent,
+            enabled: needs_doc, params: IdsParams, run: group, doc: "{ids?} (≥ 2 top-level objects)"),
+        command!("arrange.ungroup", "Ungroup", menu: ["Arrange"], shortcut: Some("Cmd+U"), kind: Kind::Edit, access: Access::Agent,
+            enabled: needs_doc, params: IdsParams, run: ungroup, doc: "{ids?} (every group target is replaced by its children)"),
     ]
 }
 
@@ -241,4 +247,96 @@ fn page_center(s: &mut Session, p: IdsParams) -> Result<Changed, EngineError> {
         let (cx, cy) = anchor_point(b, AnchorP::Center);
         Ok(Affine::translate((page.0 - cx, page.1 - cy)))
     })
+}
+
+/// `arrange.group`: the top-level targets become the children of one new group sitting at the topmost target's
+/// z-slot; children keep their own transforms and order, the group's transform is identity and its layer the
+/// bottom child's.
+fn group(s: &mut Session, p: IdsParams) -> Result<super::Created, EngineError> {
+    const ID: &str = "arrange.group";
+    let ids = target_ids(s, ID, p.ids)?;
+    let gid = s.edit(Label::new("Group"), None, |project, sel| {
+        // Draw order (low → high); every target must be a top-level, unlocked shape.
+        let mut picked: Vec<(usize, Arc<openlaser_doc::Shape>)> = Vec::with_capacity(ids.len());
+        for (i, sh) in project.shapes.iter().enumerate() {
+            if !ids.contains(&sh.id) {
+                continue;
+            }
+            if sh.locked {
+                return Err(EngineError::disabled(ID, "a locked object cannot be grouped; unlock it first"));
+            }
+            picked.push((i, Arc::clone(sh)));
+        }
+        if picked.len() != ids.len() {
+            return Err(EngineError::bad(ID, "/ids", "every id must name a top-level object"));
+        }
+        if picked.len() < 2 {
+            return Err(EngineError::bad(ID, "/ids", "grouping needs at least two objects"));
+        }
+        let top = picked.iter().map(|(i, _)| *i).max().unwrap_or(0);
+        let layer = picked.first().map(|(_, sh)| sh.layer).unwrap_or(openlaser_types::LayerKey::Color(0));
+        let children: Vec<Arc<openlaser_doc::Shape>> = picked.iter().map(|(_, sh)| Arc::clone(sh)).collect();
+        let gid = project.alloc_id().map_err(geomx::doc_error)?;
+        project.shapes.retain(|sh| !ids.contains(&sh.id));
+        // The removed children sat below the topmost one: its slot is `top - (picked.len() - 1)`.
+        let at = top.saturating_sub(picked.len() - 1).min(project.shapes.len());
+        project.shapes.insert(
+            at,
+            Arc::new(openlaser_doc::Shape {
+                id: gid,
+                name: None,
+                layer,
+                xform: Affine::IDENTITY,
+                geom: openlaser_doc::Geom::Group(children),
+                locked: false,
+                power_scale: openlaser_types::Percent::MAX_VALID,
+                priority: 0,
+            }),
+        );
+        sel.ids = vec![gid];
+        sel.key = Some(gid);
+        Ok(gid)
+    })?;
+    Ok(super::Created { ids: vec![gid] })
+}
+
+/// `arrange.ungroup`: every group target is replaced in its own z-slot by its children (each child's transform
+/// composed under the group's); the released children become the selection. Non-group targets are left alone.
+fn ungroup(s: &mut Session, p: IdsParams) -> Result<Changed, EngineError> {
+    const ID: &str = "arrange.ungroup";
+    let ids = target_ids(s, ID, p.ids)?;
+    let released = s.edit(Label::new("Ungroup"), None, |project, sel| {
+        let mut any = false;
+        for sh in &project.shapes {
+            if ids.contains(&sh.id) && matches!(sh.geom, openlaser_doc::Geom::Group(_)) {
+                any = true;
+                if sh.locked {
+                    return Err(EngineError::disabled(ID, "a locked group cannot be ungrouped; unlock it first"));
+                }
+            }
+        }
+        if !any {
+            return Err(EngineError::bad(ID, "/ids", "nothing to ungroup: no target is a group"));
+        }
+        let mut out: Vec<Arc<openlaser_doc::Shape>> = Vec::with_capacity(project.shapes.len());
+        let mut released = Vec::new();
+        for sh in &project.shapes {
+            match (ids.contains(&sh.id), &sh.geom) {
+                (true, openlaser_doc::Geom::Group(children)) => {
+                    for c in children {
+                        let mut child = (**c).clone();
+                        child.xform = sh.xform * child.xform;
+                        released.push(child.id);
+                        out.push(Arc::new(child));
+                    }
+                }
+                _ => out.push(Arc::clone(sh)),
+            }
+        }
+        project.shapes = out;
+        sel.ids = released.clone();
+        sel.key = released.last().copied();
+        Ok(released)
+    })?;
+    Ok(Changed { changed: released.len() })
 }
