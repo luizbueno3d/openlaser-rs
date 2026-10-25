@@ -26,3 +26,4 @@ Rust crate dependencies are not listed here: `Cargo.lock` pins them and `deny.to
 LightBurn's code, icons, images, screenshots or help text (LightBurn was studied for behaviour, layout and file
 formats only). GPL or unlicensed sources: balor, LaserGRBL, K40 Whisperer, UGS, potrace, clayfrocker97/OpenLaser,
 GP30, earlynerd. No firmware (`clone_loader.py`) and no EZCAD files.
+| i_overlay | MIT OR Apache-2.0 | https://github.com/iShape-Rust/iOverlay | Boolean overlay/offset engine used by openlaser-geom (weld, booleans, offsets, stroke outlines). |

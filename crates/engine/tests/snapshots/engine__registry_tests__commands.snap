@@ -1235,6 +1235,223 @@ expression: rows
     }
   },
   {
+    "id": "tools.weld",
+    "label": "Weld Shapes",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Cmd+W",
+    "defaultShortcut": "Cmd+W",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (≥ 2 closed objects, unioned into one path)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.booleanUnion",
+    "label": "Boolean Union",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Alt+Plus",
+    "defaultShortcut": "Alt+Plus",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (exactly 2 closed objects)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.booleanSubtract",
+    "label": "Boolean Subtract",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Alt+Minus",
+    "defaultShortcut": "Alt+Minus",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (exactly 2 closed objects; the topmost is subtracted)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.booleanIntersect",
+    "label": "Boolean Intersection",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Alt+Shift+8",
+    "defaultShortcut": "Alt+Shift+8",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (exactly 2 closed objects)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.offsetShapes",
+    "label": "Offset Shapes…",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Alt+O",
+    "defaultShortcut": "Alt+O",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?, distanceMm (>0, ≤1000), direction?\"outward\"|\"inward\"|\"both\", corner?\"round\"|\"sharp\"|\"bevel\", deleteOriginal?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`tools.offsetShapes`.",
+      "properties": {
+        "corner": {
+          "default": null,
+          "description": "\"round\" (default), \"sharp\" (miter, limit 4) or \"bevel\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deleteOriginal": {
+          "default": null,
+          "description": "Remove the originals. Default false.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "direction": {
+          "default": null,
+          "description": "\"outward\" (default), \"inward\" or \"both\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "distanceMm": {
+          "description": "Offset distance in mm (> 0, ≤ 1000). Outward grows, inward shrinks, open paths get a stroke this wide/2.",
+          "format": "double",
+          "type": "number"
+        },
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "distanceMm"
+      ],
+      "title": "OffsetParams",
+      "type": "object"
+    }
+  },
+  {
     "id": "arrange.flipH",
     "label": "Flip Horizontal",
     "menu": [

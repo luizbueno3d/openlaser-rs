@@ -6,6 +6,7 @@
 //! test and the canvas `HitIndex`.
 #![forbid(unsafe_code)]
 
+pub mod boolean;
 mod hatch;
 mod hit;
 mod ops;
@@ -80,6 +81,9 @@ pub const DEFAULT_FLATTEN_TOL_MM: f64 = 0.01;
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum Error {
+    /// A closed boolean/offset operand has fewer than 3 points.
+    #[error("a closed operand needs at least 3 points")]
+    TooFewPoints,
     #[error("line interval must be > 0 (got {0})")]
     BadInterval(f64),
     #[error("non-finite coordinate")]

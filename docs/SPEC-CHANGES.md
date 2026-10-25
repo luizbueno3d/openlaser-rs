@@ -101,6 +101,9 @@ summarised per crate. Fold into SPEC revision 3.
 
 ## I2 (integrator)
 
+- `geom` gains `boolean` (i_overlay 9.1.0, default-features off — integer/single-threaded): `boolean`, `union_all`, `offset`, `stroke_outline` on closed/open polylines; operands are EvenOdd-normalised, combined NonZero; `geom::Error::TooFewPoints` is new.
+- `engine`: `tools.weld`, `tools.booleanUnion`/`booleanSubtract`/`booleanIntersect`, `tools.offsetShapes`, `tools.polygon`, `tools.measure`, `arrange.group`/`ungroup`, `edit.copy`/`cut`/`paste`/`pasteInPlace`; the Session holds a per-session clipboard.
+
 - `doc`: `Project::{alloc_id, world_polylines, bounds}` return `Result` (`IdsExhausted`, `BadTolerance`, `NonFinite`, `TooManyPoints`); `geom::flatten` returns `Result` and `flatten_with_budget`/`check_tolerance`/`PointBudget` bound it; `format::MAX_MAGNITUDE` = 1e9; save validates like load (`normalize()` first); load refuses a layer order that differs from the used layers; `CutTable::check_passes` and `Error::ZeroPasses` refuse `passes = 0` on load and save; `Project::world_transform(id)` resolves the composed ancestor transform of one shape; `Shape::xform` is parent-space.
 - World queries are ancestor-aware: `world_polylines`/`bounds`/`world_transform` compose every ancestor group's transform (outermost first). Callers holding a bare shape must compose `world_transform` (or walk ancestors); `Shape::xform` alone is not world space.
 - `plan`: `Error::Doc(#[from] openlaser_doc::Error)`; `plan()` calls `check_passes` before planning, so a zero-pass layer is refused even if a forged project bypassed load-time validation.

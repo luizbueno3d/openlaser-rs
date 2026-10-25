@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use openlaser_doc::{Geom, Shape};
+use openlaser_geom::boolean::{BooleanOp, Cap, Join};
 use openlaser_geom::{Affine, BezPath, Vec2};
 use openlaser_types::{LayerKey, Mm, ObjectId, Percent};
 use schemars::JsonSchema;
@@ -12,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::{Created, always, needs_doc};
 use crate::command::{Access, CommandSpec, EngineError, Kind};
-use crate::params::{LayerKeySchema, NoParams, finite, positive};
+use crate::params::{IdsParams, LayerKeySchema, NoParams, finite, positive};
 use crate::session::{Label, Session};
 use crate::{command, geomx};
 
@@ -40,7 +41,217 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             enabled: needs_doc, params: PolygonParams, run: polygon, doc: "{cxMm, cyMm, radiusMm, sides? (3..=64, default 6), rotateDeg?, layer?}"),
         command!("tools.measure", "Measure", menu: ["Tools"], shortcut: Some("Alt+M"), kind: Kind::Query, access: Access::Agent,
             enabled: always, params: MeasureParams, run: measure, doc: "{fromMm:[x,y], toMm:[x,y]} → {distanceMm, dxMm, dyMm, angleDeg (CCW from +X, Y up)}"),
+        command!("tools.weld", "Weld Shapes", menu: ["Tools"], shortcut: Some("Cmd+W"), kind: Kind::Edit, access: Access::Agent,
+            enabled: needs_doc, params: IdsParams, run: weld, doc: "{ids?} (≥ 2 closed objects, unioned into one path)"),
+        command!("tools.booleanUnion", "Boolean Union", menu: ["Tools"], shortcut: Some("Alt+Plus"), kind: Kind::Edit, access: Access::Agent,
+            enabled: needs_doc, params: IdsParams, run: |s, p| boolean_two(s, p, BooleanOp::Union), doc: "{ids?} (exactly 2 closed objects)"),
+        command!("tools.booleanSubtract", "Boolean Subtract", menu: ["Tools"], shortcut: Some("Alt+Minus"), kind: Kind::Edit, access: Access::Agent,
+            enabled: needs_doc, params: IdsParams, run: |s, p| boolean_two(s, p, BooleanOp::Difference), doc: "{ids?} (exactly 2 closed objects; the topmost is subtracted)"),
+        command!("tools.booleanIntersect", "Boolean Intersection", menu: ["Tools"], shortcut: Some("Alt+Shift+8"), kind: Kind::Edit, access: Access::Agent,
+            enabled: needs_doc, params: IdsParams, run: |s, p| boolean_two(s, p, BooleanOp::Intersection), doc: "{ids?} (exactly 2 closed objects)"),
+        command!("tools.offsetShapes", "Offset Shapes…", menu: ["Tools"], shortcut: Some("Alt+O"), kind: Kind::Edit, access: Access::Agent,
+            enabled: needs_doc, params: OffsetParams, run: offset_shapes,
+            doc: "{ids?, distanceMm (>0, ≤1000), direction?\"outward\"|\"inward\"|\"both\", corner?\"round\"|\"sharp\"|\"bevel\", deleteOriginal?}"),
     ]
+}
+
+/// Closed world-space polylines of one top-level target (groups contribute their closed leaves; flattened at the
+/// session's curve tolerance). An open ring is a bad-param error naming the object.
+fn closed_world_rings(s: &Session, id: &str, oid: openlaser_types::ObjectId) -> Result<Vec<openlaser_geom::Polyline>, EngineError> {
+    let tol = s.prefs().curve_tolerance_mm();
+    let polys = s.doc()?.project.world_polylines(oid, tol).map_err(geomx::geom_error)?;
+    for pl in &polys {
+        if !pl.is_closed(openlaser_geom::CLOSURE_TOL_MM) {
+            return Err(EngineError::bad(id, "/ids", format!("weld and booleans need closed shapes; object {} is open", oid.0)));
+        }
+    }
+    if polys.is_empty() {
+        return Err(EngineError::bad(id, "/ids", format!("object {} has no outline", oid.0)));
+    }
+    Ok(polys)
+}
+
+/// Rings → one closed BezPath (world space; the new shape gets xform identity).
+fn rings_to_path(rings: &[openlaser_geom::Polyline]) -> BezPath {
+    let mut path = BezPath::new();
+    for r in rings {
+        for (i, pt) in r.0.iter().enumerate() {
+            if i == 0 {
+                path.move_to((pt[0], pt[1]));
+            } else {
+                path.line_to((pt[0], pt[1]));
+            }
+        }
+        path.close_path();
+    }
+    path
+}
+
+/// Replace the target shapes by `rings` as one new path: bottom-most target's layer, topmost target's z-slot,
+/// the targets removed, the result selected.
+fn commit_paths(s: &mut Session, label: &'static str, ids: &[openlaser_types::ObjectId], rings: Vec<openlaser_geom::Polyline>) -> Result<Created, EngineError> {
+    s.edit(Label::new(label), None, |project, sel| {
+        let mut low: Option<(usize, LayerKey)> = None;
+        let mut top = 0usize;
+        for (i, sh) in project.shapes.iter().enumerate() {
+            if ids.contains(&sh.id) {
+                if low.is_none() {
+                    low = Some((i, sh.layer));
+                }
+                top = i;
+            }
+        }
+        let layer = low.map(|(_, l)| l).unwrap_or(LayerKey::Color(0));
+        let removed_above_slot = ids.len() - 1;
+        let id = project.alloc_id().map_err(geomx::doc_error)?;
+        project.shapes.retain(|sh| !ids.contains(&sh.id));
+        let at = top.saturating_sub(removed_above_slot).min(project.shapes.len());
+        project.shapes.insert(
+            at,
+            Arc::new(Shape { id, name: None, layer, xform: Affine::IDENTITY, geom: Geom::Path(Arc::new(rings_to_path(&rings))), locked: false, power_scale: FULL_POWER, priority: 0 }),
+        );
+        sel.ids = vec![id];
+        sel.key = Some(id);
+        Ok(Created { ids: vec![id] })
+    })
+}
+
+fn weld(s: &mut Session, p: IdsParams) -> Result<Created, EngineError> {
+    const ID: &str = "tools.weld";
+    let ids = super::target_ids(s, ID, p.ids)?;
+    if ids.len() < 2 {
+        return Err(EngineError::bad(ID, "/ids", "weld needs at least two objects"));
+    }
+    for oid in &ids {
+        if s.doc()?.project.shape(*oid).is_some_and(|sh| sh.locked) {
+            return Err(EngineError::disabled(ID, "a locked object cannot be welded; unlock it first"));
+        }
+    }
+    let shapes: Vec<Vec<openlaser_geom::Polyline>> = ids.iter().map(|oid| closed_world_rings(s, ID, *oid)).collect::<Result<_, _>>()?;
+    let rings = openlaser_geom::boolean::union_all(&shapes).map_err(geomx::geom_error)?;
+    if rings.is_empty() {
+        return Err(EngineError::bad(ID, "/ids", "weld produced nothing"));
+    }
+    commit_paths(s, "Weld", &ids, rings)
+}
+
+fn boolean_two(s: &mut Session, p: IdsParams, op: BooleanOp) -> Result<Created, EngineError> {
+    const ID: &str = "tools.boolean";
+    let ids = super::target_ids(s, ID, p.ids)?;
+    if ids.len() != 2 {
+        return Err(EngineError::bad(ID, "/ids", "booleans need exactly two objects"));
+    }
+    // Draw order decides the operands: the topmost target is the clip (Subtract removes it from the bottom one).
+    let mut order: Vec<(usize, openlaser_types::ObjectId)> = s
+        .doc()?
+        .project
+        .shapes
+        .iter()
+        .enumerate()
+        .filter(|(_, sh)| ids.contains(&sh.id))
+        .map(|(i, sh)| (i, sh.id))
+        .collect();
+    order.sort_by_key(|(i, _)| *i);
+    for (_, oid) in &order {
+        if s.doc()?.project.shape(*oid).is_some_and(|sh| sh.locked) {
+            return Err(EngineError::disabled(ID, "a locked object cannot take part in a boolean; unlock it first"));
+        }
+    }
+    let (bottom, top) = (order[0].1, order[1].1);
+    let a = closed_world_rings(s, ID, bottom)?;
+    let b = closed_world_rings(s, ID, top)?;
+    let rings = openlaser_geom::boolean::boolean(&a, &b, op).map_err(geomx::geom_error)?;
+    if rings.is_empty() {
+        return Err(EngineError::bad(ID, "/ids", "the shapes do not overlap"));
+    }
+    commit_paths(s, "Boolean", &[bottom, top], rings)
+}
+
+/// `tools.offsetShapes`.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OffsetParams {
+    /// Object ids. Default: the selection.
+    #[serde(default)]
+    pub ids: Option<Vec<u64>>,
+    /// Offset distance in mm (> 0, ≤ 1000). Outward grows, inward shrinks, open paths get a stroke this wide/2.
+    pub distance_mm: f64,
+    /// "outward" (default), "inward" or "both".
+    #[serde(default)]
+    pub direction: Option<String>,
+    /// "round" (default), "sharp" (miter, limit 4) or "bevel".
+    #[serde(default)]
+    pub corner: Option<String>,
+    /// Remove the originals. Default false.
+    #[serde(default)]
+    pub delete_original: Option<bool>,
+}
+
+fn offset_shapes(s: &mut Session, p: OffsetParams) -> Result<Value, EngineError> {
+    const ID: &str = "tools.offsetShapes";
+    let d = positive(ID, "/distanceMm", p.distance_mm, 1000.0)?;
+    let direction = p.direction.as_deref().unwrap_or("outward");
+    if !matches!(direction, "outward" | "inward" | "both") {
+        return Err(EngineError::bad(ID, "/direction", format!("`{direction}` is not outward, inward or both")));
+    }
+    let join = match p.corner.as_deref().unwrap_or("round") {
+        "round" => Join::Round,
+        "sharp" => Join::Miter { limit: 4.0 },
+        "bevel" => Join::Bevel,
+        other => return Err(EngineError::bad(ID, "/corner", format!("`{other}` is not round, sharp or bevel"))),
+    };
+    let ids = super::target_ids(s, ID, p.ids)?;
+    let tol = s.prefs().curve_tolerance_mm();
+    let delete = p.delete_original.unwrap_or(false);
+    let delete_idcs: std::collections::HashSet<u64> = if delete { ids.iter().map(|i| i.0).collect() } else { std::collections::HashSet::new() };
+    // Per target, world-space rings: closed → offset ±d, open → stroke outline at half-width.
+    let mut per: Vec<(usize, LayerKey, Vec<openlaser_geom::Polyline>)> = Vec::new();
+    let mut vanished: Vec<u64> = Vec::new();
+    for oid in &ids {
+        let Some(sh) = s.doc()?.project.shapes.iter().enumerate().find(|(_, s)| s.id == *oid).map(|(i, s)| (i, s.clone())) else {
+            continue;
+        };
+        if sh.1.locked {
+            return Err(EngineError::disabled(ID, "a locked object cannot be offset; unlock it first"));
+        }
+        let polys = s.doc()?.project.world_polylines(*oid, tol).map_err(geomx::geom_error)?;
+        let closed: Vec<openlaser_geom::Polyline> = polys.iter().filter(|pl| pl.is_closed(openlaser_geom::CLOSURE_TOL_MM)).cloned().collect();
+        let mut rings = Vec::new();
+        if closed.is_empty() {
+            rings.extend(openlaser_geom::boolean::stroke_outline(&polys, d / 2.0, join, Cap::Round, tol).map_err(geomx::geom_error)?);
+        } else {
+            for sign in match direction {
+                "both" => vec![d, -d],
+                "inward" => vec![-d],
+                _ => vec![d],
+            } {
+                rings.extend(openlaser_geom::boolean::offset(&closed, sign, join, tol).map_err(geomx::geom_error)?);
+            }
+        }
+        if rings.is_empty() {
+            vanished.push(oid.0);
+        } else {
+            per.push((sh.0, sh.1.layer, rings));
+        }
+    }
+    if per.is_empty() {
+        return Err(EngineError::bad(ID, "/ids", "every offset vanished; nothing to create"));
+    }
+    let created = s.edit(Label::new("Offset Shapes"), None, move |project, sel| {
+        let mut fresh = Vec::with_capacity(per.len());
+        for (slot, layer, rings) in &per {
+            let id = project.alloc_id().map_err(geomx::doc_error)?;
+            fresh.push(id);
+            let mut shape = Shape { id, name: None, layer: *layer, xform: Affine::IDENTITY, geom: Geom::Path(Arc::new(rings_to_path(rings))), locked: false, power_scale: FULL_POWER, priority: 0 };
+            shape.locked = false;
+            project.shapes.insert((*slot + 1).min(project.shapes.len()), Arc::new(shape));
+        }
+        project.shapes.retain(|sh| !delete_idcs.contains(&sh.id.0));
+        sel.ids = fresh.clone();
+        sel.key = fresh.last().copied();
+        Ok(fresh)
+    })?;
+    Ok(json!({ "ids": created, "vanished": vanished }))
 }
 
 /// `tools.rectangle`.

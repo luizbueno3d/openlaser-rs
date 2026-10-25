@@ -30,8 +30,8 @@ const PLATFORMS: &[&str] = &["aarch64-apple-darwin", "x86_64-apple-darwin", "x86
 /// Names without the `openlaser-` prefix are workspace crates.
 const TABLE: &[(&str, &[&str], &[&str])] = &[
     ("types", &[], &["serde", "thiserror"]),
-    ("geom", &["types"], &["kurbo", "rstar", "serde", "thiserror"]),
-    ("doc", &["types", "geom"], &["kurbo", "serde", "serde_json", "thiserror"]),
+    ("geom", &["types"], &["kurbo", "i_overlay", "rstar", "serde", "thiserror"]),
+    ("doc", &["types", "geom"], &["kurbo", "i_overlay", "serde", "serde_json", "thiserror"]),
     ("machine", &["types", "geom", "doc"], &["serde", "thiserror"]),
     ("format", &["types", "geom", "doc", "machine"], &["zip", "flate2", "serde", "serde_json", "blake3", "craft-atomic", "craft-settings", "thiserror"]),
     ("import", &["types", "geom", "doc"], &["usvg", "image", "serde", "serde_json", "blake3", "thiserror"]),

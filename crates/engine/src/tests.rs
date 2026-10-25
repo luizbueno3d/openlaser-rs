@@ -1573,3 +1573,106 @@ fn measure_reports_distance_and_angle() {
     }
     assert_eq!(s.execute("tools.measure", json!({ "fromMm": [0, 0], "toMm": ["x", 1] })).unwrap_err().code(), "bad_params");
 }
+
+// ---- weld, booleans, offsets -------------------------------------------------------------------------------------
+
+fn bounds_of(s: &Session, id: u64) -> openlaser_types::Bounds {
+    project(s).bounds(&[openlaser_types::ObjectId(id)]).unwrap().unwrap()
+}
+
+#[test]
+fn weld_unions_overlapping_rects_into_one_path() {
+    let mut s = headless();
+    with_doc(&mut s);
+    let a = rect(&mut s, 0.0, 0.0, 10.0, 10.0);
+    let b = rect(&mut s, 5.0, 5.0, 10.0, 10.0);
+    let v = s.execute("tools.weld", json!({ "ids": [a, b] })).unwrap();
+    let g = v["ids"][0].as_u64().unwrap();
+    let p = project(&s);
+    assert_eq!(p.shapes.len(), 1);
+    assert!(matches!(p.shape(openlaser_types::ObjectId(g)).unwrap().geom, openlaser_doc::Geom::Path(_)));
+    assert_eq!(s.active().unwrap().selection.ids, vec![openlaser_types::ObjectId(g)]);
+    assert_eq!(bounds_of(&s, g), openlaser_types::Bounds { min: [0.0, 0.0], max: [15.0, 15.0] });
+    // An open path in the targets is named.
+    let l = draw(&mut s, json!([[50, 0], [60, 0]]));
+    let e = s.execute("tools.weld", json!({ "ids": [g, l] })).unwrap_err();
+    assert!(matches!(e, EngineError::BadParams { .. }) && e.to_string().contains(&l.to_string()), "{e}");
+    // Fewer than two targets is a bad-param error.
+    assert_eq!(s.execute("tools.weld", json!({ "ids": [g] })).unwrap_err().code(), "bad_params");
+    // Undo restores both originals.
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap(); // once for weld (line draw also made a step — unwind past it)
+}
+
+#[test]
+fn booleans_combine_exactly_two_shapes() {
+    let mut s = headless();
+    with_doc(&mut s);
+    let a = rect(&mut s, 0.0, 0.0, 10.0, 10.0);
+    let b = rect(&mut s, 5.0, 5.0, 10.0, 10.0);
+    // Subtract: topmost (b, drawn later) is removed from the bottom (a).
+    let v = s.execute("tools.booleanSubtract", json!({ "ids": [a, b] })).unwrap();
+    let g = v["ids"][0].as_u64().unwrap();
+    let p = project(&s);
+    assert_eq!(p.shapes.len(), 1);
+    assert_eq!(bounds_of(&s, g), openlaser_types::Bounds { min: [0.0, 0.0], max: [10.0, 10.0] });
+    // The result has an outer and a notch boundary — two rings where they bit.
+    let polys = p.world_polylines(openlaser_types::ObjectId(g), 0.01).unwrap();
+    assert_eq!(polys.len(), 1, "{polys:?}");
+    // Wrong arity and a non-overlapping pair refuse.
+    assert_eq!(s.execute("tools.booleanUnion", json!({ "ids": [g] })).unwrap_err().code(), "bad_params");
+    let c = rect(&mut s, 100.0, 100.0, 5.0, 5.0);
+    let e = s.execute("tools.booleanIntersect", json!({ "ids": [g, c] })).unwrap_err();
+    assert_eq!(e.code(), "bad_params");
+    assert!(e.to_string().contains("overlap"), "{e}");
+    // Union keeps both bounds.
+    let d = rect(&mut s, 200.0, 0.0, 10.0, 10.0);
+    let v = s.execute("tools.booleanUnion", json!({ "ids": [c, d] })).unwrap();
+    let u = v["ids"][0].as_u64().unwrap();
+    assert_eq!(bounds_of(&s, u), openlaser_types::Bounds { min: [100.0, 0.0], max: [210.0, 105.0] });
+}
+
+#[test]
+fn offset_grows_shrinks_and_strokes() {
+    let mut s = headless();
+    with_doc(&mut s);
+    let a = rect(&mut s, 0.0, 0.0, 10.0, 10.0);
+    let v = s.execute("tools.offsetShapes", json!({ "ids": [a], "distanceMm": 2.0 })).unwrap();
+    let o = v["ids"][0].as_u64().unwrap();
+    assert_eq!(bounds_of(&s, o), openlaser_types::Bounds { min: [-2.0, -2.0], max: [12.0, 12.0] });
+    assert!(project(&s).shape(openlaser_types::ObjectId(a)).is_some(), "the original is kept by default");
+    // Inward shrink.
+    let v = s.execute("tools.offsetShapes", json!({ "ids": [a], "distanceMm": 1.0, "direction": "inward" })).unwrap();
+    let o = v["ids"][0].as_u64().unwrap();
+    assert_eq!(bounds_of(&s, o), openlaser_types::Bounds { min: [1.0, 1.0], max: [9.0, 9.0] });
+    // Open paths stroke to half the distance; a shape that vanishes is reported, not failed alone.
+    let l = draw(&mut s, json!([[50, 50], [60, 50]]));
+    let v = s.execute("tools.offsetShapes", json!({ "ids": [l], "distanceMm": 2.0 })).unwrap();
+    let o = v["ids"][0].as_u64().unwrap();
+    let b = bounds_of(&s, o);
+    assert!((b.max[0] - b.min[0] - 12.0).abs() < 0.01 && (b.max[1] - b.min[1] - 2.0).abs() < 0.01, "{b:?}");
+    // deleteOriginal removes the source; the shrink of a tiny square vanishes it and others survive.
+    let v = s.execute("tools.offsetShapes", json!({ "ids": [o], "distanceMm": 1.0, "deleteOriginal": true })).unwrap();
+    assert!(v["ids"].as_array().unwrap().len() == 1);
+    // All-vanishing is a bad-param error.
+    let t = rect(&mut s, 300.0, 300.0, 1.0, 1.0);
+    assert_eq!(s.execute("tools.offsetShapes", json!({ "ids": [t], "distanceMm": 1.0, "direction": "inward" })).unwrap_err().code(), "bad_params");
+    assert_eq!(s.execute("tools.offsetShapes", json!({ "ids": [a], "distanceMm": 0 })).unwrap_err().code(), "bad_params");
+    assert_eq!(s.execute("tools.offsetShapes", json!({ "ids": [a], "distanceMm": 1, "corner": "bogus" })).unwrap_err().code(), "bad_params");
+}
+
+#[test]
+fn a_welded_design_plans_one_outline() {
+    let mut s = headless();
+    with_doc(&mut s);
+    let a = rect(&mut s, -20.0, -20.0, 10.0, 10.0);
+    let b = rect(&mut s, -15.0, -20.0, 10.0, 10.0);
+    let m = openlaser_machine::jpt_m7_200_sim();
+    let v = s.execute("tools.weld", json!({ "ids": [a, b] })).unwrap();
+    let g = v["ids"][0].as_u64().unwrap();
+    let plan = openlaser_plan::plan(&project(&s), &m, &openlaser_plan::PlanOptions { selected: None, repeats: 1, frame_style: openlaser_types::FrameStyle::Contour, frame_source: openlaser_types::FrameSource::Job, flatten_tol_mm: 0.01 }).unwrap();
+    // One welded outline: one section, one path — the shared edge burns once, not twice.
+    let total_paths: usize = plan.sections.iter().map(|sec| sec.paths.len()).sum();
+    assert_eq!(total_paths, 1, "{:?}", plan.sections.len());
+    assert_eq!(bounds_of(&s, g), openlaser_types::Bounds { min: [-20.0, -20.0], max: [-5.0, -10.0] });
+}

@@ -16,6 +16,7 @@ kurbo = { workspace = true }
 rstar = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+i_overlay = { workspace = true, default-features = false }
 
 [dev-dependencies]
 openlaser-testkit = { workspace = true }
