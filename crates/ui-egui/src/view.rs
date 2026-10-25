@@ -687,8 +687,12 @@ impl OpenLaserApp {
         {
             let world = view.screen_to_world(position);
             let hit = self.hit_shape(view, world);
-            let on_selection = hit.is_some_and(|id| self.selection().contains(&id))
-                || bounds.is_some_and(|b| world[0] >= b.min[0] && world[0] <= b.max[0] && world[1] >= b.min[1] && world[1] <= b.max[1]);
+            // A stroke hit decides: an unselected shape inside the box is selected, not a handle toggle. Only an
+            // empty spot inside the box counts as "on the selection".
+            let on_selection = match hit {
+                Some(id) => self.selection().contains(&id),
+                None => bounds.is_some_and(|b| world[0] >= b.min[0] && world[0] <= b.max[0] && world[1] >= b.min[1] && world[1] <= b.max[1]),
+            };
             match (hit, shift) {
                 // A click on an already-selected object (stroke or inside its box) toggles the handles.
                 _ if !shift && on_selection => self.view.rotate_handles = !self.view.rotate_handles,

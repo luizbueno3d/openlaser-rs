@@ -1185,6 +1185,25 @@ fn clicking_selected_toggles_rotate_handles_and_rotate_drag_commits() {
 }
 
 #[test]
+fn clicking_an_unselected_shape_inside_the_box_selects_it() {
+    // Regression: a stroke hit on another shape inside the selection's box toggled the handles instead.
+    let mut h = with_human(HumanFrames);
+    h.run();
+    let big = doc_with_rect(&mut h, 0.0, 0.0, 40.0, 40.0);
+    let v =
+        h.state_mut().session.execute_as(Origin::Human, "tools.rectangle", serde_json::json!({ "xMm": 10.0, "yMm": 10.0, "wMm": 5.0, "hMm": 5.0 })).unwrap();
+    let small = openlaser_types::ObjectId(v["ids"][0].as_u64().unwrap());
+    h.state_mut().session.execute_as(Origin::Human, "edit.select", serde_json::json!({ "ids": [big.0], "mode": "replace" })).unwrap();
+    h.run();
+    let p = w2s(&h, [10.0, 12.5]);
+    pointer(&mut h, p, true, egui::Modifiers::NONE);
+    pointer(&mut h, p, false, egui::Modifiers::NONE);
+    h.run();
+    assert_eq!(h.state().session.active().unwrap().selection.ids, vec![small]);
+    assert!(!h.state().view.rotate_handles);
+}
+
+#[test]
 fn esc_mid_drag_dispatches_nothing_and_keeps_the_document() {
     let mut h = with_human(HumanFrames);
     h.run();
