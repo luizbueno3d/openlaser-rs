@@ -750,8 +750,27 @@ impl eframe::App for OpenLaserApp {
             self.invoke_menu_command(ctx, id);
         }
         let idle_esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-        if idle_esc && !self.safety_active() && !text_focus && !ctx.any_popup_open() && ctx.memory(|m| m.top_modal_layer().is_none()) {
+        let canvas_drag = self.view.sel_drag.is_some() || self.view.marquee_from.is_some();
+        if idle_esc && !canvas_drag && !self.safety_active() && !text_focus && !ctx.any_popup_open() && ctx.memory(|m| m.top_modal_layer().is_none()) {
             self.invoke_ui_action("edit.selectNone");
+        }
+        // Arrow keys nudge the selection: 1 mm, Shift = 10 mm (Y up, so Up is +dyMm). Only while no text
+        // field has focus; consecutive nudges coalesce into one undo step inside the engine.
+        if !text_focus && !self.safety_active() && !ctx.any_popup_open() && !self.selection().is_empty() {
+            let (shift, left, right, up, down) = ctx.input(|i| {
+                (
+                    i.modifiers.shift,
+                    i.key_pressed(egui::Key::ArrowLeft),
+                    i.key_pressed(egui::Key::ArrowRight),
+                    i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::ArrowDown),
+                )
+            });
+            let step = if shift { 10.0 } else { 1.0 };
+            let (dx, dy) = (step * f64::from(i8::from(right) - i8::from(left)), step * f64::from(i8::from(up) - i8::from(down)));
+            if dx != 0.0 || dy != 0.0 {
+                self.execute_widget("arrange.nudge", serde_json::json!({ "dxMm": dx, "dyMm": dy }));
+            }
         }
         self.handle_dropped_files(ctx);
         if !self.safety_active() {

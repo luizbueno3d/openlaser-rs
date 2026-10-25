@@ -1025,6 +1025,250 @@ fn draw_tools_arm_then_the_canvas_dispatch_mm_params() {
     assert_eq!(h.state().ui.selected_tool, "Select");
 }
 
+// ---- canvas selection drags (real engine) ---------------------------------------------------------------------------------
+
+/// Screen position of a world-mm point through the live view transform.
+fn w2s(h: &H, world: [f64; 2]) -> egui::Pos2 {
+    crate::canvas::ViewXform {
+        zoom: h.state().view.zoom.unwrap(),
+        center: h.state().view.center,
+        rect: h.state().view.last_canvas.unwrap_or(egui::Rect::NOTHING),
+    }
+    .world_to_screen(world)
+}
+
+fn s2w(h: &H, p: egui::Pos2) -> [f64; 2] {
+    crate::canvas::ViewXform {
+        zoom: h.state().view.zoom.unwrap(),
+        center: h.state().view.center,
+        rect: h.state().view.last_canvas.unwrap_or(egui::Rect::NOTHING),
+    }
+    .screen_to_world(p)
+}
+
+fn pointer(h: &mut H, p: egui::Pos2, down: bool, mods: egui::Modifiers) {
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: down, modifiers: mods });
+    h.step();
+}
+
+/// Press → moves → release (the drag crosses egui's threshold on the first move).
+fn drag_to(h: &mut H, a: egui::Pos2, b: egui::Pos2, mods: egui::Modifiers) {
+    h.event(egui::Event::ModifiersChanged(mods));
+    pointer(h, a, true, mods);
+    h.event(egui::Event::PointerMoved(a + (b - a) * 0.5));
+    h.step();
+    h.event(egui::Event::PointerMoved(b));
+    h.step();
+    pointer(h, b, false, mods);
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+}
+
+/// A new document with one axis-aligned rectangle; returns its object id.
+fn doc_with_rect(h: &mut H, x: f64, y: f64, w: f64, ht: f64) -> openlaser_types::ObjectId {
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let v = h.state_mut().session.execute_as(Origin::Human, "tools.rectangle", serde_json::json!({ "xMm": x, "yMm": y, "wMm": w, "hMm": ht })).unwrap();
+    h.run();
+    openlaser_types::ObjectId(v["ids"][0].as_u64().unwrap())
+}
+
+fn sel_bounds(h: &H) -> openlaser_types::Bounds {
+    h.state().session.active().unwrap().project.bounds(&h.state().session.active().unwrap().selection.ids).unwrap().unwrap()
+}
+
+#[test]
+fn move_drag_commits_one_transform_and_undo_restores() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    doc_with_rect(&mut h, 0.0, 0.0, 10.0, 10.0);
+    let before = sel_bounds(&h);
+    let dispatches = h.state().seam.dispatched.len();
+    let (a, b) = (w2s(&h, [5.0, 5.0]), w2s(&h, [25.0, 15.0]));
+    // Press, move, hold (no dispatch mid-drag), release.
+    pointer(&mut h, a, true, egui::Modifiers::NONE);
+    h.event(egui::Event::PointerMoved(a + (b - a) * 0.4));
+    h.step();
+    h.event(egui::Event::PointerMoved(b));
+    h.step();
+    assert!(h.state().seam.dispatched.iter().skip(dispatches).all(|(_, id, _)| !id.starts_with("arrange.")), "no dispatch during the drag");
+    let delta = [s2w(&h, b)[0] - s2w(&h, a)[0], s2w(&h, b)[1] - s2w(&h, a)[1]];
+    pointer(&mut h, b, false, egui::Modifiers::NONE);
+    h.run();
+    let new: Vec<_> = h.state().seam.dispatched.iter().skip(dispatches).cloned().collect();
+    let moves: Vec<_> = new.iter().filter(|(_, id, _)| id == "arrange.transform").collect();
+    assert_eq!(moves.len(), 1, "one drag is one command: {new:?}");
+    assert_eq!(moves[0].2["anchor"], "center");
+    for v in [moves[0].2["xMm"].as_f64().unwrap() - 5.0 - delta[0], moves[0].2["yMm"].as_f64().unwrap() - 5.0 - delta[1]] {
+        assert!(v.abs() < 1e-6, "{v}");
+    }
+    let after = sel_bounds(&h);
+    assert!((after.min[0] - before.min[0] - delta[0]).abs() < 1e-6 && (after.min[1] - before.min[1] - delta[1]).abs() < 1e-6, "{after:?}");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run();
+    assert_eq!(sel_bounds(&h), before, "Cmd+Z restores the bounds");
+}
+
+#[test]
+fn handle_drags_scale_from_the_opposite_side_and_clamp() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    doc_with_rect(&mut h, 0.0, 0.0, 10.0, 10.0);
+    h.state_mut().ui.lock_ratio = false;
+    // Bottom-right corner handle (world [max.x, min.y]); the top-left corner (min.x, max.y) must not move.
+    let (a, b) = (w2s(&h, [10.0, 0.0]), w2s(&h, [16.0, -4.0]));
+    let count = h.state().seam.dispatched.len();
+    drag_to(&mut h, a, b, egui::Modifiers::NONE);
+    let after = sel_bounds(&h);
+    assert_eq!((after.min[0], after.max[1]), (0.0, 10.0), "the top-left corner is the anchor: {after:?}");
+    assert!((after.max[0] - 16.0).abs() < 1e-4 && (after.min[1] - -4.0).abs() < 1e-4, "{after:?}");
+    let last = &h.state().seam.dispatched.last().unwrap().2;
+    assert_eq!(last["anchor"], "topLeft");
+    assert!(last["wMm"].is_f64() && last["hMm"].is_f64(), "{last}");
+    // Right edge handle (index 3): the midpoint of the right side, one axis only in the committed params.
+    let (a, b) = (w2s(&h, [16.0, 3.0]), w2s(&h, [20.0, 3.0]));
+    drag_to(&mut h, a, b, egui::Modifiers::NONE);
+    let last = &h.state().seam.dispatched.last().unwrap().2;
+    assert_eq!(last["anchor"], "left");
+    assert!(last["wMm"].is_f64() && last["hMm"].is_null(), "an edge handle commits one axis: {last}");
+    assert!((last["wMm"].as_f64().unwrap() - 20.0).abs() < 1e-4);
+    // Shift on a corner: proportional.
+    let before = sel_bounds(&h);
+    let (a, b) = (w2s(&h, before.max), w2s(&h, [before.max[0] + 10.0, before.max[1]]));
+    drag_to(&mut h, a, b, egui::Modifiers::SHIFT);
+    let after = sel_bounds(&h);
+    let (bw, bh, aw, ah) = (before.max[0] - before.min[0], before.max[1] - before.min[1], after.max[0] - after.min[0], after.max[1] - after.min[1]);
+    assert!((aw / ah - bw / bh).abs() < 1e-6, "Shift scales proportionally: {before:?} → {after:?}");
+    // Dragging past the opposite side clamps at the 0.1 mm minimum, never flips.
+    let before = sel_bounds(&h);
+    let (a, b) = (w2s(&h, [before.min[0], before.max[1]]), w2s(&h, [before.max[0] + 50.0, before.min[1] - 50.0]));
+    drag_to(&mut h, a, b, egui::Modifiers::NONE);
+    let after = sel_bounds(&h);
+    assert!((after.max[0] - after.min[0] - 0.1).abs() < 1e-6 && (after.max[1] - after.min[1] - 0.1).abs() < 1e-6, "{after:?}");
+    assert!(after.min[0] < before.max[0] && after.max[1] > before.min[1], "no flip: {after:?}");
+    assert!(h.state().seam.dispatched.iter().skip(count).all(|(_, id, _)| !id.starts_with("arrange.nudge")), "drags never use nudge");
+}
+
+#[test]
+fn clicking_selected_toggles_rotate_handles_and_rotate_drag_commits() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    doc_with_rect(&mut h, 0.0, 0.0, 10.0, 20.0);
+    assert!(!h.state().view.rotate_handles);
+    // A click (press + release, no drag) on the selected shape toggles the handles.
+    let c = w2s(&h, [5.0, 10.0]);
+    pointer(&mut h, c, true, egui::Modifiers::NONE);
+    pointer(&mut h, c, false, egui::Modifiers::NONE);
+    h.run();
+    assert!(h.state().view.rotate_handles, "click on the selected shape shows rotate handles");
+    // Drag the bottom-right corner handle to the top-right: the segment to the centre turns
+    // atan2-style counter-clockwise.
+    let (a, b) = (w2s(&h, [10.0, 0.0]), w2s(&h, [10.0, 20.0]));
+    drag_to(&mut h, a, b, egui::Modifiers::NONE);
+    let last = h.state().seam.dispatched.last().cloned().unwrap();
+    assert_eq!(last.1, "arrange.rotateBy");
+    let expected = (10.0f64.atan2(5.0) - (-10.0f64.atan2(5.0))).to_degrees();
+    assert!((last.2["deg"].as_f64().unwrap() - expected).abs() < 0.5, "{:?} vs {expected}", last.2);
+    assert_eq!(last.2["anchor"], "center");
+    // Shift snaps to 15°: rotate back to axis-aligned.
+    let after = sel_bounds(&h);
+    let (a, b) = (w2s(&h, [after.min[0], after.max[1]]), w2s(&h, [after.max[0], after.max[1]]));
+    drag_to(&mut h, a, b, egui::Modifiers::SHIFT);
+    let last = h.state().seam.dispatched.last().cloned().unwrap();
+    let deg = last.2["deg"].as_f64().unwrap();
+    assert_eq!(deg % 15.0, 0.0, "Shift snaps to 15°: {deg}");
+    // Clicking elsewhere (empty canvas) resets to scale handles.
+    let p = w2s(&h, [-80.0, -80.0]);
+    pointer(&mut h, p, true, egui::Modifiers::NONE);
+    pointer(&mut h, p, false, egui::Modifiers::NONE);
+    h.run();
+    assert!(!h.state().view.rotate_handles);
+}
+
+#[test]
+fn esc_mid_drag_dispatches_nothing_and_keeps_the_document() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    doc_with_rect(&mut h, 0.0, 0.0, 10.0, 10.0);
+    let before = sel_bounds(&h);
+    let count = h.state().seam.dispatched.len();
+    let (a, b) = (w2s(&h, [5.0, 5.0]), w2s(&h, [40.0, 30.0]));
+    pointer(&mut h, a, true, egui::Modifiers::NONE);
+    h.event(egui::Event::PointerMoved(b));
+    h.step();
+    h.event(egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.step();
+    pointer(&mut h, b, false, egui::Modifiers::NONE);
+    h.run();
+    assert!(h.state().seam.dispatched.iter().skip(count).all(|(_, id, _)| !id.starts_with("arrange.")), "Esc cancelled the commit");
+    assert_eq!(sel_bounds(&h), before, "the document is untouched");
+    assert_eq!(h.state().session.active().unwrap().selection.ids, vec![openlaser_types::ObjectId(1)], "the selection is kept");
+}
+
+#[test]
+fn arrow_keys_nudge_the_selection() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    doc_with_rect(&mut h, 0.0, 0.0, 10.0, 10.0);
+    h.event(egui::Event::Key { key: egui::Key::ArrowRight, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.run();
+    let last = &h.state().seam.dispatched.last().unwrap().2;
+    assert_eq!((last["dxMm"].as_f64().unwrap(), last["dyMm"].as_f64().unwrap()), (1.0, 0.0));
+    assert!((sel_bounds(&h).min[0] - 1.0).abs() < 1e-9);
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowDown);
+    h.run();
+    let last = &h.state().seam.dispatched.last().unwrap().2;
+    assert_eq!((last["dxMm"].as_f64().unwrap(), last["dyMm"].as_f64().unwrap()), (0.0, -10.0));
+    assert!((sel_bounds(&h).min[1] - -10.0).abs() < 1e-9);
+    // Delete, duplicate, select-all and undo work through the same plumbing on the real selection.
+    h.event(egui::Event::Key { key: egui::Key::Backspace, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.run();
+    assert!(h.state().session.active().unwrap().project.shapes.is_empty(), "Backspace deletes");
+}
+
+#[test]
+fn numeric_edits_reach_the_engine() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    doc_with_rect(&mut h, 0.0, 0.0, 10.0, 20.0);
+    // Anchor defaults to centre: XPos names the bounding-box centre.
+    h.get_by_label("XPos").focus();
+    h.get_by_label("XPos").type_text("30");
+    h.event(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.run();
+    let b = sel_bounds(&h);
+    assert!(((b.min[0] + b.max[0]) / 2.0 - 30.0).abs() < 1e-6, "XPos moved the centre: {b:?}");
+    h.get_by_label("Width").focus();
+    h.get_by_label("Width").type_text("40");
+    h.event(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.run();
+    assert!((sel_bounds(&h).max[0] - sel_bounds(&h).min[0] - 40.0).abs() < 1e-6);
+    h.get_by_label("Rotate").focus();
+    h.get_by_label("Rotate").type_text("90");
+    h.event(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.run();
+    let b = sel_bounds(&h);
+    assert!((b.max[1] - b.min[1] - 40.0).abs() < 0.1, "90° about the centre swaps the axes: {b:?}");
+    assert!(h.state().seam.dispatched.iter().any(|(_, id, p)| id == "arrange.transform" && p["anchor"] == "center" && p["xMm"].is_f64()));
+}
+
+#[test]
+fn a_new_drawn_shape_is_selected_and_shift_constrains_the_drag() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    h.get_by_label("Rectangle").click();
+    h.run();
+    let (a, b) = (w2s(&h, [0.0, 0.0]), w2s(&h, [40.0, 10.0]));
+    drag_to(&mut h, a, b, egui::Modifiers::SHIFT);
+    let b_ = sel_bounds(&h);
+    assert!((b_.max[0] - b_.min[0] - (b_.max[1] - b_.min[1])).abs() < 1e-6, "Shift draws a square: {b_:?}");
+    assert_eq!(
+        h.state().session.active().unwrap().selection.ids,
+        vec![h.state().session.active().unwrap().project.shapes[0].id],
+        "the new shape is the selection"
+    );
+}
+
 #[test]
 fn hidden_window_still_polls_while_active() {
     let mut h = harness();

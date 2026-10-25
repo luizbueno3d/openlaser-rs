@@ -18,6 +18,21 @@ const FIT_MARGIN: f64 = 1.05;
 /// canvas drag or clicks produce the command's parameters, like LightBurn.
 pub(crate) const DRAW_TOOLS: [(&str, &str); 3] = [("tools.rectangle", "Rectangle"), ("tools.ellipse", "Ellipse"), ("tools.drawLines", "Draw Lines")];
 
+/// Selection handle size on screen (points).
+const HANDLE_SIZE: f32 = 7.0;
+/// How close a press must land to a handle to grab it (points).
+const HANDLE_GRAB: f32 = 6.0;
+
+/// The resize cursor of scale handle `i` in screen space (grid position maps to the diagonal/axis arrows).
+fn resize_cursor(i: usize) -> egui::CursorIcon {
+    match i {
+        0 | 4 => egui::CursorIcon::ResizeNwSe,
+        2 | 6 => egui::CursorIcon::ResizeNeSw,
+        1 | 5 => egui::CursorIcon::ResizeVertical,
+        _ => egui::CursorIcon::ResizeHorizontal,
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct CanvasView {
     /// None = a fit is pending (first frame, Zoom to Page).
@@ -31,6 +46,36 @@ pub(crate) struct CanvasView {
     pub draw_from: Option<egui::Pos2>,
     /// Draw Lines points placed so far (world mm, so a mid-draw pan keeps them anchored).
     pub draw_points: Vec<[f64; 2]>,
+    /// The canvas rect of the last paint (screen points); tests map world to screen through it.
+    pub last_canvas: Option<egui::Rect>,
+    /// A move / scale / rotate drag on the selection (live ghost; one command on release).
+    pub sel_drag: Option<SelectionDrag>,
+    /// LightBurn's handle toggle: clicking an already-selected shape switches between scale and rotate
+    /// handles. Any selection change resets this to scale handles.
+    pub rotate_handles: bool,
+}
+
+/// What a selection drag does on release.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum SelDragKind {
+    Move,
+    /// Scale about the opposite handle (the handle index, `canvas_xform` order).
+    Scale(usize),
+    Rotate,
+}
+
+/// An in-progress selection transform drag. The document is untouched until release; `ghost` is the
+/// selection's polylines at press, drawn under the same affine the commit dispatches.
+pub(crate) struct SelectionDrag {
+    pub kind: SelDragKind,
+    /// The world-space press point (stable across a mid-drag zoom).
+    pub press_world: [f64; 2],
+    /// Latest pointer position (screen).
+    pub pos: egui::Pos2,
+    /// The selection bounds at press (world mm).
+    pub bounds: openlaser_types::Bounds,
+    /// World polylines of the selected shapes at press.
+    pub ghost: Vec<Vec<[f64; 2]>>,
 }
 
 impl CanvasView {
@@ -156,6 +201,7 @@ impl OpenLaserApp {
         }
         let response = ui.allocate_rect(full, egui::Sense::click_and_drag());
         let canvas = egui::Rect::from_min_max(full.min + egui::vec2(RULER, RULER), full.max);
+        self.view.last_canvas = Some(canvas);
         let geometry = MachineGeometry::of(self.active_machine());
         let fit = fit_zoom(canvas, geometry.extent());
         self.view.last_fit = fit;
@@ -318,11 +364,24 @@ impl OpenLaserApp {
                     self.view.draw_from = ui.input(|i| i.pointer.press_origin()).or_else(|| response.interact_pointer_pos());
                 }
                 let Some(from) = self.view.draw_from else { return };
-                let Some(to) = response.interact_pointer_pos() else {
+                // latest_pos stays set on the release frame (interact_pointer_pos does not).
+                let Some(to) = ui.input(|i| i.pointer.latest_pos()) else {
                     self.view.draw_from = None;
                     return;
                 };
-                let rect = egui::Rect::from_two_pos(from, to);
+                let (shift, alt) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt));
+                // Shift keeps the drag square/a circle; Alt draws from the centre instead of corner to corner.
+                let rect = if alt {
+                    let d = to - from;
+                    let half = if shift { egui::vec2(d.x.abs().max(d.y.abs()), d.x.abs().max(d.y.abs())) } else { egui::vec2(d.x.abs(), d.y.abs()) };
+                    egui::Rect::from_center_size(from, half * 2.0)
+                } else if shift {
+                    let d = to - from;
+                    let side = d.x.abs().max(d.y.abs());
+                    egui::Rect::from_two_pos(from, from + egui::vec2(d.x.signum() * side, d.y.signum() * side))
+                } else {
+                    egui::Rect::from_two_pos(from, to)
+                };
                 if self.ui.selected_tool == "Rectangle" {
                     painter.add(egui::Shape::dashed_line(
                         &[rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom(), rect.left_top()],
@@ -336,7 +395,8 @@ impl OpenLaserApp {
                 if !response.drag_stopped() {
                     return;
                 }
-                let (a, b) = (view.screen_to_world(from), view.screen_to_world(to));
+                // The committed rect is the constrained one (Shift/Alt), not the raw drag.
+                let (a, b) = (view.screen_to_world(rect.min), view.screen_to_world(rect.max));
                 let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
                 let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
                 let (w, h) = (x1 - x0, y1 - y0);
@@ -384,27 +444,226 @@ impl OpenLaserApp {
                 } else if response.clicked_by(egui::PointerButton::Primary)
                     && let Some(pos) = response.interact_pointer_pos()
                 {
-                    self.view.draw_points.push(view.screen_to_world(pos));
+                    // A double-click's own click must not add a duplicate point on top of the last one.
+                    let duplicate = self.view.draw_points.last().is_some_and(|p| view.world_to_screen(*p).distance(pos) < 1.0);
+                    if !duplicate {
+                        self.view.draw_points.push(view.screen_to_world(pos));
+                    }
                 }
             }
             _ => {}
         }
     }
 
+    /// The selection bounds in world mm, or None when nothing measurable is selected.
+    fn selection_bounds(&self) -> Option<openlaser_types::Bounds> {
+        let selection = self.selection();
+        if selection.is_empty() {
+            return None;
+        }
+        self.project().and_then(|p| p.bounds(&selection).ok().flatten())
+    }
+
+    /// The world polylines of every selected shape (the live-drag ghost).
+    fn selection_ghost(&self) -> Vec<Vec<[f64; 2]>> {
+        let selection = self.selection();
+        self.project().map(|p| selection.iter().filter_map(|id| p.world_polylines(*id, 0.02).ok()).flatten().map(|line| line.0).collect()).unwrap_or_default()
+    }
+
+    /// Topmost shape under `world` (stroke hit), as the click path uses.
+    fn hit_shape(&self, view: &ViewXform, world: [f64; 2]) -> Option<openlaser_types::ObjectId> {
+        self.project().and_then(|project| {
+            project.shapes.iter().rev().find_map(|shape| {
+                // A shape the kernel cannot flatten is not hit (there is nothing the user could have clicked).
+                let paths: Vec<Vec<[f64; 2]>> = project.world_polylines(shape.id, 0.02).unwrap_or_default().into_iter().map(|line| line.0).collect();
+                crate::canvas::hit_test(&paths, world, 4.0 / view.zoom).map(|_| shape.id)
+            })
+        })
+    }
+
+    /// Which handle (canvas_xform index) `press` (screen) is on, if any. Rotate mode has the four corners only.
+    fn handle_hit(&self, press: egui::Pos2, b: &openlaser_types::Bounds, view: &ViewXform) -> Option<usize> {
+        let indices: &[usize] = if self.view.rotate_handles { &crate::canvas_xform::CORNERS } else { &[0, 1, 2, 3, 4, 5, 6, 7] };
+        indices.iter().copied().find(|i| view.world_to_screen(crate::canvas_xform::handle_point(b, *i)).distance(press) <= HANDLE_GRAB)
+    }
+
+    /// Selection interaction on the Select tool: move drags from a shape/box press, handle drags scale and
+    /// rotate, the marquee from an empty press, clicks select/deselect — and a click on an already-selected
+    /// shape toggles LightBurn's scale↔rotate handles. A transform drag only previews; release dispatches
+    /// exactly one engine command (one undo step).
     fn canvas_selection(&mut self, ui: &egui::Ui, response: &egui::Response, view: &ViewXform) {
         if self.ui.selected_tool != "Select" || ui.input(|i| i.key_down(egui::Key::Space)) {
             self.view.marquee_from = None;
+            self.view.sel_drag = None;
             return;
         }
-        let shift = ui.input(|i| i.modifiers.shift);
-        if response.drag_started_by(egui::PointerButton::Primary) {
-            self.view.marquee_from = response.interact_pointer_pos();
+        let (shift, alt) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt));
+        // Esc cancels a drag or marquee in flight: no dispatch, the selection is kept (logic skips
+        // edit.selectNone while a drag exists).
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) && (self.view.sel_drag.is_some() || self.view.marquee_from.is_some()) {
+            self.view.sel_drag = None;
+            self.view.marquee_from = None;
+            self.ui.status_message = "Cancelled".to_owned();
+            return;
         }
-        if let (Some(from), Some(to)) = (self.view.marquee_from, response.interact_pointer_pos()) {
+        let painter = ui.painter().with_clip_rect(view.rect);
+
+        // ---- an in-flight transform drag: ghost + status, then one command on release -----------------------
+        if self.view.sel_drag.is_some() {
+            let pos = ui.input(|i| i.pointer.latest_pos());
+            if let (Some(drag), Some(pos)) = (self.view.sel_drag.as_mut(), pos) {
+                drag.pos = pos;
+            }
+            let Some(drag) = self.view.sel_drag.as_ref() else { return };
+            let to_world = view.screen_to_world(drag.pos);
+            let delta = [to_world[0] - drag.press_world[0], to_world[1] - drag.press_world[1]];
+            let lock = shift || self.ui.lock_ratio;
+            let (affine, preview_bounds, status) = match drag.kind {
+                SelDragKind::Move => {
+                    let a = crate::canvas_xform::move_affine(delta);
+                    (a, crate::canvas_xform::bounds_of(&drag.bounds, a), format!("Move {:+.3}, {:+.3} mm", delta[0], delta[1]))
+                }
+                SelDragKind::Scale(i) => {
+                    let new_b = crate::canvas_xform::scale_bounds(&drag.bounds, i, delta, lock, alt);
+                    let a = crate::canvas_xform::scale_affine(&drag.bounds, &new_b, i, alt);
+                    (a, new_b, format!("{:.3} × {:.3} mm", new_b.max[0] - new_b.min[0], new_b.max[1] - new_b.min[1]))
+                }
+                SelDragKind::Rotate => {
+                    let c = [(drag.bounds.min[0] + drag.bounds.max[0]) / 2.0, (drag.bounds.min[1] + drag.bounds.max[1]) / 2.0];
+                    let deg = crate::canvas_xform::rotate_deg(c, drag.press_world, to_world, if shift { 15.0 } else { 0.0 });
+                    let a = crate::canvas_xform::rotate_affine(&drag.bounds, deg);
+                    (a, crate::canvas_xform::bounds_of(&drag.bounds, a), format!("Rotate {deg:+.2}°"))
+                }
+            };
+            let ghost_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 150, 255));
+            for line in &drag.ghost {
+                let pts: Vec<egui::Pos2> = line
+                    .iter()
+                    .map(|p| {
+                        let q = affine * openlaser_geom::Point::new(p[0], p[1]);
+                        view.world_to_screen([q.x, q.y])
+                    })
+                    .collect();
+                if pts.len() >= 2 {
+                    painter.extend(egui::Shape::dashed_line(&pts, ghost_stroke, 4.0, 3.0));
+                }
+            }
+            self.paint_box(&painter, view, &preview_bounds);
+            self.ui.status_message = status;
+            if response.drag_stopped() {
+                let Some(drag) = self.view.sel_drag.take() else { return };
+                match drag.kind {
+                    SelDragKind::Move => {
+                        if delta.iter().any(|d| d.abs() >= 0.001) {
+                            let c = [(drag.bounds.min[0] + drag.bounds.max[0]) / 2.0 + delta[0], (drag.bounds.min[1] + drag.bounds.max[1]) / 2.0 + delta[1]];
+                            self.execute_widget("arrange.transform", serde_json::json!({ "anchor": "center", "xMm": c[0], "yMm": c[1] }));
+                        }
+                    }
+                    SelDragKind::Scale(i) => {
+                        let new_b = crate::canvas_xform::scale_bounds(&drag.bounds, i, delta, lock, alt);
+                        if (new_b.max[0] - new_b.min[0] - (drag.bounds.max[0] - drag.bounds.min[0])).abs() >= 0.001
+                            || (new_b.max[1] - new_b.min[1] - (drag.bounds.max[1] - drag.bounds.min[1])).abs() >= 0.001
+                        {
+                            let anchor = if alt { "center" } else { crate::canvas_xform::anchor_of(crate::canvas_xform::opposite(i)) };
+                            // An edge handle moves one axis only; corners send both.
+                            let mut params = serde_json::json!({ "anchor": anchor });
+                            if let Some(map) = params.as_object_mut() {
+                                match crate::canvas_xform::edge_axis(i) {
+                                    Some(axis) => {
+                                        map.insert(
+                                            if axis == 0 { "wMm".to_owned() } else { "hMm".to_owned() },
+                                            serde_json::json!(new_b.max.get(axis).unwrap_or(&0.0) - new_b.min.get(axis).unwrap_or(&0.0)),
+                                        );
+                                    }
+                                    None => {
+                                        map.insert("wMm".to_owned(), serde_json::json!(new_b.max[0] - new_b.min[0]));
+                                        map.insert("hMm".to_owned(), serde_json::json!(new_b.max[1] - new_b.min[1]));
+                                    }
+                                }
+                            }
+                            self.execute_widget("arrange.transform", params);
+                        }
+                    }
+                    SelDragKind::Rotate => {
+                        let c = [(drag.bounds.min[0] + drag.bounds.max[0]) / 2.0, (drag.bounds.min[1] + drag.bounds.max[1]) / 2.0];
+                        let deg = crate::canvas_xform::rotate_deg(c, drag.press_world, to_world, if shift { 15.0 } else { 0.0 });
+                        if deg.abs() >= 0.01 {
+                            self.execute_widget("arrange.rotateBy", serde_json::json!({ "deg": deg, "anchor": "center" }));
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        // ---- box, handles, cursors on the static selection ----------------------------------------------------
+        let bounds = self.selection_bounds();
+        if let Some(b) = &bounds {
+            self.paint_box(&painter, view, b);
+            let indices: &[usize] = if self.view.rotate_handles { &crate::canvas_xform::CORNERS } else { &[0, 1, 2, 3, 4, 5, 6, 7] };
+            for i in indices {
+                let p = view.world_to_screen(crate::canvas_xform::handle_point(b, *i));
+                let rect = egui::Rect::from_center_size(p, egui::vec2(HANDLE_SIZE, HANDLE_SIZE));
+                if self.view.rotate_handles {
+                    painter.circle_stroke(p, HANDLE_SIZE / 2.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(70, 160, 230)));
+                } else {
+                    painter.rect_filled(rect, 1.0, egui::Color32::WHITE);
+                    painter.rect_stroke(rect, 1.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 130, 220)), egui::StrokeKind::Middle);
+                }
+            }
+            if let Some(hover) = ui.input(|i| i.pointer.hover_pos()).filter(|p| view.rect.contains(*p)) {
+                if let Some(i) = self.handle_hit(hover, b, view) {
+                    ui.ctx().set_cursor_icon(if self.view.rotate_handles { egui::CursorIcon::Grab } else { resize_cursor(i) });
+                } else {
+                    let w = view.screen_to_world(hover);
+                    let inside = w[0] >= b.min[0] && w[0] <= b.max[0] && w[1] >= b.min[1] && w[1] <= b.max[1];
+                    if inside || self.hit_shape(view, w).is_some() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
+                    }
+                }
+            }
+        }
+
+        // ---- drag start: handle → shape/box → marquee ------------------------------------------------------------
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            let press = ui.input(|i| i.pointer.press_origin()).or_else(|| response.interact_pointer_pos());
+            let handle = press.zip(bounds).and_then(|(p, b)| self.handle_hit(p, &b, view));
+            match press {
+                Some(press) if handle.is_some() => {
+                    let i = handle.unwrap_or(0);
+                    let kind = if self.view.rotate_handles { SelDragKind::Rotate } else { SelDragKind::Scale(i) };
+                    if let Some(b) = bounds {
+                        self.view.sel_drag =
+                            Some(SelectionDrag { kind, press_world: view.screen_to_world(press), pos: press, bounds: b, ghost: self.selection_ghost() });
+                    }
+                }
+                Some(press) => {
+                    let world = view.screen_to_world(press);
+                    let inside = bounds.is_some_and(|b| world[0] >= b.min[0] && world[0] <= b.max[0] && world[1] >= b.min[1] && world[1] <= b.max[1]);
+                    let hit = if inside { None } else { self.hit_shape(view, world) };
+                    if inside || hit.is_some() {
+                        if let Some(id) = hit.filter(|id| !self.selection().contains(id)) {
+                            // Pressing an unselected shape selects it first (Shift adds), then drags it.
+                            self.execute_widget("edit.select", serde_json::json!({ "ids": [id], "mode": if shift { "add" } else { "replace" } }));
+                            self.view.rotate_handles = false;
+                        }
+                        if let Some(b) = self.selection_bounds() {
+                            self.view.sel_drag =
+                                Some(SelectionDrag { kind: SelDragKind::Move, press_world: world, pos: press, bounds: b, ghost: self.selection_ghost() });
+                        }
+                    } else {
+                        self.view.marquee_from = Some(press);
+                    }
+                }
+                None => {}
+            }
+        }
+
+        // ---- marquee --------------------------------------------------------------------------------------------
+        if let (Some(from), Some(to)) = (self.view.marquee_from, ui.input(|i| i.pointer.latest_pos())) {
             let crossing = to.x < from.x;
             let rect = egui::Rect::from_two_pos(from, to);
             let color = if crossing { egui::Color32::from_rgb(80, 200, 120) } else { egui::Color32::from_rgb(90, 150, 255) };
-            let painter = ui.painter().with_clip_rect(view.rect);
             if crossing {
                 let c = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom(), rect.left_top()];
                 painter.extend(egui::Shape::dashed_line(&c, egui::Stroke::new(1.0, color), 4.0, 3.0));
@@ -418,25 +677,38 @@ impl OpenLaserApp {
                     "edit.select",
                     serde_json::json!({ "rectMm": [a, b], "crossing": crossing, "mode": if shift { "add" } else { "replace" } }),
                 );
+                self.view.rotate_handles = false;
             }
         }
+
+        // ---- click: select, deselect, or toggle scale↔rotate handles ---------------------------------------------
         if response.clicked_by(egui::PointerButton::Primary)
             && let Some(position) = response.interact_pointer_pos()
         {
             let world = view.screen_to_world(position);
-            let hit = self.project().and_then(|project| {
-                project.shapes.iter().rev().find_map(|shape| {
-                    // A shape the kernel cannot flatten is not hit (there is nothing the user could have clicked).
-                    let paths: Vec<Vec<[f64; 2]>> = project.world_polylines(shape.id, 0.02).unwrap_or_default().into_iter().map(|line| line.0).collect();
-                    crate::canvas::hit_test(&paths, world, 4.0 / view.zoom).map(|_| shape.id)
-                })
-            });
+            let hit = self.hit_shape(view, world);
+            let on_selection = hit.is_some_and(|id| self.selection().contains(&id))
+                || bounds.is_some_and(|b| world[0] >= b.min[0] && world[0] <= b.max[0] && world[1] >= b.min[1] && world[1] <= b.max[1]);
             match (hit, shift) {
-                (None, false) => self.invoke_ui_action("edit.selectNone"),
+                // A click on an already-selected object (stroke or inside its box) toggles the handles.
+                _ if !shift && on_selection => self.view.rotate_handles = !self.view.rotate_handles,
+                (None, false) => {
+                    self.invoke_ui_action("edit.selectNone");
+                    self.view.rotate_handles = false;
+                }
                 (None, true) => {}
-                (Some(id), _) => self.execute_widget("edit.select", serde_json::json!({ "ids": [id], "mode": if shift { "toggle" } else { "replace" } })),
+                (Some(id), _) => {
+                    self.execute_widget("edit.select", serde_json::json!({ "ids": [id], "mode": if shift { "toggle" } else { "replace" } }));
+                    self.view.rotate_handles = false;
+                }
             }
         }
+    }
+
+    /// The selection's bounding box above the shapes.
+    fn paint_box(&self, painter: &egui::Painter, view: &ViewXform, b: &openlaser_types::Bounds) {
+        let rect = egui::Rect::from_two_pos(view.world_to_screen(b.min), view.world_to_screen(b.max));
+        painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 130, 220)), egui::StrokeKind::Middle);
     }
 
     fn paint_rulers(&self, ui: &egui::Ui, full: egui::Rect, canvas: egui::Rect, view: &ViewXform, hover: Option<egui::Pos2>, colors: &Palette) {

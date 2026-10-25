@@ -398,14 +398,16 @@ impl OpenLaserApp {
                 [b.min[0] + w * col / 2.0, b.max[1] - h * row / 2.0, w, h, 100.0, 100.0, 0.0]
             });
             let fields: [(&str, &str, &str); 7] = [
-                ("XPos", "x", "mm"),
-                ("YPos", "y", "mm"),
-                ("Width", "w", "mm"),
-                ("Height", "h", "mm"),
+                ("XPos", "xMm", "mm"),
+                ("YPos", "yMm", "mm"),
+                ("Width", "wMm", "mm"),
+                ("Height", "hMm", "mm"),
                 ("W%", "wPct", "%"),
                 ("H%", "hPct", "%"),
-                ("Rotate", "rotate", "°"),
+                ("Rotate", "rotateDeg", "°"),
             ];
+            // The 9-dot selector's index → the engine's AnchorP (row-major from the top-left, Y up).
+            const ANCHORS: [&str; 9] = ["topLeft", "top", "topRight", "left", "center", "right", "bottomLeft", "bottom", "bottomRight"];
             for (n, (label, key, unit)) in fields.iter().enumerate() {
                 if n == 4 {
                     let icon = if self.ui.lock_ratio { "lock" } else { "lock-open" };
@@ -421,10 +423,14 @@ impl OpenLaserApp {
                 self.labeled(&r, egui::WidgetType::DragValue, label, false);
                 let r = r.on_disabled_hover_text(reason);
                 if r.changed() && value.is_finite() {
-                    let mut params = serde_json::json!({ "anchor": self.ui.anchor, "lockRatio": self.ui.lock_ratio, "coalesce": format!("numeric-{key}") });
+                    let mut params = serde_json::json!({
+                        "anchor": ANCHORS.get(usize::from(self.ui.anchor)).copied().unwrap_or("center"),
+                        "lockRatio": self.ui.lock_ratio,
+                        "coalesce": format!("numeric-{key}"),
+                    });
                     let (key, value) = match *key {
-                        "wPct" => ("w", values.and_then(|v| v.get(2).copied()).unwrap_or(0.0) * value / 100.0),
-                        "hPct" => ("h", values.and_then(|v| v.get(3).copied()).unwrap_or(0.0) * value / 100.0),
+                        "wPct" => ("wMm", values.and_then(|v| v.get(2).copied()).unwrap_or(0.0) * value / 100.0),
+                        "hPct" => ("hMm", values.and_then(|v| v.get(3).copied()).unwrap_or(0.0) * value / 100.0),
                         other => (other, value),
                     };
                     if let Some(map) = params.as_object_mut() {

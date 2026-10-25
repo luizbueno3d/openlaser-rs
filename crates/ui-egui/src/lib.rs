@@ -10,6 +10,7 @@
 
 mod app;
 pub mod canvas;
+pub mod canvas_xform;
 pub mod control;
 mod cut_editor;
 mod dialogs;
