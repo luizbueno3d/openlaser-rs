@@ -111,7 +111,7 @@ fn hostile_files_are_skipped_not_crashing() {
     // A truncated font and pure garbage: both skipped without a panic.
     let bytes = std::fs::read(dir.join("Hack-Regular.ttf")).unwrap();
     std::fs::write(hostile.join("truncated.ttf"), &bytes[..32.min(bytes.len())]).unwrap();
-    std::fs::write(hostile.join("garbage.otf"), &[0xDE, 0xAD, 0xBE, 0xEF, 1, 2, 3, 4]).unwrap();
+    std::fs::write(hostile.join("garbage.otf"), [0xDE, 0xAD, 0xBE, 0xEF, 1, 2, 3, 4]).unwrap();
     let lib = FontLibrary::with_dirs(vec![hostile.clone()]);
     assert!(lib.entries().is_empty(), "{:?}", lib.entries());
     std::fs::remove_dir_all(&hostile).ok();

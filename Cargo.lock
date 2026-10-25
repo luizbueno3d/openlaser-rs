@@ -3448,6 +3448,7 @@ dependencies = [
  "openlaser-plan",
  "openlaser-render",
  "openlaser-testkit",
+ "openlaser-text",
  "openlaser-types",
  "serde",
  "serde_json",

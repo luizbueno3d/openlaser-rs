@@ -2025,3 +2025,72 @@ fn layout_screenshot() {
     let png = crate::screenshot::png_bytes(&image).unwrap();
     std::fs::write(&path, png).unwrap();
 }
+
+fn click(h: &mut H, p: egui::Pos2) {
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.run();
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run();
+}
+
+#[test]
+fn text_tool_places_and_edits_real_geometry() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../text/tests/fonts");
+    h.state_mut().session.set_font_dirs(vec![dir]);
+    h.get_by_label("Edit Text").click();
+    h.run();
+    // Click the canvas at world (0,0): the editor opens; type and commit with Cmd+Enter.
+    let p = w2s(&h, [0.0, 0.0]);
+    click(&mut h, p);
+    h.run();
+    assert!(h.state().ui.text.is_some(), "the inline editor opened");
+    h.get_by_label("Text").focus();
+    h.get_by_label("Text").type_text("HI");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
+    h.run();
+    let doc = h.state().session.active().unwrap();
+    let sel = doc.selection.ids[0];
+    let sh = doc.project.shape(sel).unwrap();
+    assert!(matches!(sh.geom, openlaser_doc::Geom::Text(_)));
+    let b = doc.project.bounds(&[sel]).unwrap().unwrap();
+    assert!((b.min[1] - 0.0).abs() < 0.05 && (b.max[1] - b.min[1] - 10.0).abs() < 0.05, "{b:?}");
+    // Reopening the editor on the created text (double-click path) targets text.edit, not a new shape.
+    h.state_mut().ui.text = Some(crate::app::TextUi { anchor: [0.0, 0.0], buffer: "HI".to_owned(), editing: Some(sel.0), request_focus: false });
+    assert!(h.state().ui.text.as_ref().is_some_and(|t| t.editing == Some(sel.0)));
+    h.state_mut().ui.text.as_mut().unwrap().buffer = "WOW".to_owned();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
+    h.run();
+    let depth = h.state().session.active().unwrap().history.labels().len();
+    assert_eq!(h.state().session.active().unwrap().project.shapes.len(), 1, "still one shape");
+    // Height change via the options bar resizes the text through text.edit.
+    h.state_mut().ui.text_defaults.height = 20.0;
+    h.get_by_label("Height").focus();
+    h.get_by_label("Height").type_text("20");
+    h.run();
+    let b = h.state().session.active().unwrap().project.bounds(&[sel]).unwrap().unwrap();
+    assert!((b.max[1] - b.min[1]) > 15.0, "the text grew: {b:?}");
+    let _ = depth;
+}
+
+#[test]
+fn esc_with_empty_text_commits_nothing() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../text/tests/fonts");
+    h.state_mut().session.set_font_dirs(vec![dir]);
+    h.get_by_label("Edit Text").click();
+    h.run();
+    let count = h.state().seam.dispatched.len();
+    let p3 = w2s(&h, [0.0, 0.0]);
+    click(&mut h, p3);
+    h.run();
+    h.event(egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.run();
+    assert!(h.state().ui.text.is_none());
+    assert_eq!(h.state().seam.dispatched.len(), count, "empty text dispatched nothing");
+    assert!(h.state().session.active().unwrap().project.shapes.is_empty());
+}

@@ -959,9 +959,7 @@ expression: rows
   {
     "id": "text.edit",
     "label": "Edit Text…",
-    "menu": [
-      "Tools"
-    ],
+    "menu": [],
     "shortcut": "Cmd+E",
     "defaultShortcut": "Cmd+E",
     "kind": "edit",
@@ -977,6 +975,14 @@ expression: rows
       "properties": {
         "align": {
           "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "coalesce": {
+          "default": null,
+          "description": "Consecutive edits sharing a key merge into one history entry.",
           "type": [
             "string",
             "null"
@@ -1043,9 +1049,7 @@ expression: rows
   {
     "id": "text.fonts",
     "label": "List Fonts",
-    "menu": [
-      "Tools"
-    ],
+    "menu": [],
     "shortcut": null,
     "defaultShortcut": null,
     "kind": "query",

@@ -362,6 +362,93 @@ impl OpenLaserApp {
 
         self.canvas_selection(ui, &response, &view);
         self.canvas_draw(ui, &response, &view, hover);
+
+        // ---- the inline text editor: an Area at the anchor, live outline ghost, commit on Esc/outside/Enter.
+        if let Some(mut edit) = self.ui.text.take() {
+            // The click that opened the editor must not also commit it on this same frame.
+            let just_opened = edit.request_focus;
+            let d = &self.ui.text_defaults;
+            // Ghost: the same layout the command commits, so WYSIWYG.
+            let face = self
+                .session
+                .fonts()
+                .face(&d.family, Some(&d.style))
+                .or_else(|| ["Arial", "Helvetica", "Hack"].iter().find_map(|f| self.session.fonts().face(f, None)));
+            if let Some(face) = face {
+                let align = match d.align {
+                    1 => openlaser_types::TextAlign::Center,
+                    2 => openlaser_types::TextAlign::Right,
+                    _ => openlaser_types::TextAlign::Left,
+                };
+                if let Ok(path) = openlaser_text::layout(&face, &edit.buffer, d.height, d.letter_spacing, d.line_spacing, align) {
+                    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 150, 255));
+                    let mut world = path;
+                    world.apply_affine(openlaser_doc::Affine::translate((edit.anchor[0], edit.anchor[1])));
+                    for p in openlaser_geom::flatten(&world, 0.01).unwrap_or_default() {
+                        let pts: Vec<egui::Pos2> = p.0.iter().map(|pt| view.world_to_screen(*pt)).collect();
+                        painter.add(egui::Shape::line(pts, stroke));
+                    }
+                }
+            }
+            let screen = view.world_to_screen(edit.anchor);
+            let mut commit = false;
+            let area = egui::Area::new(egui::Id::new("text-inline-edit")).order(egui::Order::Foreground).fixed_pos(screen).show(ui.ctx(), |ui| {
+                egui::Frame::NONE.show(ui, |ui| {
+                    let widget = egui::TextEdit::multiline(&mut edit.buffer).desired_rows(4).desired_width(200.0);
+                    let r = ui.add(widget);
+                    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "Text".to_owned()));
+                    if edit.request_focus {
+                        edit.request_focus = false;
+                        r.request_focus();
+                    }
+                    // Commit triggers: Esc, click outside the editor, Cmd+Enter.
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) || ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command) {
+                        commit = true;
+                    }
+                    if ui.input(|i| i.pointer.any_click())
+                        && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
+                        && !r.rect.contains(pos)
+                    {
+                        commit = true;
+                    }
+                });
+            });
+            // Clicking the canvas itself (outside the Area's own rect) also commits — but not the opening click.
+            if !just_opened && response.clicked_by(egui::PointerButton::Primary) {
+                commit = true;
+            }
+            if commit {
+                ui.input_mut(|i| {
+                    i.events.retain(|e| !matches!(e, egui::Event::Key { key: egui::Key::Escape, pressed: true, .. }));
+                });
+                if !edit.buffer.trim().is_empty() {
+                    let d = &self.ui.text_defaults;
+                    if let Some(id) = edit.editing {
+                        let mut p = serde_json::json!({ "id": id, "text": edit.buffer, "align": d.align_str(), "heightMm": d.height, "letterSpacingMm": d.letter_spacing, "lineSpacing": d.line_spacing });
+                        if let Some(map) = p.as_object_mut() {
+                            if !d.family.is_empty() {
+                                map.insert("family".to_owned(), d.family.clone().into());
+                            }
+                            if !d.style.is_empty() {
+                                map.insert("style".to_owned(), d.style.clone().into());
+                            }
+                        }
+                        self.execute_widget("text.edit", p);
+                    } else {
+                        self.execute_widget("tools.text", d.create_params(edit.anchor, &edit.buffer));
+                    }
+                }
+                self.ui.selected_tool = "Select";
+            } else if self.ui.selected_tool != "Edit Text" && edit.editing.is_none() {
+                // A tool change commits too.
+                if !edit.buffer.trim().is_empty() {
+                    self.execute_widget("tools.text", self.ui.text_defaults.create_params(edit.anchor, &edit.buffer));
+                }
+            } else {
+                self.ui.text = Some(edit);
+            }
+            let _ = area;
+        }
         self.paint_rulers(ui, full, canvas, &view, hover, &colors);
 
         // Zoom to fit, at the canvas corner.
@@ -378,7 +465,7 @@ impl OpenLaserApp {
     /// progress and returns to Select; a placed shape does too, as LightBurn does. The command runs only once the
     /// drag or clicks produced real millimetre parameters — a bare tool click never fires it.
     fn canvas_draw(&mut self, ui: &egui::Ui, response: &egui::Response, view: &ViewXform, hover: Option<egui::Pos2>) {
-        let armed = DRAW_TOOLS.iter().any(|(_, label)| *label == self.ui.selected_tool);
+        let armed = self.ui.selected_tool == "Edit Text" || DRAW_TOOLS.iter().any(|(_, label)| *label == self.ui.selected_tool);
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) && armed {
             self.ui.selected_tool = "Select";
             self.view.draw_from = None;
@@ -534,6 +621,15 @@ impl OpenLaserApp {
                     finish(self);
                 }
             }
+            "Edit Text" => {
+                // A canvas click opens the inline editor at that point (LightBurn's click-to-type).
+                if response.clicked_by(egui::PointerButton::Primary)
+                    && let Some(pos) = response.interact_pointer_pos()
+                {
+                    let world = view.screen_to_world(pos);
+                    self.ui.text = Some(crate::app::TextUi { anchor: world, buffer: String::new(), editing: None, request_focus: true });
+                }
+            }
             "Measure" => {
                 // A press starts a new measurement (the previous one clears); release keeps it on screen.
                 if response.drag_started_by(egui::PointerButton::Primary) {
@@ -625,6 +721,29 @@ impl OpenLaserApp {
             return;
         }
         let (shift, alt) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt));
+        // Double-click a text shape: reopen the inline editor (commit becomes text.edit).
+        if response.double_clicked_by(egui::PointerButton::Primary)
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let world = view.screen_to_world(pos);
+            if let Some(id) = self.hit_shape(view, world)
+                && let Some(openlaser_doc::Geom::Text(t)) = self.project().and_then(|p| p.shape(id).map(|sh| sh.geom.clone()))
+            {
+                let d = &mut self.ui.text_defaults;
+                d.family = t.family.clone();
+                d.style = t.style.clone();
+                d.height = t.height_mm;
+                d.letter_spacing = t.letter_spacing_mm;
+                d.line_spacing = t.line_spacing;
+                d.align = match t.align {
+                    openlaser_types::TextAlign::Left => 0,
+                    openlaser_types::TextAlign::Center => 1,
+                    openlaser_types::TextAlign::Right => 2,
+                };
+                self.ui.text = Some(crate::app::TextUi { anchor: world, buffer: t.text.clone(), editing: Some(id.0), request_focus: true });
+                return;
+            }
+        }
         // Esc cancels a drag or marquee in flight: no dispatch, the selection is kept (logic skips
         // edit.selectNone while a drag exists).
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) && (self.view.sel_drag.is_some() || self.view.marquee_from.is_some()) {

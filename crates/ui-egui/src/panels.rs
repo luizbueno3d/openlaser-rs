@@ -365,7 +365,112 @@ impl OpenLaserApp {
 
     // ---- numeric edits ------------------------------------------------------------------------------------------------
 
+    /// LightBurn's text options row, shown while the Edit Text tool is armed or a text shape is selected:
+    /// Font/Style/Height/Letter spacing/Line spacing/Align. Edits dispatch `text.edit` (coalesced per field) on
+    /// a selected text; otherwise they set the defaults for the next text the tool creates.
+    fn text_options(&mut self, ui: &mut egui::Ui) {
+        let selected_text = self.selection().first().and_then(|id| {
+            self.project().and_then(|p| p.shape(*id).and_then(|sh| if let openlaser_doc::Geom::Text(t) = &sh.geom { Some((*id, t.clone())) } else { None }))
+        });
+        let armed = self.ui.selected_tool == "Edit Text";
+        if !armed && selected_text.is_none() {
+            return;
+        }
+        // Seed the bar from the selected text or defaults.
+        if let Some((_, t)) = &selected_text {
+            let d = &mut self.ui.text_defaults;
+            d.family = t.family.clone();
+            d.style = t.style.clone();
+            d.height = t.height_mm;
+            d.letter_spacing = t.letter_spacing_mm;
+            d.line_spacing = t.line_spacing;
+            d.align = match t.align {
+                openlaser_types::TextAlign::Left => 0,
+                openlaser_types::TextAlign::Center => 1,
+                openlaser_types::TextAlign::Right => 2,
+            };
+        }
+        let enabled = !self.ui.machine_active;
+        let id = selected_text.map(|(id, _)| id.0);
+        ui.horizontal(|ui| {
+            let fire = |app: &mut Self, key: &str| {
+                if let Some(id) = id {
+                    app.execute_widget("text.edit", app.ui.text_defaults.edit_params(id, &format!("text-{key}")));
+                }
+            };
+            // Font: a searchable combo of the indexed families; Style: that family's styles.
+            let families: Vec<(String, Vec<String>)> = self.session.fonts().families();
+            caption(ui, "Font");
+            let mut family = self.ui.text_defaults.family.clone();
+            egui::ComboBox::from_id_salt("text-font").selected_text(if family.is_empty() { "(default)" } else { &family }).show_ui(ui, |ui| {
+                for (f, _) in &families {
+                    if ui.selectable_label(&family == f, f).clicked() {
+                        family = f.clone();
+                        let styles = families.iter().find(|(ff, _)| ff == &family).map(|(_, s)| s.clone()).unwrap_or_default();
+                        self.ui.text_defaults.family = family.clone();
+                        self.ui.text_defaults.style = styles.first().cloned().unwrap_or_default();
+                        fire(self, "family");
+                    }
+                }
+            });
+            caption(ui, "Style");
+            let mut style = self.ui.text_defaults.style.clone();
+            egui::ComboBox::from_id_salt("text-style").selected_text(if style.is_empty() { "(default)" } else { &style }).show_ui(ui, |ui| {
+                for st in families.iter().find(|(f, _)| f == &family).map(|(_, s)| s.clone()).unwrap_or_default() {
+                    if ui.selectable_label(style == st, &st).clicked() {
+                        style = st.clone();
+                        self.ui.text_defaults.style = st;
+                        fire(self, "style");
+                    }
+                }
+            });
+            for (label, field, key) in
+                [("Height", "height", "heightMm"), ("Letter spacing", "letter_spacing", "letterSpacingMm"), ("Line spacing", "line_spacing", "lineSpacing")]
+            {
+                caption(ui, label);
+                let mut value = match field {
+                    "height" => self.ui.text_defaults.height,
+                    "letter_spacing" => self.ui.text_defaults.letter_spacing,
+                    _ => self.ui.text_defaults.line_spacing,
+                };
+                let r = ui.add_enabled(enabled, egui::DragValue::new(&mut value).speed(0.1).max_decimals(3));
+                self.labeled(&r, egui::WidgetType::DragValue, label, false);
+                if r.changed() && value.is_finite() {
+                    match field {
+                        "height" => self.ui.text_defaults.height = value,
+                        "letter_spacing" => self.ui.text_defaults.letter_spacing = value,
+                        _ => self.ui.text_defaults.line_spacing = value,
+                    }
+                    fire(self, key);
+                }
+            }
+            for (name, n) in [("L", 0u8), ("C", 1u8), ("R", 2u8)] {
+                let r = ui.selectable_label(self.ui.text_defaults.align == n, name);
+                self.labeled(
+                    &r,
+                    egui::WidgetType::RadioButton,
+                    &format!("Align {}", ["Left", "Center", "Right"].get(usize::from(n)).copied().unwrap_or("Left")),
+                    false,
+                );
+                if r.clicked() {
+                    self.ui.text_defaults.align = n;
+                    fire(self, "align");
+                }
+            }
+        });
+    }
+
     pub(crate) fn numeric_edits(&mut self, ui: &mut egui::Ui) {
+        if self.ui.selected_tool == "Edit Text"
+            || self
+                .selection()
+                .first()
+                .and_then(|_id| self.project())
+                .is_some_and(|p| self.selection().iter().any(|id| matches!(p.shape(*id).map(|s| &s.geom), Some(openlaser_doc::Geom::Text(_)))))
+        {
+            self.text_options(ui);
+            return;
+        }
         let selection = self.selection();
         // An unmeasurable selection (a non-finite transform) gives no bounds: the edits stay disabled.
         let bounds = self.project().and_then(|p| p.bounds(&selection).unwrap_or_default());

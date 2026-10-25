@@ -74,6 +74,9 @@ pub struct TextEditParams {
     pub line_spacing: Option<f64>,
     #[serde(default)]
     pub align: Option<String>,
+    /// Consecutive edits sharing a key merge into one history entry.
+    #[serde(default)]
+    pub coalesce: Option<String>,
 }
 
 fn align_of(id: &str, value: Option<&str>) -> Result<TextAlign, EngineError> {
@@ -105,6 +108,7 @@ fn resolve_face<'a>(s: &'a Session, id: &str, family: Option<&str>, style: Optio
 }
 
 /// Lay out a text: shared by `tools.text` and `text.edit` so create and edit see identical geometry.
+#[allow(clippy::too_many_arguments)] // the signature mirrors TextGeom field-for-field
 fn lay_out(
     s: &Session,
     id: &str,
@@ -197,7 +201,8 @@ fn text_edit(s: &mut Session, p: TextEditParams) -> Result<Created, EngineError>
     let align = align_of(ID, p.align.as_deref()).unwrap_or_else(|_| if p.align.is_none() { text.align } else { TextAlign::Left });
     let align = if p.align.is_some() { align } else { text.align };
     let (outline, family, style) = lay_out(s, ID, &content, Some(&family), Some(&style), height, letter, line, align)?;
-    s.edit(Label::new("Edit Text"), None, move |project, sel| {
+    let p_coalesce = p.coalesce.clone();
+    s.edit(Label::new("Edit Text"), p_coalesce.as_deref(), move |project, sel| {
         let Some(shape) = project.shapes.iter_mut().find(|sh| sh.id == oid) else {
             return Err(EngineError::bad(ID, "/id", "the text vanished mid-edit"));
         };
@@ -260,9 +265,9 @@ pub(crate) fn specs() -> Vec<CommandSpec> {
         command!("tools.text", "Edit Text", menu: ["Tools"], shortcut: Some("Cmd+T"), kind: Kind::Edit, access: Access::Agent,
             enabled: needs_doc, params: TextParams, run: tools_text,
             doc: "{xMm, yMm, text, family?, style?, heightMm?(10), letterSpacingMm?(0), lineSpacing?(1), align?\"left\"|\"center\"|\"right\", layer?}"),
-        command!("text.edit", "Edit Text…", menu: ["Tools"], shortcut: Some("Cmd+E"), kind: Kind::Edit, access: Access::Agent,
+        command!("text.edit", "Edit Text…", menu: [], shortcut: Some("Cmd+E"), kind: Kind::Edit, access: Access::Agent,
             enabled: needs_doc, params: TextEditParams, run: text_edit, doc: "{id, text?, family?, style?, heightMm?, letterSpacingMm?, lineSpacing?, align?}"),
-        command!("text.fonts", "List Fonts", menu: ["Tools"], shortcut: None, kind: Kind::Query, access: Access::Agent,
+        command!("text.fonts", "List Fonts", menu: [], shortcut: None, kind: Kind::Query, access: Access::Agent,
             enabled: always, params: NoParams, run: text_fonts, doc: "{fonts:[{family, styles}]}"),
         command!("edit.convertToPath", "Convert to Path", menu: ["Arrange"], shortcut: Some("Cmd+Shift+C"), kind: Kind::Edit, access: Access::Agent,
             enabled: needs_doc, params: IdsParams, run: convert_to_path, doc: "{ids?} (text and parametric shapes become Geom::Path, xform kept)"),

@@ -36,6 +36,7 @@ const TABLE: &[(&str, &[&str], &[&str])] = &[
     ("format", &["types", "geom", "doc", "machine"], &["zip", "flate2", "serde", "serde_json", "blake3", "craft-atomic", "craft-settings", "thiserror"]),
     ("import", &["types", "geom", "doc"], &["usvg", "image", "serde", "serde_json", "blake3", "thiserror"]),
     ("plan", &["types", "geom", "doc", "machine"], &["blake3", "serde", "thiserror"]),
+    ("text", &["types", "geom"], &["kurbo", "skrifa", "harfrust", "serde", "thiserror"]),
     ("safety", &["types", "geom", "doc", "machine", "plan"], &["serde", "thiserror"]),
     ("arm", &["types"], &["getrandom"]),
     ("render", &["types", "geom", "doc", "machine", "plan"], &["tiny-skia", "thiserror"]),
@@ -47,7 +48,7 @@ const TABLE: &[(&str, &[&str], &[&str])] = &[
     ("transport", &["types", "machine", "lmc", "driver"], &["nusb", "serialport", "keepawake", "craft-settings", "serde", "serde_json", "thiserror"]),
     (
         "engine",
-        &["types", "geom", "doc", "machine", "format", "import", "plan", "safety", "lmc", "gcode", "driver"],
+        &["types", "geom", "doc", "machine", "format", "import", "plan", "safety", "lmc", "gcode", "driver", "text"],
         &["serde", "serde_json", "schemars", "thiserror", "log"],
     ),
     ("control", &["types"], &["serde", "serde_json", "cap-std", "getrandom", "craft-atomic", "thiserror"]),
@@ -58,7 +59,7 @@ const TABLE: &[(&str, &[&str], &[&str])] = &[
     ),
     (
         "ui-egui",
-        &["types", "geom", "doc", "machine", "plan", "engine", "control", "render"],
+        &["types", "geom", "doc", "machine", "plan", "engine", "control", "render", "text"],
         &["egui", "eframe", "egui_extras", "craft-ui", "craft-settings", "craft-atomic", "serde", "serde_json", "log"],
     ),
     ("human", &["types", "ui-egui", "arm"], &["egui"]),

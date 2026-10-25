@@ -35,6 +35,11 @@ pub struct UiState {
     pub anchor: u8,
     /// The Offset Shapes dialog's values (remembered between opens, like LightBurn).
     pub offset: Option<OffsetUi>,
+    /// The inline text editor: `Some` while a canvas text box is open (new text when `editing` is `None`,
+    /// re-editing an existing shape when it is `Some(id)`).
+    pub text: Option<TextUi>,
+    /// The last-used text settings: defaults for the next text the armed tool creates.
+    pub text_defaults: TextDefaults,
     /// A machine is framing, running or stopping, or the ARM dialog is open: STOP chrome is up, files are refused.
     pub machine_active: bool,
     pub status_message: String,
@@ -65,6 +70,86 @@ impl OffsetUi {
     }
 }
 
+/// The inline text editor's state. `anchor` is the baseline anchor (world mm); `editing` is the shape id when
+/// re-editing an existing text (`tools.text` otherwise). `request_focus` is consumed once to focus the box.
+#[derive(Debug, Clone)]
+pub struct TextUi {
+    pub anchor: [f64; 2],
+    pub buffer: String,
+    pub editing: Option<u64>,
+    pub request_focus: bool,
+}
+
+/// Last-used text parameters (the options bar edits them while the tool is armed; `align` is 0 left / 1 centre /
+/// 2 right).
+#[derive(Debug, Clone)]
+pub struct TextDefaults {
+    pub family: String,
+    pub style: String,
+    pub height: f64,
+    pub letter_spacing: f64,
+    pub line_spacing: f64,
+    pub align: u8,
+}
+
+impl Default for TextDefaults {
+    fn default() -> Self {
+        TextDefaults { family: String::new(), style: String::new(), height: 10.0, letter_spacing: 0.0, line_spacing: 1.0, align: 0 }
+    }
+}
+
+impl TextDefaults {
+    /// The alignment index → the engine's `align` string.
+    pub fn align_str(&self) -> &'static str {
+        ["left", "center", "right"].get(usize::from(self.align)).copied().unwrap_or("left")
+    }
+
+    /// `tools.text` params at an anchor (the buffer comes from the editor). Empty family/style are omitted so
+    /// the engine falls back to its default.
+    pub fn create_params(&self, anchor: [f64; 2], text: &str) -> serde_json::Value {
+        let mut p = serde_json::json!({
+            "xMm": anchor[0],
+            "yMm": anchor[1],
+            "text": text,
+            "heightMm": self.height,
+            "letterSpacingMm": self.letter_spacing,
+            "lineSpacing": self.line_spacing,
+            "align": self.align_str(),
+        });
+        let map = p.as_object_mut();
+        if let Some(map) = map {
+            if !self.family.is_empty() {
+                map.insert("family".to_owned(), self.family.clone().into());
+            }
+            if !self.style.is_empty() {
+                map.insert("style".to_owned(), self.style.clone().into());
+            }
+        }
+        p
+    }
+
+    /// `text.edit` params for a field change (coalesced per field).
+    pub fn edit_params(&self, id: u64, coalesce: &str) -> serde_json::Value {
+        let mut p = serde_json::json!({
+            "id": id,
+            "heightMm": self.height,
+            "letterSpacingMm": self.letter_spacing,
+            "lineSpacing": self.line_spacing,
+            "align": self.align_str(),
+            "coalesce": coalesce,
+        });
+        if let Some(map) = p.as_object_mut() {
+            if !self.family.is_empty() {
+                map.insert("family".to_owned(), self.family.clone().into());
+            }
+            if !self.style.is_empty() {
+                map.insert("style".to_owned(), self.style.clone().into());
+            }
+        }
+        p
+    }
+}
+
 impl Default for UiState {
     fn default() -> Self {
         Self {
@@ -80,6 +165,8 @@ impl Default for UiState {
             polygon_sides: 6,
             lock_ratio: true,
             offset: None,
+            text: None,
+            text_defaults: TextDefaults::default(),
             anchor: 4,
             machine_active: false,
             status_message: String::new(),
@@ -498,6 +585,10 @@ impl OpenLaserApp {
                 self.execute_widget(id, serde_json::json!({}));
             }
             "tools.offsetShapes" => self.ui.offset = Some(self.ui.offset.unwrap_or_default()),
+            "tools.text" => {
+                self.ui.text = None; // arming closes any open editor without committing via the tool click
+                self.ui.selected_tool = "Edit Text";
+            }
             "edit.paste" => {
                 // Paste lands at the canvas pointer (LightBurn); with no pointer over the canvas it offsets.
                 let params = self.ui.pointer_mm.map_or_else(|| serde_json::json!({}), |[x, y]| serde_json::json!({ "xMm": x, "yMm": y }));
@@ -794,7 +885,14 @@ impl eframe::App for OpenLaserApp {
         }
         let idle_esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let canvas_drag = self.view.sel_drag.is_some() || self.view.marquee_from.is_some();
-        if idle_esc && !canvas_drag && !self.safety_active() && !text_focus && !ctx.any_popup_open() && ctx.memory(|m| m.top_modal_layer().is_none()) {
+        if idle_esc
+            && !canvas_drag
+            && self.ui.text.is_none()
+            && !self.safety_active()
+            && !text_focus
+            && !ctx.any_popup_open()
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+        {
             self.invoke_ui_action("edit.selectNone");
         }
         // Arrow keys nudge the selection: 1 mm, Shift = 10 mm (Y up, so Up is +dyMm). Only while no text
