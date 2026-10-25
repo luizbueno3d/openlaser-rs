@@ -278,12 +278,15 @@ impl EngineRig {
             }
         };
         let profiles: Option<Arc<dyn ProfileStore>> = profiles_dir.map(|d| Arc::new(DirProfileStore::new(d.to_path_buf())) as Arc<dyn ProfileStore>);
+        let camera_store = openlaser_format::camera_cal::calibration_path()
+            .map(|path| Arc::new(openlaser_format::camera_cal::DirCalibrationStore::new(path)) as Arc<dyn openlaser_engine::CameraCalibrationStore>);
         let session = Session::new(SessionConfig {
             origin: Origin::Human,
             window: false,
             devices: DeviceAccess::Provider(Arc::clone(&provider)),
             machines,
             profiles,
+            camera_store,
             files: FsAuthority::TrustedLocal,
             clock: Arc::clone(&clock),
         });

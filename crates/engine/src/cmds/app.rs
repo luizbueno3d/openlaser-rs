@@ -42,6 +42,8 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             enabled: always, params: NoParams, run: |_s: &mut Session, _p: NoParams| Ok::<_, EngineError>(json!({ "ui": "view.zoomSelection" })), doc: "{}"),
         command!("view.pan", "Pan", menu: [], shortcut: Some("Space"), kind: Kind::View, access: Access::Ui,
             enabled: always, params: NoParams, run: |_s: &mut Session, _p: NoParams| Ok::<_, EngineError>(json!({ "ui": "view.pan" })), doc: "{}"),
+        command!("view.cameraBackground", "Camera Background", menu: ["Window"], shortcut: None, kind: Kind::View, access: Access::Ui,
+            enabled: always, params: NoParams, run: |_s: &mut Session, _p: NoParams| Ok::<_, EngineError>(json!({ "ui": "view.cameraBackground" })), doc: "{} (toggle; the shell draws the calibrated feed under the design)"),
         command!("window.show", "Show Window", menu: [], shortcut: None, kind: Kind::View, access: Access::Ui,
             enabled: always, params: WindowParams, run: window_show, doc: "{panel, visible}"),
         command!("preview.open", "Preview", menu: ["Window"], shortcut: Some("Alt+P"), kind: Kind::View, access: Access::Ui,

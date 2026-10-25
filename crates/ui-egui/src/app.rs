@@ -50,6 +50,8 @@ pub struct UiState {
     pub machine_active: bool,
     pub status_message: String,
     pub pointer_mm: Option<[f64; 2]>,
+    /// Window ▸ Camera Background: the calibrated live feed under the design (persisted in UiSettings).
+    pub camera_background: bool,
     /// The Camera Control panel's device list and pick (phase 6a).
     pub camera: CameraUi,
 }
@@ -62,6 +64,15 @@ pub struct CameraUi {
     pub devices: Option<std::result::Result<Vec<openlaser_engine::CameraDeviceInfo>, String>>,
     /// The device index the dropdown selects.
     pub selected: u32,
+    /// Calibrate mode: clicks on the feed collect `{cam px ↔ bed mm}` pairs (phase 6b).
+    pub calibrating: bool,
+    /// The last feed click in image pixels, waiting for its bed-mm coordinates.
+    pub pending_cam: Option<[f64; 2]>,
+    /// The bed-mm fields for `pending_cam` (text so incomplete input never blocks typing).
+    pub bed_x: String,
+    pub bed_y: String,
+    /// The feed's rect in the last painted frame (screen points); tests click through it.
+    pub feed_rect: Option<egui::Rect>,
 }
 
 /// Offset Shapes dialog state. `direction`/`corner` are combo indices: 0 outward / 1 inward / 2 both and
@@ -330,6 +341,7 @@ impl Default for UiState {
             machine_active: false,
             status_message: String::new(),
             pointer_mm: None,
+            camera_background: false,
             camera: CameraUi::default(),
         }
     }
@@ -415,6 +427,11 @@ pub(crate) struct Seam {
     pub project: Option<std::sync::Arc<openlaser_doc::Project>>,
     pub selection: Vec<openlaser_types::ObjectId>,
     pub polls: usize,
+    /// Emulated live camera: a running stream with frames, without a webcam (phase 6b).
+    pub camera_running: bool,
+    pub camera_frame: Option<openlaser_engine::CameraFrame>,
+    /// The camera underlay painted in the last canvas pass (asserted by overlay tests).
+    pub camera_overlay: bool,
     /// Every widget dispatch: (origin, command id, params).
     pub dispatched: Vec<(Origin, String, serde_json::Value)>,
     /// Human-only actions that passed the provenance gate.
@@ -466,9 +483,10 @@ impl OpenLaserApp {
     pub(crate) fn with_context(ctx: &egui::Context, session: Session, services: Services) -> Self {
         egui_extras::install_image_loaders(ctx);
         let saved = services.settings.load();
+        let ui = UiState { camera_background: saved.camera_background, ..UiState::default() };
         Self {
             session,
-            ui: UiState::default(),
+            ui,
             in_window_menus: saved.in_window_menus,
             dock: crate::dock::decode(&saved.dock_layout),
             services,
@@ -741,6 +759,14 @@ impl OpenLaserApp {
                 let origin = self.origin();
                 self.pending_dialogs.push((ticket, kind, origin));
             }
+            "view.cameraBackground" => {
+                self.ui.camera_background = !self.ui.camera_background;
+                self.set_status(if self.ui.camera_background {
+                    "Camera background on — the calibrated live feed draws under the design"
+                } else {
+                    "Camera background off"
+                });
+            }
             "view.zoomPage" => self.view.fit(),
             "view.zoomIn" => self.view.zoom_by(std::f64::consts::SQRT_2),
             "view.zoomOut" => self.view.zoom_by(std::f64::consts::FRAC_1_SQRT_2),
@@ -898,6 +924,24 @@ impl OpenLaserApp {
         self.active_machine().is_none_or(|m| matches!(m.kind, openlaser_machine::Kinematics::Galvo(_)))
     }
 
+    /// The camera's latest frame for the feed and the canvas underlay. The seam feeds frames in tests.
+    pub(crate) fn camera_frame(&self) -> Option<openlaser_engine::CameraFrame> {
+        #[cfg(test)]
+        if let Some(frame) = &self.seam.camera_frame {
+            return Some(frame.clone());
+        }
+        self.session.camera_frame()
+    }
+
+    /// True while the camera pump is alive (the seam can emulate it in tests).
+    pub(crate) fn camera_running(&self) -> bool {
+        #[cfg(test)]
+        if self.seam.camera_running {
+            return true;
+        }
+        self.session.camera_running()
+    }
+
     /// Recomputes the cached plan only when the document, its revision or its machine changed.
     pub(crate) fn refresh_plan(&mut self) {
         #[cfg(test)]
@@ -1033,10 +1077,15 @@ impl OpenLaserApp {
         let dock = crate::services::normalize_dock_layout(&crate::dock::encode(&self.dock));
         let show_laser = self.dock.contains(&"laser".to_owned());
         let show_cuts = self.dock.contains(&"cuts".to_owned());
-        if settings.dock_layout != dock || settings.show_laser != show_laser || settings.show_cuts != show_cuts {
+        if settings.dock_layout != dock
+            || settings.show_laser != show_laser
+            || settings.show_cuts != show_cuts
+            || settings.camera_background != self.ui.camera_background
+        {
             settings.dock_layout = dock;
             settings.show_laser = show_laser;
             settings.show_cuts = show_cuts;
+            settings.camera_background = self.ui.camera_background;
             self.services.settings.save(&settings);
         }
     }

@@ -48,7 +48,10 @@ pub use session::{
 };
 
 // Re-exports so callers can name these without a direct dependency (SPEC §3.0).
-pub use openlaser_camera::{Capture as CameraCapture, DeviceInfo as CameraDeviceInfo, Frame as CameraFrame};
+pub use openlaser_camera::{
+    Calibration as CameraCalibration, CalibrationStore as CameraCalibrationStore, Capture as CameraCapture, DeviceInfo as CameraDeviceInfo,
+    Frame as CameraFrame, Pair as CameraPair, StoredCalibration as StoredCameraCalibration,
+};
 pub use openlaser_doc::{Project, Selection};
 pub use openlaser_driver::{DeviceProvider, DriverError, DriverEvent, MachineState, Outcome, StopAck, StopReport, Stopper, TraceLine};
 pub use openlaser_gcode::{GcodeFrame, GcodeProgram};

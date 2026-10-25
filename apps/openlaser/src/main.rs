@@ -78,6 +78,9 @@ fn main() -> ExitCode {
     let profile_store = machines::profiles_dir()
         .or_else(|| craft_settings::paths::data_dir("OpenLaser").map(|p| p.join("machines")))
         .map(|dir| Arc::new(machines::DirProfileStore::new(dir)) as Arc<dyn openlaser_engine::ProfileStore>);
+    // Phase 6b: the camera↔bed calibration is machine-local setup data (never the project file).
+    let camera_store = openlaser_format::camera_cal::calibration_path()
+        .map(|path| Arc::new(openlaser_format::camera_cal::DirCalibrationStore::new(path)) as Arc<dyn openlaser_engine::CameraCalibrationStore>);
     let session = Session::new(SessionConfig {
         origin: Origin::Human,
         window: true,
@@ -91,6 +94,7 @@ fn main() -> ExitCode {
         }))),
         machines: profiles,
         profiles: profile_store,
+        camera_store,
         files,
         clock: Arc::clone(&clock),
     });

@@ -52,11 +52,20 @@ pub struct UiSettings {
     pub show_cuts: bool,
     #[serde(default)]
     pub show_laser: bool,
+    /// Window ▸ Camera Background: draw the calibrated live feed under the design (phase 6b).
+    #[serde(default)]
+    pub camera_background: bool,
 }
 
 impl UiSettings {
     pub fn with_defaults() -> Self {
-        Self { in_window_menus: false, dock_layout: crate::dock::encode(&crate::dock::default_layout()), show_cuts: true, show_laser: true }
+        Self {
+            in_window_menus: false,
+            dock_layout: crate::dock::encode(&crate::dock::default_layout()),
+            show_cuts: true,
+            show_laser: true,
+            camera_background: false,
+        }
     }
 }
 

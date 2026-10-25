@@ -68,7 +68,16 @@ fn full_project(m: &MachineProfile) -> Project {
 }
 
 fn config(origin: Origin, window: bool, devices: DeviceAccess, clock: Arc<dyn Clock>) -> SessionConfig {
-    SessionConfig { origin, window, devices, machines: vec![jpt_m7_200_sim(), jpt_m7_200()], profiles: None, files: FsAuthority::TrustedLocal, clock }
+    SessionConfig {
+        origin,
+        window,
+        devices,
+        machines: vec![jpt_m7_200_sim(), jpt_m7_200()],
+        profiles: None,
+        camera_store: None,
+        files: FsAuthority::TrustedLocal,
+        clock,
+    }
 }
 
 fn headless() -> Session {
@@ -1017,6 +1026,7 @@ mod gantry {
                 devices: DeviceAccess::None,
                 machines: machines.clone(),
                 profiles: None,
+                camera_store: None,
                 files: FsAuthority::TrustedLocal,
                 clock: Arc::new(VirtualClock::new()),
             };
@@ -1071,6 +1081,7 @@ fn panic_hunt() {
                     devices,
                     machines: vec![jpt_m7_200_sim(), jpt_m7_200()],
                     profiles: None,
+                    camera_store: None,
                     files: FsAuthority::Denied,
                     clock: Arc::new(VirtualClock::new()),
                 });
@@ -1105,6 +1116,8 @@ fn panic_hunt() {
 // ---- camera (phase 6a) --------------------------------------------------------------------------------------------
 
 mod camera {
+    use openlaser_engine::CameraCalibrationStore;
+
     use super::*;
 
     /// The four commands are registered, `Access::Agent` (agents may drive view state) and not Human.
@@ -1123,7 +1136,9 @@ mod camera {
     fn camera_status_and_stop_without_a_camera() {
         let mut s = headless();
         let status = s.execute("camera.status", json!({})).unwrap();
-        assert_eq!(status, json!({ "open": false, "running": false }));
+        assert_eq!(status["open"], false);
+        assert_eq!(status["running"], false);
+        assert_eq!(status["calibration"], json!({ "calibrated": false, "pairs": 0 }), "{status}");
         let stopped = s.execute("camera.stop", json!({})).unwrap();
         assert_eq!(stopped["open"], false);
         let listed = s.execute("camera.list", json!({})).unwrap();
@@ -1157,5 +1172,126 @@ mod camera {
         assert!(s.pending_arm().is_none());
         // Camera commands journal nothing (only Edit and Io commands are journaled).
         assert!(s.journal().iter().all(|e| !e.id.starts_with("camera.")));
+    }
+
+    // ---- phase 6b: calibration --------------------------------------------------------------------------------
+
+    /// A square bed field mapped through a mild perspective into camera px (the inverse of the fit).
+    fn pairs() -> Vec<[f64; 4]> {
+        let project = |b: [f64; 2]| {
+            let w = 0.001 * b[0] - 0.0006 * b[1] + 1.0;
+            [(0.9 * b[0] + 0.1 * b[1] + 400.0) / w, (0.05 * b[0] + 0.85 * b[1] + 300.0) / w]
+        };
+        [[-50.0, -50.0], [50.0, -50.0], [50.0, 50.0], [-50.0, 50.0], [0.0, 0.0]].iter().map(|b| [project(*b)[0], project(*b)[1], b[0], b[1]]).collect()
+    }
+
+    fn add(s: &mut Session, p: [f64; 4]) {
+        s.execute("camera.calibrate.addPair", json!({ "camX": p[0], "camY": p[1], "bedX": p[2], "bedY": p[3] })).unwrap();
+    }
+
+    /// addPair → status pairs → removeLast → fit (homography, session-only store) → map both ways → clear.
+    #[test]
+    fn camera_calibrate_lifecycle() {
+        let mut s = headless();
+        let pts = pairs();
+        for (i, p) in pts.iter().enumerate() {
+            let r = s.execute("camera.calibrate.addPair", json!({ "camX": p[0], "camY": p[1], "bedX": p[2], "bedY": p[3] })).unwrap();
+            assert_eq!(r["pairs"], i + 1);
+        }
+        let status = s.execute("camera.status", json!({})).unwrap();
+        assert_eq!(status["calibration"]["pairs"], 5);
+        assert_eq!(status["calibration"]["calibrated"], false);
+        // removeLast pops the newest; empty is a clean camera error, never a panic.
+        let r = s.execute("camera.calibrate.removeLast", json!({})).unwrap();
+        assert_eq!(r["pairs"], 4);
+        add(&mut s, pts[4]);
+        // A duplicate is refused at add time.
+        let e = s.execute("camera.calibrate.addPair", json!({ "camX": pts[4][0], "camY": pts[4][1], "bedX": pts[4][2], "bedY": pts[4][3] })).unwrap_err();
+        assert_eq!(e.code(), "bad_params", "{e}");
+
+        let r = s.execute("camera.calibrate.fit", json!({})).unwrap();
+        assert_eq!(r["kind"], "homography");
+        assert!(r["rmsErrorPx"].as_f64().unwrap() < 1e-4, "{r}");
+        assert_eq!(r["persisted"], false, "no store injected in this session");
+        let status = s.execute("camera.status", json!({})).unwrap();
+        assert_eq!(status["calibration"]["calibrated"], true);
+        assert_eq!(status["calibration"]["kind"], "homography");
+
+        // The map commands now answer in both directions, on and off the fitted points.
+        let px = s.execute("camera.map.bedToPx", json!({ "x": 25.0, "y": 12.5 })).unwrap();
+        let bed = s.execute("camera.map.pxToBed", json!({ "x": px["camX"], "y": px["camY"] })).unwrap();
+        assert!((bed["bedX"].as_f64().unwrap() - 25.0).abs() < 0.01, "{bed}");
+        assert!((bed["bedY"].as_f64().unwrap() - 12.5).abs() < 0.01, "{bed}");
+        let known = pts[0];
+        let px = s.execute("camera.map.bedToPx", json!({ "x": known[2], "y": known[3] })).unwrap();
+        assert!((px["camX"].as_f64().unwrap() - known[0]).abs() < 0.5, "{px}");
+
+        // clear drops pairs AND the fit; map commands are refused cleanly again.
+        s.execute("camera.calibrate.clear", json!({})).unwrap();
+        let e = s.execute("camera.map.bedToPx", json!({ "x": 0.0, "y": 0.0 })).unwrap_err();
+        assert_eq!(e.code(), "disabled", "{e}");
+        assert!(e.to_string().contains("not calibrated"), "{e}");
+        let status = s.execute("camera.status", json!({})).unwrap();
+        assert_eq!(status["calibration"]["calibrated"], false);
+    }
+
+    /// `camera.map.*` before any fit: `enabled` refuses with an honest "not calibrated" reason, visible in
+    /// `command_list` and through strict dispatch (code `disabled`).
+    #[test]
+    fn camera_map_refuses_when_not_calibrated() {
+        let mut s = headless();
+        for id in ["camera.map.bedToPx", "camera.map.pxToBed"] {
+            let e = s.execute(id, json!({ "x": 1.0, "y": 2.0 })).unwrap_err();
+            assert_eq!(e.code(), "disabled", "{id}: {e}");
+            assert!(e.to_string().contains("not calibrated"), "{id}: {e}");
+            let row = s.command_list(Origin::Headless, &ListFilter::default()).into_iter().find(|r| r.id == id).unwrap();
+            assert!(!row.enabled, "{id} should be disabled");
+            assert!(row.disabled_reason.unwrap().contains("not calibrated"));
+        }
+        // And too few pairs to fit is a camera error, not a panic.
+        let e = s.execute("camera.calibrate.fit", json!({})).unwrap_err();
+        assert_eq!(e.code(), "camera", "{e}");
+        add(&mut s, pairs()[0]);
+        add(&mut s, pairs()[1]);
+        let e = s.execute("camera.calibrate.fit", json!({})).unwrap_err();
+        assert_eq!(e.code(), "camera", "{e}");
+        assert!(e.to_string().contains("3"), "{e}");
+    }
+
+    /// Three well-spread pairs fit an affine exactly (kind reports `affine`).
+    #[test]
+    fn camera_calibrate_three_pairs_is_affine() {
+        let mut s = headless();
+        for p in [[100.0, 100.0, -50.0, -50.0], [500.0, 90.0, 50.0, -50.0], [300.0, 480.0, 0.0, 50.0]] {
+            add(&mut s, p);
+        }
+        let r = s.execute("camera.calibrate.fit", json!({})).unwrap();
+        assert_eq!(r["kind"], "affine");
+        assert!(r["rmsErrorPx"].as_f64().unwrap() < 1e-9, "{r}");
+    }
+
+    /// A fitted calibration persists through the injected store and is reloaded by a new session.
+    #[test]
+    fn camera_calibration_persists_through_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = || Arc::new(openlaser_format::camera_cal::DirCalibrationStore::new(dir.path().join("camera-calibration.json")));
+        let cfg = |store: Arc<dyn openlaser_engine::CameraCalibrationStore>| {
+            let mut c = config(Origin::Headless, false, DeviceAccess::None, Arc::new(VirtualClock::new()));
+            c.camera_store = Some(store);
+            c
+        };
+        let mut s = Session::new(cfg(store()));
+        for p in pairs() {
+            add(&mut s, p);
+        }
+        let r = s.execute("camera.calibrate.fit", json!({})).unwrap();
+        assert_eq!(r["persisted"], true, "{r}");
+        // A fresh session loads the same fit: the map round-trips without a new fit.
+        let mut s2 = Session::new(cfg(store()));
+        let px = s2.execute("camera.map.bedToPx", json!({ "x": -50.0, "y": -50.0 })).unwrap();
+        assert!((px["camX"].as_f64().unwrap() - pairs()[0][0]).abs() < 0.5, "{px}");
+        // clear removes the file too.
+        s2.execute("camera.calibrate.clear", json!({})).unwrap();
+        assert!(store().load().is_none());
     }
 }

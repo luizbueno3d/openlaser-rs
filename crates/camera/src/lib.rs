@@ -13,11 +13,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod calibrate;
 mod capture;
 mod error;
 #[cfg(feature = "synthetic")]
 mod synthetic;
 
+pub use calibrate::{Calibration, CalibrationStore, MAX_PAIRS, Pair, StoredCalibration, fit};
 pub use capture::{Capture, DeviceInfo, Frame, list_devices};
 pub use error::Error;
 #[cfg(feature = "synthetic")]

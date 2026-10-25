@@ -3435,6 +3435,8 @@ version = "0.1.0"
 dependencies = [
  "log",
  "nokhwa",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
@@ -3543,6 +3545,7 @@ dependencies = [
  "craft-atomic",
  "craft-settings",
  "flate2",
+ "openlaser-camera",
  "openlaser-doc",
  "openlaser-geom",
  "openlaser-machine",

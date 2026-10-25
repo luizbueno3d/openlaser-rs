@@ -33,7 +33,11 @@ const TABLE: &[(&str, &[&str], &[&str])] = &[
     ("geom", &["types"], &["kurbo", "i_overlay", "rstar", "serde", "thiserror"]),
     ("doc", &["types", "geom"], &["kurbo", "i_overlay", "serde", "serde_json", "thiserror"]),
     ("machine", &["types", "geom", "doc"], &["serde", "thiserror"]),
-    ("format", &["types", "geom", "doc", "machine"], &["zip", "flate2", "serde", "serde_json", "blake3", "craft-atomic", "craft-settings", "thiserror"]),
+    (
+        "format",
+        &["types", "geom", "doc", "machine", "camera"],
+        &["zip", "flate2", "serde", "serde_json", "blake3", "craft-atomic", "craft-settings", "thiserror"],
+    ),
     ("import", &["types", "geom", "doc"], &["usvg", "image", "serde", "serde_json", "blake3", "thiserror"]),
     ("plan", &["types", "geom", "doc", "machine"], &["blake3", "serde", "thiserror"]),
     ("text", &["types", "geom"], &["kurbo", "skrifa", "harfrust", "serde", "thiserror"]),
@@ -46,7 +50,7 @@ const TABLE: &[(&str, &[&str], &[&str])] = &[
     ("driver", &["types", "machine", "lmc", "gcode"], &["crossbeam-channel", "serde", "thiserror", "log"]),
     ("lmc-sim", &["types", "machine", "lmc", "driver"], &["crossbeam-channel", "thiserror"]),
     ("transport", &["types", "machine", "lmc", "driver"], &["nusb", "serialport", "keepawake", "craft-settings", "serde", "serde_json", "thiserror"]),
-    ("camera", &[], &["nokhwa", "thiserror", "log"]),
+    ("camera", &[], &["nokhwa", "thiserror", "log", "serde"]),
     (
         "engine",
         &["types", "geom", "doc", "machine", "format", "import", "plan", "safety", "lmc", "gcode", "driver", "text", "camera"],

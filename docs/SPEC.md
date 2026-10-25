@@ -152,7 +152,7 @@ crates; `cargo xtask deps` fails on any edge not listed (dev-dependencies: §2.3
 | `geom` | `Polyline`, kurbo flattening, transforms, bounds, join/close/dedupe (OM `geometry.py` port), hatch (OM `raster.py` port, T3), `HitIndex` (rstar) | types | kurbo, rstar, serde, thiserror |
 | `doc` | The project model: shapes, the 30 colour layers + T1/T2, cut settings (galvo/gantry/fill/image), selection, palette. Pure data | types, geom | kurbo, serde, serde_json, thiserror |
 | `machine` | Machine profiles (`GalvoMachine`, `GantryMachine`), calibration, JPT M7 built-in, OM gantry profiles, EZCAD `markcfg` import, OM `calibration.json` import, the `ProfileStore` trait (S24). No I/O | types, geom, doc | serde, thiserror |
-| `format` | `.olp` read/write (zip + manifest model + migrations), atomic save; `machines` (profile files: `load_all`, `DirProfileStore`) | types, geom, doc, machine | zip, flate2 (backend selection only), serde, serde_json, blake3, craft-atomic, craft-settings (app dirs), thiserror |
+| `format` | `.olp` read/write (zip + manifest model + migrations), atomic save; `machines` (profile files: `load_all`, `DirProfileStore`); `camera_cal` (`DirCalibrationStore`, the machine-local camera↔bed calibration file) | types, geom, doc, machine, camera | zip, flate2 (backend selection only), serde, serde_json, blake3, craft-atomic, craft-settings (app dirs), thiserror |
 | `import` | SVG (usvg, true scale), DXF (OM parser port, T4), raster images, OM `workspace.json` + `layer_settings.json` | types, geom, doc | usvg, image, serde, serde_json, blake3, thiserror |
 | `plan` | Document + machine → `JobPlan`: sections per layer/sub-layer/pass, machine transform, hatch, quantised galvo parameters (`GalvoCutQ`), frame paths, plan facts, galvo time model, fingerprint | types, geom, doc, machine | blake3, serde, thiserror |
 | `safety` | `validate()`: every hard refusal and notice; sole constructor of `EmitPlan`/`FramePlan` | types, geom, doc, machine, plan | serde, thiserror |
@@ -164,7 +164,7 @@ crates; `cargo xtask deps` fails on any edge not listed (dev-dependencies: §2.3
 | `driver` | Driver runtime: `Backend`, driver thread, `StopLatch`/`Stopper`, watchdog, dead-man rule, panic guard, events; **LMC session** (`LmcBackend`); **GRBL streaming** (`GrblBackend`); `DeviceProvider` (incl. `detect`) and `ByteLink` traits | types, machine, lmc, gcode | crossbeam-channel, serde, thiserror, log |
 | `lmc-sim` | `FakeLmc` (board model, virtual clock, faults, emission recorder), offline `simulate_job`, `SimProvider`, `FakeGrbl` (port of `fake_grbl.py`) | types, machine, lmc, driver | crossbeam-channel, thiserror |
 | `transport` | **The only crate that touches devices**: `UsbLmc` (nusb), `SerialLink`/`TcpLink`, `UsbProvider`, read-only `detect`, board lock, bench session, keep-awake assertion (`keepawake`) | types, machine, lmc, driver | nusb, serialport, keepawake, craft-settings (app dirs), serde, serde_json, thiserror |
-| `camera` | Webcam capture for camera-guided placement (nokhwa `input-native`: AVFoundation/MSMF/v4l, no `decoding` so no C toolchain — §2.6): device list, latest-wins pump thread, RGBA `Frame`s, `SyntheticSource` behind feature `synthetic`. View state only — no laser state, no UI | — | nokhwa, thiserror, log |
+| `camera` | Webcam capture for camera-guided placement (nokhwa `input-native`: AVFoundation/MSMF/v4l, no `decoding` so no C toolchain — §2.6): device list, latest-wins pump thread, RGBA `Frame`s, `SyntheticSource` behind feature `synthetic`; `calibrate` (point-pair fit — affine at 3, normalised-DLT homography at ≥4 — `Calibration`, `StoredCalibration`, the `CalibrationStore` trait). View state only — no laser state, no UI | — | nokhwa, thiserror, log, serde |
 | `engine` | `Session`, command registry and `command!` macro, origin policy, snapshot undo, job pipeline (plan → validate → encode → disassemble → summary), device hub, pending ARM, frame requests and submissions, inspect JSON, the one webcam `Capture` (`camera.*` view-state commands) | types, geom, doc, machine, format, import, plan, safety, lmc, gcode, driver, text, camera | serde, serde_json, schemars, thiserror, log |
 | `control` | Control-protocol leaf (std only): token, discovery file, bounded line reader, envelope, method table, budgets, `AuthorizedWorkspace` (cap-std), loopback `ControlServer` with the stop fast path | types | serde, serde_json, cap-std, getrandom, craft-atomic, thiserror |
 | `automation` | MCP server (rmcp, stdio), headless backend, bridge client, `serve` (JSON lines), tool table and strict schemas | types, doc, machine, plan, engine, control, render, lmc, lmc-sim | rmcp, tokio, schemars, serde, serde_json, base64, thiserror |
@@ -177,12 +177,13 @@ crates; `cargo xtask deps` fails on any edge not listed (dev-dependencies: §2.3
 | `xtask` | `deps`, `parity`, `golden-verify`, `ci` | — | serde_json, sha2 |
 
 ```
-types ─┬─ geom ─ doc ─ machine ─┬─ format (+ machines store)      arm ─(types)        control ─(types)
+types ─┬─ geom ─ doc ─ machine ─┬─ format (+ machines, camera-calibration stores; format ─ camera)
+       │                        │                                                              arm ─(types)        control ─(types)
        │                        ├─ import                         testkit ─(types, dev only)
        │                        └─ plan ─┬─ safety ─┬─ gcode ─┐
        │                                 │          └─ lmc ───┴─ driver ─┬─ lmc-sim
        │                                 └─ render                       └─ transport   ◄ hardware edge
-camera      = (nokhwa input-native; no internal deps — webcam view state, never laser state)
+camera      = (nokhwa input-native + serde; no internal deps — webcam view state + calibration math, never laser state)
 engine      = doc machine format import plan safety lmc gcode driver camera (+ types geom)
 automation  = engine control render lmc-sim         ui-egui = engine control render
 human       = ui-egui arm

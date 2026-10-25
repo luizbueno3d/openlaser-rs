@@ -18,3 +18,8 @@ synthetic = []
 nokhwa = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+# Calibration math and its persisted shape (calibrate.rs) serialise with serde.
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

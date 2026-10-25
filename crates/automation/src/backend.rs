@@ -134,6 +134,7 @@ impl Headless {
             devices: openlaser_engine::DeviceAccess::None,
             machines: vec![openlaser_machine::jpt_m7_200_sim()],
             profiles: None,
+            camera_store: None,
             files: files_authority,
             clock: Arc::new(openlaser_types::SystemClock::default()),
         });

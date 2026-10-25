@@ -1,6 +1,7 @@
 //! `.olp` read/write (SPEC §3.5, S14) and machine profile files (S24); owned by WP1. WP0 stubs.
 #![forbid(unsafe_code)]
 
+pub mod camera_cal;
 pub mod machines;
 
 use std::io::{Read, Write};

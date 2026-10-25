@@ -25,4 +25,8 @@ pub enum Error {
     /// A delivered frame could not be converted to RGBA.
     #[error("cannot decode {format} frame: {message}")]
     Decode { format: String, message: String },
+    /// A calibration fit was refused: under-determined, non-finite, duplicate, collinear or degenerate
+    /// input (calibrate.rs — the refusal says which).
+    #[error("camera calibration: {0}")]
+    Calibrate(String),
 }

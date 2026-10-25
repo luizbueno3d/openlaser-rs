@@ -4453,6 +4453,180 @@ expression: rows
     }
   },
   {
+    "id": "camera.calibrate.addPair",
+    "label": "Add Calibration Point",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{camX, camY, bedX, bedY} (px ↔ mm)",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`camera.calibrate.addPair`: `camX`/`camY` in image pixels, `bedX`/`bedY` in bed millimetres.",
+      "properties": {
+        "bedX": {
+          "description": "The same physical point measured on the bed (millimetres).",
+          "format": "double",
+          "type": "number"
+        },
+        "bedY": {
+          "format": "double",
+          "type": "number"
+        },
+        "camX": {
+          "description": "The clicked image point (pixels).",
+          "format": "double",
+          "type": "number"
+        },
+        "camY": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "camX",
+        "camY",
+        "bedX",
+        "bedY"
+      ],
+      "title": "AddPairParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.calibrate.removeLast",
+    "label": "Remove Last Calibration Point",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.calibrate.fit",
+    "label": "Fit Camera Calibration",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{} (≥3 pairs; persists through the machine-local store)",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.calibrate.clear",
+    "label": "Clear Camera Calibration",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{} (pairs and the fitted calibration)",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.map.bedToPx",
+    "label": "Map Bed to Camera Pixels",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{x, y} mm → {camX, camY} px",
+    "enabled": false,
+    "disabledReason": "the camera is not calibrated",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`camera.map.*`: `{x, y}` in the input's own units (mm for `bedToPx`, px for `pxToBed`).",
+      "properties": {
+        "x": {
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "title": "MapParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.map.pxToBed",
+    "label": "Map Camera Pixels to Bed",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{x, y} px → {bedX, bedY} mm",
+    "enabled": false,
+    "disabledReason": "the camera is not calibrated",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`camera.map.*`: `{x, y}` in the input's own units (mm for `bedToPx`, px for `pxToBed`).",
+      "properties": {
+        "x": {
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "title": "MapParams",
+      "type": "object"
+    }
+  },
+  {
     "id": "document.inspect",
     "label": "Inspect Document",
     "menu": [],
@@ -4852,6 +5026,28 @@ expression: rows
     "kind": "view",
     "agent": "ui",
     "params": "{}",
+    "enabled": false,
+    "disabledReason": "needs the OpenLaser window (bridge mode)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "view.cameraBackground",
+    "label": "Camera Background",
+    "menu": [
+      "Window"
+    ],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "ui",
+    "params": "{} (toggle; the shell draws the calibrated feed under the design)",
     "enabled": false,
     "disabledReason": "needs the OpenLaser window (bridge mode)",
     "needsDocument": false,

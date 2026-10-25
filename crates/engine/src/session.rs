@@ -44,6 +44,9 @@ pub struct SessionConfig {
     /// S24: Some only in the GUI and openlaser-hw. `device.settings.set`/`create`/`importEzcad`/`calibrateAxis`
     /// write through it and fail with NoDevice-style "profiles are read-only in this session" when None.
     pub profiles: Option<Arc<dyn ProfileStore>>,
+    /// The camera↔bed calibration's machine-local store (phase 6b): `camera.calibrate.fit`/`clear` write
+    /// through it and the last fit is loaded at `Session::new`. `None` keeps calibration session-local.
+    pub camera_store: Option<Arc<dyn openlaser_camera::CalibrationStore>>,
     pub files: FsAuthority,
     pub clock: Arc<dyn Clock>,
 }
@@ -111,6 +114,12 @@ pub struct Session {
     /// The one live webcam capture (camera.rs): view state only — never in a Snapshot, never journaled, and
     /// untouched by `file.new`/`file.open`. `camera.*` commands are safe for agents (AGENTS.md §1).
     pub(crate) camera: Option<openlaser_camera::Capture>,
+    /// Point pairs collected by `camera.calibrate.addPair` until `fit` consumes them. View state too.
+    pub(crate) camera_pairs: Vec<openlaser_camera::Pair>,
+    /// The active camera↔bed calibration (loaded from `camera_store` at start; `fit`/`clear` rewrite it).
+    pub(crate) camera_cal: Option<openlaser_camera::StoredCalibration>,
+    /// Machine-local calibration persistence, injected like `profiles` (format::DirCalibrationStore).
+    pub(crate) camera_store: Option<Arc<dyn openlaser_camera::CalibrationStore>>,
 }
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -118,6 +127,9 @@ static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 impl Session {
     pub fn new(cfg: SessionConfig) -> Self {
         let id = SessionId(NEXT_SESSION.fetch_add(1, Ordering::Relaxed));
+        // The last persisted camera calibration, if a store is injected and its file parses.
+        let camera_store = cfg.camera_store.clone();
+        let camera_cal = camera_store.as_ref().and_then(|store| store.load());
         Session {
             cfg,
             id,
@@ -140,6 +152,9 @@ impl Session {
             group: None,
             clipboard: None,
             camera: None,
+            camera_pairs: Vec::new(),
+            camera_cal,
+            camera_store,
         }
     }
 

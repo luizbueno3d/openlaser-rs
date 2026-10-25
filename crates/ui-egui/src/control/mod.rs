@@ -302,7 +302,7 @@ fn inspect(app: &OpenLaserApp) -> serde_json::Value {
             "preview": ui.preview_open,
         },
         // The webcam is view state too (phase 6a): whether a capture is open/streaming, never its frames.
-        "camera": { "open": app.session.camera_index().is_some(), "running": app.session.camera_running() },
+        "camera": { "open": app.session.camera_index().is_some(), "running": app.camera_running(), "calibrated": app.session.camera_calibration().is_some(), "background": ui.camera_background },
         // Human-only surfaces are reported read-only, with no nonce or checklist state (§4.6 mechanism 3).
         "armDialog": if app.arm_dialog_open() { "open" } else { "closed" },
         "humanSurfaces": { "open": app.human_surface_open(), "armDialog": app.arm_dialog_open(), "readOnly": true },

@@ -244,7 +244,8 @@ impl OpenLaserApp {
                 let live = menu_catalog::is_live(row);
                 let blocked = self.ui.machine_active && crate::app::opens_files(row.id);
                 let no_image = row.id == "tools.traceImage" && !self.trace_target();
-                let mut button = egui::Button::new(row.label);
+                let checked = row.id == "view.cameraBackground" && self.ui.camera_background;
+                let mut button = egui::Button::new(if checked { format!("✓ {}", row.label) } else { row.label.to_owned() });
                 if let Some(shortcut) = row.shortcut {
                     button = button.shortcut_text(crate::shortcuts::pretty(shortcut));
                 }
@@ -783,13 +784,14 @@ impl OpenLaserApp {
     }
 
     /// The Camera Control panel: device dropdown, Start/Stop (engine `camera.*` commands — view state, safe
-    /// for agents), the live feed and honest empty/error states. Phase 6a draws the raw feed only; lens
-    /// calibration and the workspace overlay arrive in a later phase.
+    /// for agents), the live feed, honest empty/error states and the Calibrate wizard (phase 6b): clicks on
+    /// the feed collect `{cam px ↔ bed mm}` pairs for `camera.calibrate.fit`, which persists through the
+    /// session's machine-local store.
     pub(crate) fn camera_panel(&mut self, ui: &mut egui::Ui) {
         if self.ui.camera.devices.is_none() {
             self.refresh_cameras();
         }
-        let running = self.session.camera_running();
+        let running = self.camera_running();
         let has_devices = matches!(&self.ui.camera.devices, Some(Ok(d)) if !d.is_empty());
         ui.horizontal(|ui| {
             match &self.ui.camera.devices {
@@ -834,7 +836,18 @@ impl OpenLaserApp {
         }
 
         if running {
-            match self.session.camera_frame() {
+            ui.horizontal(|ui| {
+                let cal = ui.selectable_label(self.ui.camera.calibrating, "Calibrate");
+                self.labeled(&cal, egui::WidgetType::Button, "Calibrate camera", false);
+                if cal.clicked() {
+                    self.ui.camera.calibrating = !self.ui.camera.calibrating;
+                    self.ui.camera.pending_cam = None;
+                }
+                if let Some(stored) = self.session.camera_calibration() {
+                    ui.weak(format!("{} fit · rms {:.2} px · {} pts", stored.calibration.kind(), stored.calibration.rms_error_px(), stored.pairs.len()));
+                }
+            });
+            match self.camera_frame() {
                 Some(frame) => {
                     let image = egui::ColorImage::from_rgba_unmultiplied([frame.width as usize, frame.height as usize], &frame.rgba);
                     let tex = self.camera_tex.get_or_insert_with(|| ui.ctx().load_texture("camera-feed", image.clone(), egui::TextureOptions::LINEAR));
@@ -842,7 +855,12 @@ impl OpenLaserApp {
                     // Fit the feed to the panel width (never upscale past 1:1).
                     let natural = egui::vec2(frame.width as f32, frame.height as f32);
                     let scale = (ui.available_width() / natural.x).min(1.0);
-                    ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(tex.id(), natural * scale)));
+                    let sense = if self.ui.camera.calibrating { egui::Sense::click() } else { egui::Sense::hover() };
+                    let response = ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(tex.id(), natural * scale)).sense(sense));
+                    self.ui.camera.feed_rect = Some(response.rect);
+                    if self.ui.camera.calibrating {
+                        self.camera_cal_overlay(ui, &response, scale);
+                    }
                     // Repaint only while streaming: ~30 fps, matching the pump's own frame rate.
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
                 }
@@ -851,9 +869,102 @@ impl OpenLaserApp {
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
                 }
             }
-        } else if self.camera_tex.is_some() {
-            self.camera_tex = None; // free the feed texture once the stream stops
+            if self.ui.camera.calibrating {
+                self.camera_cal_controls(ui);
+            }
+        } else {
+            if self.camera_tex.is_some() {
+                self.camera_tex = None; // free the feed texture once the stream stops
+            }
+            self.ui.camera.feed_rect = None;
+            self.ui.camera.pending_cam = None;
         }
+    }
+
+    /// Calibrate mode's feed overlay: the collected pairs as numbered dots, the pending click marker, and
+    /// the click that captures a camera-pixel point for its bed-mm coordinates.
+    fn camera_cal_overlay(&mut self, ui: &mut egui::Ui, response: &egui::Response, scale: f32) {
+        let pairs: Vec<openlaser_engine::CameraPair> = self.session.camera_cal_pairs().to_vec();
+        let painter = ui.painter_at(response.rect);
+        let to_screen = |cam: [f64; 2]| response.rect.min + egui::vec2(cam[0] as f32 * scale, cam[1] as f32 * scale);
+        let accent = egui::Color32::from_rgb(90, 180, 255);
+        for (i, pair) in pairs.iter().enumerate() {
+            let pos = to_screen(pair.cam);
+            painter.circle_filled(pos, 6.5, accent);
+            painter.circle_stroke(pos, 6.5, egui::Stroke::new(1.0, egui::Color32::BLACK));
+            painter.text(pos, egui::Align2::CENTER_CENTER, format!("{}", i + 1), egui::FontId::proportional(9.0), egui::Color32::BLACK);
+        }
+        if let Some(cam) = self.ui.camera.pending_cam {
+            let pos = to_screen(cam);
+            painter.circle_stroke(pos, 7.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 200, 60)));
+            painter.line_segment([pos - egui::vec2(10.0, 0.0), pos + egui::vec2(10.0, 0.0)], egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 200, 60)));
+            painter.line_segment([pos - egui::vec2(0.0, 10.0), pos + egui::vec2(0.0, 10.0)], egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 200, 60)));
+        }
+        if response.clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+            && scale > 0.0
+        {
+            let cam = [(pos.x - response.rect.min.x) / scale, (pos.y - response.rect.min.y) / scale];
+            if cam.iter().all(|v| v.is_finite()) {
+                self.ui.camera.pending_cam = Some([f64::from(cam[0]), f64::from(cam[1])]);
+            }
+        }
+    }
+
+    /// Calibrate mode's controls: the bed-mm inputs for the pending click, Add/Undo/Clear, Fit and the
+    /// honest hint — everything dispatches the `camera.calibrate.*` engine commands.
+    fn camera_cal_controls(&mut self, ui: &mut egui::Ui) {
+        ui.weak("Place a marked target at a known bed position, click it in the image, enter its mm coordinates; repeat for at least 4 spread-out points.");
+        let pairs = self.session.camera_cal_pairs().len();
+        ui.horizontal(|ui| {
+            let cam = self.ui.camera.pending_cam;
+            ui.label(match cam {
+                Some(c) => format!("image ({:.0}, {:.0}) ↔ bed", c[0], c[1]),
+                None => "click a target in the image".to_owned(),
+            });
+            let x = ui.add(egui::TextEdit::singleline(&mut self.ui.camera.bed_x).desired_width(56.0).hint_text("x mm"));
+            self.labeled(&x, egui::WidgetType::TextEdit, "Bed X (mm)", false);
+            let y = ui.add(egui::TextEdit::singleline(&mut self.ui.camera.bed_y).desired_width(56.0).hint_text("y mm"));
+            self.labeled(&y, egui::WidgetType::TextEdit, "Bed Y (mm)", false);
+            let ready = cam.is_some() && parse_bed(&self.ui.camera).is_some();
+            let add = ui.add_enabled(ready, egui::Button::new("Add point"));
+            self.labeled(&add, egui::WidgetType::Button, "Add calibration point", false);
+            if add.clicked()
+                && let (Some(c), Some((bx, by))) = (cam, parse_bed(&self.ui.camera))
+            {
+                let before = self.session.camera_cal_pairs().len();
+                self.execute_widget("camera.calibrate.addPair", serde_json::json!({ "camX": c[0], "camY": c[1], "bedX": bx, "bedY": by }));
+                if self.session.camera_cal_pairs().len() > before {
+                    self.ui.camera.pending_cam = None;
+                    self.ui.camera.bed_x.clear();
+                    self.ui.camera.bed_y.clear();
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            let undo = ui.add_enabled(pairs > 0, egui::Button::new("Undo last"));
+            self.labeled(&undo, egui::WidgetType::Button, "Remove last calibration point", false);
+            if undo.clicked() {
+                self.execute_widget("camera.calibrate.removeLast", serde_json::json!({}));
+            }
+            let clear = ui.add_enabled(pairs > 0 || self.session.camera_calibration().is_some(), egui::Button::new("Clear"));
+            self.labeled(&clear, egui::WidgetType::Button, "Clear camera calibration", false);
+            if clear.clicked() {
+                self.execute_widget("camera.calibrate.clear", serde_json::json!({}));
+            }
+            let fit = ui.add_enabled(pairs >= 3, egui::Button::new("Fit"));
+            self.labeled(&fit, egui::WidgetType::Button, "Fit camera calibration", false);
+            if fit.clicked() {
+                self.execute_widget("camera.calibrate.fit", serde_json::json!({}));
+            }
+            ui.label(format!("{pairs} point(s)"));
+            let done = ui.button("Done");
+            self.labeled(&done, egui::WidgetType::Button, "Finish calibrating", false);
+            if done.clicked() {
+                self.ui.camera.calibrating = false;
+                self.ui.camera.pending_cam = None;
+            }
+        });
     }
 
     // ---- Cuts / Layers --------------------------------------------------------------------------------------------------
@@ -1332,6 +1443,12 @@ impl OpenLaserApp {
         );
         self.stop_overlay_rect = Some(area.response.rect);
     }
+}
+
+/// The bed-mm pair in the Calibrate wizard's text fields, once both parse to finite numbers.
+fn parse_bed(camera: &crate::app::CameraUi) -> Option<(f64, f64)> {
+    let parse = |s: &str| s.trim().parse::<f64>().ok().filter(|v| v.is_finite());
+    parse(&camera.bed_x).zip(parse(&camera.bed_y))
 }
 
 pub(crate) fn mmss(d: std::time::Duration) -> String {

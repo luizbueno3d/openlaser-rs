@@ -300,6 +300,8 @@ pub static CATALOG: &[Row] = &[
     r(WINDOW_STYLE, "Wireframe", None, "view.style.wireframe"),
     r(WINDOW_STYLE, "Filled", None, "view.style.filled"),
     r(WINDOW_STYLE, "Smooth Edges", None, "view.edgeQuality"),
+    // The calibrated camera feed under the design (phase 6b); persisted in UiSettings.
+    r(WINDOW_STYLE, "Camera Background", None, "view.cameraBackground"),
     sep(WINDOW),
     r(WINDOW, "Pan / Drag View", Some("Space"), "view.pan"),
     r(WINDOW, "Toggle Side Panels", Some("F12"), "window.toggleSidePanels"),
@@ -400,6 +402,7 @@ pub fn is_shell_row(row: &Row) -> bool {
         | "view.zoomOut"
         | "view.zoomPage"
         | "view.pan"
+        | "view.cameraBackground"
         | "tools.select"
         | "window.resetLayout" => true,
         _ => false,
@@ -479,7 +482,8 @@ mod tests {
             .collect();
         assert_eq!(cat_rows.len(), 196, "CAT §3 changed: review the menu catalogue against the new source rows");
         assert_eq!(CATALOG.iter().filter(|row| is_separator(row)).count(), 32, "menu separators changed; review their positions against CAT §3");
-        assert_eq!(CATALOG.iter().filter(|row| !is_separator(row)).count(), 215, "menu item count changed; review every item against CAT §3");
+        // 215 CAT rows plus `view.cameraBackground` (phase 6b's OpenLaser-only underlay toggle).
+        assert_eq!(CATALOG.iter().filter(|row| !is_separator(row)).count(), 216, "menu item count changed; review every item against CAT §3");
 
         let mut documented = std::collections::BTreeSet::new();
         let mut order = std::collections::BTreeMap::new();
@@ -525,8 +529,10 @@ mod tests {
             let shell_panel = id == "window.show" || id == "window.lockLayout";
             let language_choice = id.starts_with("prefs.language.");
             let live_framing = id == "laser.liveFraming"; // CAT lists this in the Laser panel inventory, not §3.
+            // OpenLaser-only: phase 6b's camera-feed underlay toggle has no CAT §3 row.
+            let camera_background = id == "view.cameraBackground";
             assert!(
-                documented_directly || expanded_catalog_id || shell_panel || language_choice || live_framing,
+                documented_directly || expanded_catalog_id || shell_panel || language_choice || live_framing || camera_background,
                 "catalogue id `{id}` is not backed by a CAT §3 command"
             );
         }

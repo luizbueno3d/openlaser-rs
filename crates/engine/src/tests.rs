@@ -125,6 +125,7 @@ pub(crate) fn config(origin: Origin, window: bool, devices: DeviceAccess) -> Ses
         devices,
         machines: vec![jpt_m7_200_sim(), jpt_m7_200()],
         profiles: None,
+        camera_store: None,
         files: FsAuthority::TrustedLocal,
         clock: Arc::new(VirtualClock::new()),
     }

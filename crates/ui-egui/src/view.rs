@@ -205,6 +205,80 @@ pub(crate) fn palette(dark: bool) -> Palette {
 }
 
 impl OpenLaserApp {
+    /// The camera underlay: the latest frame drawn so that camera pixels land on their calibrated bed-mm
+    /// positions — a textured mesh tessellated because the map is projective (each node maps a camera-pixel
+    /// point through `px_to_bed` into world mm; inside a 1/20 cell, affine UV interpolation is visually
+    /// exact for any sane fit). ~60 % opacity keeps geometry readable. It paints only while the stream is
+    /// live, a calibration exists and Window ▸ Camera Background is on — never a stale image or stale map.
+    pub(crate) fn paint_camera_underlay(&mut self, painter: &egui::Painter, view: &ViewXform, work: egui::Rect) {
+        #[cfg(test)]
+        {
+            self.seam.camera_overlay = false;
+        }
+        if !self.ui.camera_background || !self.camera_running() {
+            return;
+        }
+        let Some(calibration) = self.session.camera_calibration() else { return };
+        let Some(frame) = self.camera_frame() else {
+            painter.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        };
+        let (width, height) = (frame.width as usize, frame.height as usize);
+        if width == 0 || height == 0 || frame.rgba.len() != width.saturating_mul(height).saturating_mul(4) {
+            return;
+        }
+        let image = egui::ColorImage::from_rgba_unmultiplied([width, height], &frame.rgba);
+        let tex = self.camera_tex.get_or_insert_with(|| painter.ctx().load_texture("camera-feed", image.clone(), egui::TextureOptions::LINEAR));
+        tex.set(image, egui::TextureOptions::LINEAR);
+
+        const N: usize = 20;
+        let mut screen = vec![None; (N + 1) * (N + 1)];
+        for j in 0..=N {
+            for i in 0..=N {
+                let px = [i as f64 * f64::from(frame.width) / N as f64, j as f64 * f64::from(frame.height) / N as f64];
+                if let Some(bed) = calibration.calibration.px_to_bed(px) {
+                    let pos = view.world_to_screen(bed);
+                    if pos.is_finite()
+                        && let Some(slot) = screen.get_mut(j * (N + 1) + i)
+                    {
+                        *slot = Some(pos);
+                    }
+                }
+            }
+        }
+        let mut mesh = egui::epaint::Mesh::with_texture(tex.id());
+        let tint = egui::Color32::from_white_alpha(153); // ~60 %: geometry stays readable over the feed
+        for j in 0..N {
+            for i in 0..N {
+                let [a, b, c, d] =
+                    [j * (N + 1) + i, j * (N + 1) + i + 1, (j + 1) * (N + 1) + i + 1, (j + 1) * (N + 1) + i].map(|n| screen.get(n).copied().flatten());
+                if a.is_some() && b.is_some() && c.is_some() && d.is_some() {
+                    let Ok(base) = u32::try_from(mesh.vertices.len()) else { continue };
+                    if base > u32::MAX - 4 {
+                        continue;
+                    }
+                    let uv = |i: usize, j: usize| egui::pos2(i as f32 / N as f32, j as f32 / N as f32);
+                    for (pos, uv) in [(a, uv(i, j)), (b, uv(i + 1, j)), (c, uv(i + 1, j + 1)), (d, uv(i, j + 1))] {
+                        if let Some(pos) = pos {
+                            mesh.vertices.push(egui::epaint::Vertex { pos, uv, color: tint });
+                        }
+                    }
+                    mesh.indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+                }
+            }
+        }
+        if !mesh.is_empty() {
+            let clip = painter.with_clip_rect(work.intersect(view.rect));
+            clip.add(egui::Shape::mesh(mesh));
+            #[cfg(test)]
+            {
+                self.seam.camera_overlay = true;
+            }
+        }
+        // The feed updates at ~30 fps; repaint while the underlay is on so the canvas stays live.
+        painter.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+    }
+
     pub(crate) fn paint_canvas(&mut self, ui: &mut egui::Ui) {
         let full = ui.available_rect_before_wrap();
         if full.width() < RULER * 2.0 || full.height() < RULER * 2.0 {
@@ -271,6 +345,10 @@ impl OpenLaserApp {
         painter.rect_filled(canvas, 0.0, colors.pasteboard);
         let work = egui::Rect::from_two_pos(view.world_to_screen(geometry.work_area[0]), view.world_to_screen(geometry.work_area[1]));
         painter.rect_filled(work, 0.0, colors.background);
+
+        // The calibrated camera feed under the grid and the design (phase 6b): live stream + a fit +
+        // Window ▸ Camera Background. A stopped stream or cleared calibration paints nothing.
+        self.paint_camera_underlay(&painter, &view, work);
 
         // Grid in the work area: minor lines ≥ 8 pt apart, major lines ≥ 80 pt apart (1-2-5 series).
         let grid = painter.with_clip_rect(work.intersect(canvas));

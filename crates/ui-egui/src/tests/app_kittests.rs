@@ -155,6 +155,7 @@ fn harness_with(options: Options) -> H {
         devices: DeviceAccess::None,
         machines: options.machines,
         profiles: None,
+        camera_store: None,
         files: FsAuthority::Denied,
         clock: Arc::clone(&clock),
     });
@@ -1708,6 +1709,7 @@ fn device_settings_draft_reloads_when_the_profile_changes() {
         devices: DeviceAccess::None,
         machines: vec![changed.clone()],
         profiles: None,
+        camera_store: None,
         files: FsAuthority::Denied,
         clock,
     });
@@ -1992,6 +1994,7 @@ fn layout_screenshot() {
         devices: DeviceAccess::None,
         machines: vec![openlaser_machine::jpt_m7_200_sim()],
         profiles: None,
+        camera_store: None,
         files: FsAuthority::Denied,
         clock: Arc::clone(&clock),
     });
@@ -2472,4 +2475,146 @@ fn camera_panel_opens_and_enumerates_lazily() {
     control(&mut h, "engine.execute", serde_json::json!({ "command": "camera.stop" })).unwrap_or_else(|e| panic!("{e}"));
     let status = control(&mut h, "engine.execute", serde_json::json!({ "command": "camera.status" })).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(status["running"], false);
+    assert_eq!(status["calibration"]["calibrated"], false);
+}
+
+// ---- Camera phase 6b: Calibrate wizard, View Style toggle and the canvas underlay ------------------------------------------
+
+/// A small synthetic frame through the seam — no webcam needed.
+fn seam_frame(w: u32, hgt: u32) -> openlaser_engine::CameraFrame {
+    openlaser_engine::CameraFrame { rgba: vec![128; (w * hgt * 4) as usize], width: w, height: hgt }
+}
+
+/// Four corner pairs over a 64×48 seam feed: cam (0,0)..(64,48) ↔ bed (-50,-50)..(50,50).
+fn add_four_pairs(h: &mut H) {
+    for (cam, bed) in [([0.0, 0.0], [-50.0, -50.0]), ([64.0, 0.0], [50.0, -50.0]), ([64.0, 48.0], [50.0, 50.0]), ([0.0, 48.0], [-50.0, 50.0])] {
+        control(
+            h,
+            "engine.execute",
+            serde_json::json!({ "command": "camera.calibrate.addPair", "params": { "camX": cam[0], "camY": cam[1], "bedX": bed[0], "bedY": bed[1] } }),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    }
+}
+
+/// Window ▸ View Style ▸ Camera Background is a live toggle row: it flips the persisted
+/// `ui.camera_background` and shows ✓ when on.
+#[test]
+fn camera_background_menu_toggle() {
+    // NoSurface: the control dispatcher serves mutations (NoHuman counts a human surface as always open).
+    let mut h = with_human(NoSurface);
+    h.run();
+    assert!(!h.state().ui.camera_background);
+    // The catalogue row is live (the shell handles it).
+    let row = crate::menu_catalog::find("view.cameraBackground").unwrap();
+    assert_eq!(row.path, &["Window", "View Style"]);
+    assert!(crate::menu_catalog::is_live(row));
+    // In-window menu: Window ▸ View Style ▸ Camera Background exists, enabled, un-checked.
+    h.get_by_label("Window").click();
+    h.run();
+    // Submenu rows carry the ▸ glyph in their AccessKit name; match by substring.
+    let submenu = h.query_all_by_label_contains("View Style").next().unwrap_or_else(|| panic!("Window has no View Style submenu"));
+    assert!(!submenu.accesskit_node().is_disabled());
+    submenu.click();
+    h.run();
+    let row_node = h.query_all_by_label_contains("Camera Background").next().unwrap_or_else(|| panic!("View Style has no Camera Background row"));
+    assert!(!row_node.accesskit_node().is_disabled(), "the toggle row must be enabled");
+    row_node.click();
+    h.run();
+    assert!(h.state().ui.camera_background, "the row toggles the underlay on");
+    h.run();
+    assert!(h.state().services.settings.load().camera_background, "persisted on");
+    // Like every `view.*` Ui command, the control path returns the `{"ui": id}` hint for the shell —
+    // the toggle itself is the shell's action (menu rows, shortcuts).
+    let r = control(&mut h, "ui.menu.invoke", serde_json::json!({ "id": "view.cameraBackground" })).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(r["ui"], "view.cameraBackground", "{r}");
+    // The shell action toggles it back and persists off.
+    h.state_mut().invoke_ui_action("view.cameraBackground");
+    assert!(!h.state().ui.camera_background);
+    h.run();
+    assert!(!h.state().services.settings.load().camera_background, "persisted off");
+}
+
+/// The Calibrate wizard: feed click → bed mm fields → Add point → Fit; pairs show as dots, the fit lands
+/// in the session (and would persist through the injected store in the real app).
+#[test]
+fn camera_calibrate_wizard_adds_and_fits() {
+    let mut h = with_human(NoSurface);
+    // Open the panel and give the seam a live feed.
+    control(&mut h, "ui.menu.invoke", serde_json::json!({ "id": "window.show:camera" })).unwrap_or_else(|e| panic!("{e}"));
+    h.state_mut().seam.camera_running = true;
+    h.state_mut().seam.camera_frame = Some(seam_frame(64, 48));
+    h.step();
+    assert!(h.state().dock.contains(&"camera".to_owned()));
+    // Calibrate mode on.
+    h.get_by_label("Calibrate camera").click();
+    h.step();
+    assert!(h.state().ui.camera.calibrating);
+    h.step();
+    let feed = h.state().ui.camera.feed_rect.unwrap_or_else(|| panic!("calibrate mode must paint the feed"));
+    // Click the feed at ¼,¼ → the pending camera point is recorded in image px.
+    let p = feed.min + feed.size() * 0.25;
+    hooked_step(
+        &mut h,
+        vec![
+            egui::Event::PointerMoved(p),
+            egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+        ],
+    );
+    let cam = h.state().ui.camera.pending_cam.unwrap_or_else(|| panic!("the feed click must record a camera point"));
+    assert!(cam[0] > 0.0 && cam[1] > 0.0);
+    // Enter bed mm, Add point → the engine session gains the pair.
+    h.state_mut().ui.camera.bed_x = "-25".to_owned();
+    h.state_mut().ui.camera.bed_y = "-25".to_owned();
+    h.get_by_label("Add calibration point").click();
+    h.step();
+    assert_eq!(h.state().session.camera_cal_pairs().len(), 1);
+    assert!(h.state().ui.camera.pending_cam.is_none(), "a committed pair clears the pending click");
+    // Three more pairs through the command path, then Fit.
+    for (cam, bed) in [([64.0, 0.0], [50.0, -50.0]), ([64.0, 48.0], [50.0, 50.0]), ([0.0, 48.0], [-50.0, 50.0])] {
+        control(
+            &mut h,
+            "engine.execute",
+            serde_json::json!({ "command": "camera.calibrate.addPair", "params": { "camX": cam[0], "camY": cam[1], "bedX": bed[0], "bedY": bed[1] } }),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    }
+    h.get_by_label("Fit camera calibration").click();
+    h.step();
+    let cal = h.state().session.camera_calibration().unwrap_or_else(|| panic!("fit must land in the session"));
+    assert_eq!(cal.calibration.kind(), "homography");
+    assert!(cal.calibration.rms_error_px() < 0.5);
+    assert!(h.state().session.camera_cal_pairs().is_empty(), "fit consumes the collected pairs");
+    // Done leaves calibrate mode.
+    h.get_by_label("Finish calibrating").click();
+    h.step();
+    assert!(!h.state().ui.camera.calibrating);
+}
+
+/// The canvas underlay: paints only while the stream is live AND a calibration exists AND the toggle is
+/// on — a stopped camera or cleared fit removes it (never a stale image).
+#[test]
+fn camera_underlay_paints_only_live_and_calibrated() {
+    let mut h = with_human(NoSurface);
+    h.state_mut().seam.camera_running = true;
+    h.state_mut().seam.camera_frame = Some(seam_frame(64, 48));
+    h.state_mut().ui.camera_background = true;
+    h.step();
+    assert!(!h.state().seam.camera_overlay, "no calibration yet — nothing paints");
+    add_four_pairs(&mut h);
+    control(&mut h, "engine.execute", serde_json::json!({ "command": "camera.calibrate.fit" })).unwrap_or_else(|e| panic!("{e}"));
+    h.step();
+    assert!(h.state().seam.camera_overlay, "calibrated + streaming + toggle on → the feed is under the design");
+    // A stopped stream removes the underlay next frame.
+    h.state_mut().seam.camera_running = false;
+    h.state_mut().seam.camera_frame = None;
+    h.step();
+    assert!(!h.state().seam.camera_overlay, "a stopped camera must not leave a stale image");
+    // And a cleared calibration removes it too.
+    h.state_mut().seam.camera_running = true;
+    h.state_mut().seam.camera_frame = Some(seam_frame(64, 48));
+    control(&mut h, "engine.execute", serde_json::json!({ "command": "camera.calibrate.clear" })).unwrap_or_else(|e| panic!("{e}"));
+    h.step();
+    assert!(!h.state().seam.camera_overlay, "a cleared calibration must not leave a stale map");
 }
