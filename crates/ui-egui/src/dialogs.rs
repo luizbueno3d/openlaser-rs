@@ -18,27 +18,33 @@ impl OpenLaserApp {
         egui::Window::new("Offset Shapes").open(&mut open).collapsible(false).auto_sized().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Offset distance");
-                ui.add(egui::DragValue::new(&mut o.distance).speed(0.1).range(0.001..=1000.0).suffix(" mm"));
+                let r = ui.add(egui::DragValue::new(&mut o.distance).speed(0.1).range(0.001..=1000.0).suffix(" mm"));
+                self.labeled(&r, egui::WidgetType::DragValue, "Offset distance", false);
             });
             ui.horizontal(|ui| {
                 ui.label("Direction");
-                egui::ComboBox::from_id_salt("offset-direction").selected_text(["Outward", "Inward", "Both"].get(usize::from(o.direction)).copied().unwrap_or("Outward")).show_ui(ui, |ui| {
-                    for (i, name) in ["Outward", "Inward", "Both"].iter().enumerate() {
-                        if ui.selectable_label(o.direction as usize == i, *name).clicked() {
-                            o.direction = i as u8;
+                egui::ComboBox::from_id_salt("offset-direction")
+                    .selected_text(["Outward", "Inward", "Both"].get(usize::from(o.direction)).copied().unwrap_or("Outward"))
+                    .show_ui(ui, |ui| {
+                        for (i, name) in ["Outward", "Inward", "Both"].iter().enumerate() {
+                            if ui.selectable_label(o.direction as usize == i, *name).clicked() {
+                                o.direction = i as u8;
+                            }
                         }
-                    }
-                });
+                    });
                 ui.label("Corner");
-                egui::ComboBox::from_id_salt("offset-corner").selected_text(["Round", "Sharp", "Bevel"].get(usize::from(o.corner)).copied().unwrap_or("Round")).show_ui(ui, |ui| {
-                    for (i, name) in ["Round", "Sharp", "Bevel"].iter().enumerate() {
-                        if ui.selectable_label(o.corner as usize == i, *name).clicked() {
-                            o.corner = i as u8;
+                egui::ComboBox::from_id_salt("offset-corner")
+                    .selected_text(["Round", "Sharp", "Bevel"].get(usize::from(o.corner)).copied().unwrap_or("Round"))
+                    .show_ui(ui, |ui| {
+                        for (i, name) in ["Round", "Sharp", "Bevel"].iter().enumerate() {
+                            if ui.selectable_label(o.corner as usize == i, *name).clicked() {
+                                o.corner = i as u8;
+                            }
                         }
-                    }
-                });
+                    });
             });
-            ui.checkbox(&mut o.delete_original, "Delete original shapes");
+            let r = ui.checkbox(&mut o.delete_original, "Delete original shapes");
+            self.labeled(&r, egui::WidgetType::Checkbox, "Delete original shapes", false);
             ui.horizontal(|ui| {
                 let ok_btn = ui.add(egui::Button::new("OK"));
                 self.labeled(&ok_btn, egui::WidgetType::Button, "OK", false);

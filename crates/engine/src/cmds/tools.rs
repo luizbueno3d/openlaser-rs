@@ -108,7 +108,16 @@ fn commit_paths(s: &mut Session, label: &'static str, ids: &[openlaser_types::Ob
         let at = top.saturating_sub(removed_above_slot).min(project.shapes.len());
         project.shapes.insert(
             at,
-            Arc::new(Shape { id, name: None, layer, xform: Affine::IDENTITY, geom: Geom::Path(Arc::new(rings_to_path(&rings))), locked: false, power_scale: FULL_POWER, priority: 0 }),
+            Arc::new(Shape {
+                id,
+                name: None,
+                layer,
+                xform: Affine::IDENTITY,
+                geom: Geom::Path(Arc::new(rings_to_path(&rings))),
+                locked: false,
+                power_scale: FULL_POWER,
+                priority: 0,
+            }),
         );
         sel.ids = vec![id];
         sel.key = Some(id);
@@ -142,22 +151,17 @@ fn boolean_two(s: &mut Session, p: IdsParams, op: BooleanOp) -> Result<Created, 
         return Err(EngineError::bad(ID, "/ids", "booleans need exactly two objects"));
     }
     // Draw order decides the operands: the topmost target is the clip (Subtract removes it from the bottom one).
-    let mut order: Vec<(usize, openlaser_types::ObjectId)> = s
-        .doc()?
-        .project
-        .shapes
-        .iter()
-        .enumerate()
-        .filter(|(_, sh)| ids.contains(&sh.id))
-        .map(|(i, sh)| (i, sh.id))
-        .collect();
+    let mut order: Vec<(usize, openlaser_types::ObjectId)> =
+        s.doc()?.project.shapes.iter().enumerate().filter(|(_, sh)| ids.contains(&sh.id)).map(|(i, sh)| (i, sh.id)).collect();
     order.sort_by_key(|(i, _)| *i);
     for (_, oid) in &order {
         if s.doc()?.project.shape(*oid).is_some_and(|sh| sh.locked) {
             return Err(EngineError::disabled(ID, "a locked object cannot take part in a boolean; unlock it first"));
         }
     }
-    let (bottom, top) = (order[0].1, order[1].1);
+    let Some((bottom, top)) = order.first().zip(order.last()).map(|(b, t)| (b.1, t.1)) else {
+        return Err(EngineError::bad(ID, "/ids", "booleans need exactly two objects"));
+    };
     let a = closed_world_rings(s, ID, bottom)?;
     let b = closed_world_rings(s, ID, top)?;
     let rings = openlaser_geom::boolean::boolean(&a, &b, op).map_err(geomx::geom_error)?;
@@ -242,7 +246,16 @@ fn offset_shapes(s: &mut Session, p: OffsetParams) -> Result<Value, EngineError>
         for (slot, layer, rings) in &per {
             let id = project.alloc_id().map_err(geomx::doc_error)?;
             fresh.push(id);
-            let mut shape = Shape { id, name: None, layer: *layer, xform: Affine::IDENTITY, geom: Geom::Path(Arc::new(rings_to_path(rings))), locked: false, power_scale: FULL_POWER, priority: 0 };
+            let mut shape = Shape {
+                id,
+                name: None,
+                layer: *layer,
+                xform: Affine::IDENTITY,
+                geom: Geom::Path(Arc::new(rings_to_path(rings))),
+                locked: false,
+                power_scale: FULL_POWER,
+                priority: 0,
+            };
             shape.locked = false;
             project.shapes.insert((*slot + 1).min(project.shapes.len()), Arc::new(shape));
         }

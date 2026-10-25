@@ -98,4 +98,7 @@ pub enum Error {
     TooManyLines(usize, usize),
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
+    /// I2 addition: the boolean/offset library failed on this input (a panic inside it, caught).
+    #[error("the geometry kernel could not process this shape; simplify it and try again")]
+    KernelFailed,
 }

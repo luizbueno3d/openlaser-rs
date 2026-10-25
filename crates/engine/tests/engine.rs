@@ -395,7 +395,17 @@ mod undo {
     }
 
     /// `arrange.ungroup` needs a grouped scene (covered in `undo_roundtrip_edit_commands_needing_geometry_and_import`).
-    const NEEDS_I1: [&str; 9] = ["file.import", "edit.autoJoin", "edit.deleteDuplicates", "arrange.ungroup", "tools.weld", "tools.booleanUnion", "tools.booleanSubtract", "tools.booleanIntersect", "tools.offsetShapes"];
+    const NEEDS_I1: [&str; 9] = [
+        "file.import",
+        "edit.autoJoin",
+        "edit.deleteDuplicates",
+        "arrange.ungroup",
+        "tools.weld",
+        "tools.booleanUnion",
+        "tools.booleanSubtract",
+        "tools.booleanIntersect",
+        "tools.offsetShapes",
+    ];
     /// `edit.copy` only writes the session clipboard: it changes no document and records no history step.
     const NOT_UNDOABLE: [&str; 4] = ["file.new", "edit.undo", "edit.redo", "edit.copy"];
 
@@ -424,7 +434,9 @@ mod undo {
         let (mut s, _, _) = scene();
         let l1 = ids_of(&s.execute("tools.drawLines", json!({ "pointsMm": [[50, 0], [60, 0]] })).unwrap())[0];
         let l2 = ids_of(&s.execute("tools.drawLines", json!({ "pointsMm": [[60, 0], [70, 5]] })).unwrap())[0];
-        fn b_id(s: &Session) -> u64 { s.active().unwrap().selection.ids.first().map(|i| i.0).unwrap_or(0) }
+        fn b_id(s: &Session) -> u64 {
+            s.active().unwrap().selection.ids.first().map(|i| i.0).unwrap_or(0)
+        }
         assert_undo_roundtrip(&mut s, "edit.autoJoin", json!({ "ids": [l1, l2] }));
         let (mut s, _, _) = scene();
         let d1 = ids_of(&s.execute("tools.drawLines", json!({ "pointsMm": [[50, 0], [60, 0]] })).unwrap())[0];

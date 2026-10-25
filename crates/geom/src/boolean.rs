@@ -115,16 +115,22 @@ fn from_shapes(shapes: Shapes) -> Result<Vec<Polyline>, Error> {
     Ok(out)
 }
 
+/// Runs one i_overlay call so that a panic inside the third-party library becomes an error instead of taking the
+/// app down (AGENTS §2), the same guard the SVG importer puts around its parsers.
+fn guarded(f: impl FnOnce() -> Shapes) -> Result<Shapes, Error> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| Error::KernelFailed)
+}
+
 /// EvenOdd-normalise one operand shape on its own.
-fn normalise(shape: Shape) -> Shapes {
-    shape.simplify_shape(FillRule::EvenOdd)
+fn normalise(shape: Shape) -> Result<Shapes, Error> {
+    guarded(|| shape.simplify_shape(FillRule::EvenOdd))
 }
 
 /// `boolean(subject, clip, op)` on closed operands; output is closed rings (each shape's contours, holes included).
 pub fn boolean(subject: &[Polyline], clip: &[Polyline], op: BooleanOp) -> Result<Vec<Polyline>, Error> {
-    let subj: Vec<Shape> = normalise(check_input(subject, false)?);
-    let clip: Vec<Shape> = normalise(check_input(clip, false)?);
-    let shapes = FloatOverlay::with_subj_and_clip(&subj, &clip).overlay(op.rule(), FillRule::NonZero);
+    let subj: Vec<Shape> = normalise(check_input(subject, false)?)?;
+    let clip: Vec<Shape> = normalise(check_input(clip, false)?)?;
+    let shapes = guarded(|| FloatOverlay::with_subj_and_clip(&subj, &clip).overlay(op.rule(), FillRule::NonZero))?;
     from_shapes(shapes)
 }
 
@@ -133,9 +139,9 @@ pub fn union_all(shapes: &[Vec<Polyline>]) -> Result<Vec<Polyline>, Error> {
     let mut all: Vec<Shape> = Vec::with_capacity(shapes.len());
     for s in shapes {
         let paths = check_input(s, false)?;
-        all.extend(normalise(paths));
+        all.extend(normalise(paths)?);
     }
-    let shapes = FloatOverlay::with_subj_and_clip(&all, &[] as &[Shape]).overlay(OverlayRule::Union, FillRule::NonZero);
+    let shapes = guarded(|| FloatOverlay::with_subj_and_clip(&all, &[] as &[Shape]).overlay(OverlayRule::Union, FillRule::NonZero))?;
     from_shapes(shapes)
 }
 
@@ -159,11 +165,11 @@ pub fn offset(shape: &[Polyline], distance_mm: f64, join: Join, tol_mm: f64) -> 
         return Err(Error::NonFinite);
     }
     let paths = check_input(shape, false)?;
-    let all: Vec<Shape> = normalise(paths);
+    let all: Vec<Shape> = normalise(paths)?;
     // outer_offset grows the outer rings outward, inner_offset grows holes inward (both positive distances).
     let style = OutlineStyle::new(distance_mm.abs()).line_join(join_style(join, tol_mm, distance_mm));
     let style = if distance_mm >= 0.0 { style.inner_offset(-distance_mm) } else { style.outer_offset(-distance_mm.abs()).inner_offset(distance_mm.abs()) };
-    let shapes = all.outline(&style);
+    let shapes = guarded(|| all.outline(&style))?;
     from_shapes(shapes)
 }
 
@@ -187,7 +193,7 @@ pub fn stroke_outline(open: &[Polyline], half_width: f64, join: Join, cap: Cap, 
         miter_min_turn: std::f64::consts::PI / 36.0,
         math: MathMode::Integer,
     };
-    let shapes = paths.stroke(style, false);
+    let shapes = guarded(|| paths.stroke(style, false))?;
     from_shapes(shapes)
 }
 
@@ -224,7 +230,7 @@ mod tests {
             acc.insert(parent, a);
         }
         // EvenOdd area: sum outers − sum holes. Use winding signs instead: outer rings are CCW.
-        rings.iter().map(|p| area(p)).sum()
+        rings.iter().map(area).sum()
     }
 
     #[test]

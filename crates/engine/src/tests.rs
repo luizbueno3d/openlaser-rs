@@ -1670,7 +1670,18 @@ fn a_welded_design_plans_one_outline() {
     let m = openlaser_machine::jpt_m7_200_sim();
     let v = s.execute("tools.weld", json!({ "ids": [a, b] })).unwrap();
     let g = v["ids"][0].as_u64().unwrap();
-    let plan = openlaser_plan::plan(&project(&s), &m, &openlaser_plan::PlanOptions { selected: None, repeats: 1, frame_style: openlaser_types::FrameStyle::Contour, frame_source: openlaser_types::FrameSource::Job, flatten_tol_mm: 0.01 }).unwrap();
+    let plan = openlaser_plan::plan(
+        &project(&s),
+        &m,
+        &openlaser_plan::PlanOptions {
+            selected: None,
+            repeats: 1,
+            frame_style: openlaser_types::FrameStyle::Contour,
+            frame_source: openlaser_types::FrameSource::Job,
+            flatten_tol_mm: 0.01,
+        },
+    )
+    .unwrap();
     // One welded outline: one section, one path — the shared edge burns once, not twice.
     let total_paths: usize = plan.sections.iter().map(|sec| sec.paths.len()).sum();
     assert_eq!(total_paths, 1, "{:?}", plan.sections.len());
