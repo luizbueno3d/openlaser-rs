@@ -140,39 +140,13 @@ pub fn document_list(p: &Project, m: Option<&MachineProfile>, o: &ViewOpts) -> D
                 }
             }
         };
+        // Vector shapes are drawn from the model's own outline (`Geom::to_bez`, the path the planner flattens), so
+        // what the canvas shows is exactly what burns: parametric shapes are centred on their origin.
         let lines: Vec<Polyline> = match &shape.geom {
-            Geom::Path(path) => match openlaser_geom::flatten(path, openlaser_geom::DEFAULT_FLATTEN_TOL_MM) {
-                Ok(flat) => flat.into_iter().map(|line| line.transformed(&xform)).collect(),
-                Err(_) => Vec::new(),
-            },
-            Geom::Rect { w, h, .. } => {
-                vec![Polyline(vec![[0.0, 0.0], [w.get(), 0.0], [w.get(), h.get()], [0.0, h.get()], [0.0, 0.0]]).transformed(&xform)]
-            }
-            Geom::Ellipse { rx, ry } => vec![
-                Polyline(
-                    (0..=72)
-                        .map(|i| {
-                            let angle = f64::from(i) * std::f64::consts::TAU / 72.0;
-                            [rx.get() * angle.cos(), ry.get() * angle.sin()]
-                        })
-                        .collect(),
-                )
-                .transformed(&xform),
-            ],
-            Geom::Polygon { sides, radius } if *sides >= 3 => vec![
-                Polyline(
-                    (0..=*sides)
-                        .map(|i| {
-                            let angle = f64::from(i) * std::f64::consts::TAU / f64::from(*sides);
-                            [radius.get() * angle.cos(), radius.get() * angle.sin()]
-                        })
-                        .collect(),
-                )
-                .transformed(&xform),
-            ],
-            Geom::Polygon { .. } | Geom::Group(_) => Vec::new(),
+            Geom::Group(_) => Vec::new(),
             Geom::Bitmap(bitmap) => {
-                let rect = transform_bounds(Bounds { min: [0.0, 0.0], max: bitmap.size_mm }, &xform);
+                let half = [bitmap.size_mm[0].abs() / 2.0, bitmap.size_mm[1].abs() / 2.0];
+                let rect = transform_bounds(Bounds { min: [-half[0], -half[1]], max: half }, &xform);
                 add_bounds(Some(rect));
                 list.items.push(Item::Image { rect, gray: bitmap.gray.clone(), px: bitmap.px });
                 if selected {
@@ -180,6 +154,10 @@ pub fn document_list(p: &Project, m: Option<&MachineProfile>, o: &ViewOpts) -> D
                 }
                 continue;
             }
+            geom => match openlaser_geom::flatten(&geom.to_bez(), openlaser_geom::DEFAULT_FLATTEN_TOL_MM) {
+                Ok(flat) => flat.into_iter().map(|line| line.transformed(&xform)).collect(),
+                Err(_) => Vec::new(),
+            },
         };
         if lines.is_empty() {
             continue;

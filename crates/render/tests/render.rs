@@ -89,7 +89,7 @@ fn document_list_skips_hidden_layers_and_expands_groups() {
     let drawn = polylines(&list);
     let objects: Vec<_> = drawn.iter().map(|(_, _, object, _)| *object).collect();
     assert_eq!(objects, vec![Some(ObjectId(1)), Some(ObjectId(3))], "C01 is hidden; the group draws as its top-level id");
-    assert_eq!(drawn[1].3[0].0[0], [20.0, 0.0], "group transform applied to the child");
+    assert_eq!(drawn[1].3[0].0[0], [18.0, -2.0], "group transform applied to the child (a rect is centred on its origin)");
     assert!(drawn.iter().all(|(stroke, ..)| *stroke == Stroke::Hairline));
     assert_eq!(markers(&list).iter().map(|m| m.0).collect::<Vec<_>>(), vec![MarkerKind::Origin]);
 }
@@ -104,7 +104,47 @@ fn document_list_marks_the_selection_dashed_with_a_box() {
         list.items.iter().filter_map(|i| if let Item::Rect { stroke, color, rect } = i { Some((*stroke, *color, *rect)) } else { None }).collect();
     assert_eq!(boxes.len(), 1);
     assert_eq!((boxes[0].0, boxes[0].1), (Stroke::Dashed, SELECTION_COLOR));
-    assert_eq!((boxes[0].2.min, boxes[0].2.max), ([20.0, 0.0], [24.0, 4.0]));
+    assert_eq!((boxes[0].2.min, boxes[0].2.max), ([18.0, -2.0], [22.0, 2.0]));
+}
+
+/// Regression: the canvas drew a rectangle from its corner while the model, the planner and the selection box
+/// centre it on its origin, so the shape on screen sat half a size away from where it burns. Every parametric
+/// shape must be drawn exactly over the model's own bounds.
+#[test]
+fn document_list_draws_shapes_where_the_model_puts_them() {
+    let mm = |v: f64| Mm::new(v).unwrap();
+    let shape = |id: u64, geom: Geom| {
+        Arc::new(Shape {
+            id: ObjectId(id),
+            name: None,
+            layer: LayerKey::Color(0),
+            xform: Affine::translate((30.0, -12.0)) * Affine::rotate(0.3),
+            geom,
+            locked: false,
+            power_scale: Percent::new(100.0).unwrap(),
+            priority: 0,
+        })
+    };
+    let mut p = project();
+    p.shapes = vec![
+        shape(1, Geom::Rect { w: mm(56.0), h: mm(34.0), corner_radius: mm(0.0) }),
+        shape(2, Geom::Rect { w: mm(20.0), h: mm(10.0), corner_radius: mm(3.0) }),
+        shape(3, Geom::Ellipse { rx: mm(15.0), ry: mm(8.0) }),
+        shape(4, Geom::Polygon { sides: 5, radius: mm(9.0) }),
+    ];
+    let drawn = polylines(&document_list(&p, None, &opts()));
+    assert_eq!(drawn.len(), 4);
+    for (_, _, object, lines) in drawn {
+        let id = object.unwrap();
+        let model = p.bounds(&[id]).unwrap().unwrap();
+        let shown = openlaser_geom::bounds_of(&lines).unwrap();
+        for axis in 0..2 {
+            assert!(
+                (shown.min[axis] - model.min[axis]).abs() < 0.02 && (shown.max[axis] - model.max[axis]).abs() < 0.02,
+                "{id:?}: drawn {shown:?}, model {model:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -132,8 +172,8 @@ fn document_list_places_markers_where_they_apply() {
     let found = markers(&list);
     assert_eq!(found.len(), 4, "{found:?}");
     assert_eq!(found[0], (MarkerKind::Refusal, [7.0, -3.0], REFUSAL_COLOR));
-    assert_eq!(found[1], (MarkerKind::Refusal, [5.0, 5.0], REFUSAL_COLOR), "centre of object 1");
-    assert_eq!(found[2], (MarkerKind::Notice(4), [22.0, 2.0], NOTICE_COLOR), "centre of the group");
+    assert_eq!(found[1], (MarkerKind::Refusal, [0.0, 0.0], REFUSAL_COLOR), "centre of object 1");
+    assert_eq!(found[2], (MarkerKind::Notice(4), [20.0, 0.0], NOTICE_COLOR), "centre of the group");
     assert_eq!(found[3].0, MarkerKind::Origin);
 }
 
