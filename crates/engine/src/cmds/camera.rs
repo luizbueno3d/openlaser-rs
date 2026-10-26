@@ -1,7 +1,5 @@
-//! `camera.*`: webcam enumeration, capture control and camera↔bed calibration (phases 6a/6b). Every command
-//! is `Access::Agent` view state — they can never touch laser state, so agents may drive them
-//! (AGENTS.md §1.2). Calibration belongs to the physical setup: `fit`/`clear` write through the session's
-//! injected `CalibrationStore` (machine-local file, never the project).
+//! `camera.*`: webcam enumeration, capture control and camera↔bed calibration. Enumeration/status/stop
+//! are agent-safe; starting capture and changing calibration are human-only physical setup actions.
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -19,17 +17,17 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             enabled: always, params: NoParams, run: list, doc: "{}"),
         command!("camera.status", "Camera Status", menu: [], shortcut: None, kind: Kind::Query, access: Access::Agent,
             enabled: always, params: NoParams, run: status, doc: "{}"),
-        command!("camera.start", "Start Camera", menu: [], shortcut: None, kind: Kind::View, access: Access::Agent,
+        command!("camera.start", "Start Camera", menu: [], shortcut: None, kind: Kind::View, access: Access::Human,
             enabled: always, params: StartParams, run: start, doc: "{index?} (view state; never touches laser state)"),
         command!("camera.stop", "Stop Camera", menu: [], shortcut: None, kind: Kind::View, access: Access::Agent,
             enabled: always, params: NoParams, run: stop, doc: "{} (idempotent)"),
-        command!("camera.calibrate.addPair", "Add Calibration Point", menu: [], shortcut: None, kind: Kind::View, access: Access::Agent,
+        command!("camera.calibrate.addPair", "Add Calibration Point", menu: [], shortcut: None, kind: Kind::View, access: Access::Human,
             enabled: always, params: AddPairParams, run: add_pair, doc: "{camX, camY, bedX, bedY} (px ↔ mm)"),
-        command!("camera.calibrate.removeLast", "Remove Last Calibration Point", menu: [], shortcut: None, kind: Kind::View, access: Access::Agent,
+        command!("camera.calibrate.removeLast", "Remove Last Calibration Point", menu: [], shortcut: None, kind: Kind::View, access: Access::Human,
             enabled: always, params: NoParams, run: remove_last, doc: "{}"),
-        command!("camera.calibrate.fit", "Fit Camera Calibration", menu: [], shortcut: None, kind: Kind::View, access: Access::Agent,
+        command!("camera.calibrate.fit", "Fit Camera Calibration", menu: [], shortcut: None, kind: Kind::View, access: Access::Human,
             enabled: always, params: NoParams, run: fit, doc: "{} (≥3 pairs; persists through the machine-local store)"),
-        command!("camera.calibrate.clear", "Clear Camera Calibration", menu: [], shortcut: None, kind: Kind::View, access: Access::Agent,
+        command!("camera.calibrate.clear", "Clear Camera Calibration", menu: [], shortcut: None, kind: Kind::View, access: Access::Human,
             enabled: always, params: NoParams, run: clear, doc: "{} (pairs and the fitted calibration)"),
         command!("camera.map.bedToPx", "Map Bed to Camera Pixels", menu: [], shortcut: None, kind: Kind::Query, access: Access::Agent,
             enabled: needs_calibration, params: MapParams, run: bed_to_px, doc: "{x, y} mm → {camX, camY} px"),

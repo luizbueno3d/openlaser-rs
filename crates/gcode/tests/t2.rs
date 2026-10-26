@@ -130,7 +130,6 @@ fn t2() {
 
 /// The nine hatched programs (raster_crosshatch, mixed_layers, business_card on the three gantries).
 #[test]
-#[ignore = "needs WP1's openlaser_geom::hatch_om (T3); un-ignore at I1"]
 fn t2_hatched_cases() {
     let index = t2::load().expect("T2 index");
     let mut checked = 0;

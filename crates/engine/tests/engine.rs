@@ -4,7 +4,7 @@
 //! - `undo`: an undo round trip for every Edit command and `prop_undo_redo_roundtrip`;
 //! - `emission`: the human emission path end to end on a FakeLmc (WP1–WP5, merged at I1);
 //! - `gantry`: a gantry job lands where it was designed (plan → safety → G-code coordinates, pinned at I1);
-//! - `panic_hunt`: every command × `testkit::adversarial::params()` (`#[ignore]`, run at I2).
+//! - `panic_hunt`: every command × `testkit::adversarial::params()` (run at I2).
 //!
 //! Nothing here opens a real device: every provider is a test double or a FakeLmc (AGENTS.md §1).
 
@@ -1064,7 +1064,6 @@ mod gantry {
 // ---- panic hunt (run at I2) ------------------------------------------------------------------------------------------
 
 #[test]
-#[ignore = "panic hunt: every command × adversarial params; run at I2 (`cargo test -p openlaser-engine -- --ignored panic_hunt`)"]
 fn panic_hunt() {
     let params = openlaser_testkit::adversarial::params();
     let ids: Vec<&'static str> = registry().specs().iter().map(|s| s.id).collect();
@@ -1120,13 +1119,17 @@ mod camera {
 
     use super::*;
 
-    /// The four commands are registered, `Access::Agent` (agents may drive view state) and not Human.
+    /// Enumeration/status/stop are agent-safe; capture and calibration are human-only.
     #[test]
-    fn camera_commands_are_agent_view_state() {
-        for id in ["camera.list", "camera.status", "camera.start", "camera.stop"] {
+    fn camera_access_matches_human_only_boundary() {
+        for id in ["camera.list", "camera.status", "camera.stop", "camera.map.bedToPx", "camera.map.pxToBed"] {
             let spec = registry().find(id).unwrap_or_else(|| panic!("{id} not registered"));
             assert_eq!(spec.access, Access::Agent, "{id}");
             assert!(matches!(spec.kind, Kind::Query | Kind::View), "{id} is not device state");
+        }
+        for id in ["camera.start", "camera.calibrate.addPair", "camera.calibrate.removeLast", "camera.calibrate.fit", "camera.calibrate.clear"] {
+            let spec = registry().find(id).unwrap_or_else(|| panic!("{id} not registered"));
+            assert_eq!(spec.access, Access::Human, "{id}");
         }
     }
 
@@ -1150,12 +1153,14 @@ mod camera {
     #[test]
     fn camera_start_refuses_cleanly() {
         let mut s = headless();
-        let e = s.execute("camera.start", json!({ "index": u32::MAX })).unwrap_err();
-        assert_eq!(e.code(), "camera", "{e}");
+        let e = s.execute("camera.start", json!({})).unwrap_err();
+        assert_eq!(e.code(), "human_only", "{e}");
         assert_eq!(s.execute("camera.status", json!({})).unwrap()["open"], false);
         let e = s.execute("camera.start", json!({ "index": "0" })).unwrap_err();
+        assert_eq!(e.code(), "human_only", "policy precedes parameter decode");
+        let e = s.execute_as(Origin::Human, "camera.start", json!({ "index": "0" })).unwrap_err();
         assert_eq!(e.code(), "bad_params", "{e}");
-        let e = s.execute("camera.start", json!({ "bogus": 1 })).unwrap_err();
+        let e = s.execute_as(Origin::Human, "camera.start", json!({ "bogus": 1 })).unwrap_err();
         assert_eq!(e.code(), "bad_params", "{e}");
     }
 
@@ -1167,7 +1172,7 @@ mod camera {
         with_doc(&mut s);
         let trips = s.stop_registry().trips();
         s.execute("camera.stop", json!({})).unwrap();
-        let _ = s.execute("camera.start", json!({ "index": u32::MAX }));
+        let _ = s.execute_as(Origin::Human, "camera.start", json!({ "index": u32::MAX }));
         assert_eq!(s.stop_registry().trips(), trips);
         assert!(s.pending_arm().is_none());
         // Camera commands journal nothing (only Edit and Io commands are journaled).
@@ -1186,7 +1191,7 @@ mod camera {
     }
 
     fn add(s: &mut Session, p: [f64; 4]) {
-        s.execute("camera.calibrate.addPair", json!({ "camX": p[0], "camY": p[1], "bedX": p[2], "bedY": p[3] })).unwrap();
+        s.execute_as(Origin::Human, "camera.calibrate.addPair", json!({ "camX": p[0], "camY": p[1], "bedX": p[2], "bedY": p[3] })).unwrap();
     }
 
     /// addPair → status pairs → removeLast → fit (homography, session-only store) → map both ways → clear.
@@ -1195,21 +1200,23 @@ mod camera {
         let mut s = headless();
         let pts = pairs();
         for (i, p) in pts.iter().enumerate() {
-            let r = s.execute("camera.calibrate.addPair", json!({ "camX": p[0], "camY": p[1], "bedX": p[2], "bedY": p[3] })).unwrap();
+            let r = s.execute_as(Origin::Human, "camera.calibrate.addPair", json!({ "camX": p[0], "camY": p[1], "bedX": p[2], "bedY": p[3] })).unwrap();
             assert_eq!(r["pairs"], i + 1);
         }
         let status = s.execute("camera.status", json!({})).unwrap();
         assert_eq!(status["calibration"]["pairs"], 5);
         assert_eq!(status["calibration"]["calibrated"], false);
         // removeLast pops the newest; empty is a clean camera error, never a panic.
-        let r = s.execute("camera.calibrate.removeLast", json!({})).unwrap();
+        let r = s.execute_as(Origin::Human, "camera.calibrate.removeLast", json!({})).unwrap();
         assert_eq!(r["pairs"], 4);
         add(&mut s, pts[4]);
         // A duplicate is refused at add time.
-        let e = s.execute("camera.calibrate.addPair", json!({ "camX": pts[4][0], "camY": pts[4][1], "bedX": pts[4][2], "bedY": pts[4][3] })).unwrap_err();
+        let e = s
+            .execute_as(Origin::Human, "camera.calibrate.addPair", json!({ "camX": pts[4][0], "camY": pts[4][1], "bedX": pts[4][2], "bedY": pts[4][3] }))
+            .unwrap_err();
         assert_eq!(e.code(), "bad_params", "{e}");
 
-        let r = s.execute("camera.calibrate.fit", json!({})).unwrap();
+        let r = s.execute_as(Origin::Human, "camera.calibrate.fit", json!({})).unwrap();
         assert_eq!(r["kind"], "homography");
         assert!(r["rmsErrorPx"].as_f64().unwrap() < 1e-4, "{r}");
         assert_eq!(r["persisted"], false, "no store injected in this session");
@@ -1227,7 +1234,7 @@ mod camera {
         assert!((px["camX"].as_f64().unwrap() - known[0]).abs() < 0.5, "{px}");
 
         // clear drops pairs AND the fit; map commands are refused cleanly again.
-        s.execute("camera.calibrate.clear", json!({})).unwrap();
+        s.execute_as(Origin::Human, "camera.calibrate.clear", json!({})).unwrap();
         let e = s.execute("camera.map.bedToPx", json!({ "x": 0.0, "y": 0.0 })).unwrap_err();
         assert_eq!(e.code(), "disabled", "{e}");
         assert!(e.to_string().contains("not calibrated"), "{e}");
@@ -1249,11 +1256,11 @@ mod camera {
             assert!(row.disabled_reason.unwrap().contains("not calibrated"));
         }
         // And too few pairs to fit is a camera error, not a panic.
-        let e = s.execute("camera.calibrate.fit", json!({})).unwrap_err();
+        let e = s.execute_as(Origin::Human, "camera.calibrate.fit", json!({})).unwrap_err();
         assert_eq!(e.code(), "camera", "{e}");
         add(&mut s, pairs()[0]);
         add(&mut s, pairs()[1]);
-        let e = s.execute("camera.calibrate.fit", json!({})).unwrap_err();
+        let e = s.execute_as(Origin::Human, "camera.calibrate.fit", json!({})).unwrap_err();
         assert_eq!(e.code(), "camera", "{e}");
         assert!(e.to_string().contains("3"), "{e}");
     }
@@ -1265,7 +1272,7 @@ mod camera {
         for p in [[100.0, 100.0, -50.0, -50.0], [500.0, 90.0, 50.0, -50.0], [300.0, 480.0, 0.0, 50.0]] {
             add(&mut s, p);
         }
-        let r = s.execute("camera.calibrate.fit", json!({})).unwrap();
+        let r = s.execute_as(Origin::Human, "camera.calibrate.fit", json!({})).unwrap();
         assert_eq!(r["kind"], "affine");
         assert!(r["rmsErrorPx"].as_f64().unwrap() < 1e-9, "{r}");
     }
@@ -1284,14 +1291,14 @@ mod camera {
         for p in pairs() {
             add(&mut s, p);
         }
-        let r = s.execute("camera.calibrate.fit", json!({})).unwrap();
+        let r = s.execute_as(Origin::Human, "camera.calibrate.fit", json!({})).unwrap();
         assert_eq!(r["persisted"], true, "{r}");
         // A fresh session loads the same fit: the map round-trips without a new fit.
         let mut s2 = Session::new(cfg(store()));
         let px = s2.execute("camera.map.bedToPx", json!({ "x": -50.0, "y": -50.0 })).unwrap();
         assert!((px["camX"].as_f64().unwrap() - pairs()[0][0]).abs() < 0.5, "{px}");
         // clear removes the file too.
-        s2.execute("camera.calibrate.clear", json!({})).unwrap();
+        s2.execute_as(Origin::Human, "camera.calibrate.clear", json!({})).unwrap();
         assert!(store().load().is_none());
     }
 }

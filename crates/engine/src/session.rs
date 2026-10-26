@@ -112,7 +112,8 @@ pub struct Session {
     pub(crate) group: Option<Group>,
     pub(crate) clipboard: Option<Clipboard>,
     /// The one live webcam capture (camera.rs): view state only — never in a Snapshot, never journaled, and
-    /// untouched by `file.new`/`file.open`. `camera.*` commands are safe for agents (AGENTS.md §1).
+    /// untouched by `file.new`/`file.open`. Camera enumeration/status/stop are agent-safe; capture start and
+    /// calibration changes are human-only physical setup actions.
     pub(crate) camera: Option<openlaser_camera::Capture>,
     /// Point pairs collected by `camera.calibrate.addPair` until `fit` consumes them. View state too.
     pub(crate) camera_pairs: Vec<openlaser_camera::Pair>,

@@ -1,7 +1,7 @@
 //! Whole-window kittests (SPEC §6.4, §7.9 acceptance). They use `NoHuman` (nothing is human, every frame is
 //! synthetic, a human-only surface counts as open) unless a test says why it needs another double. The WP0 engine has
-//! no documents, plan or driver yet, so the app's test seam (`Seam`) stands in for the engine's state; tests that
-//! need the real engine round trip (edit, undo, safety) are `#[ignore = "needs I2"]` and say which piece.
+//! UI behavior that does not need a simulator-backed whole-app session uses the app's test seam (`Seam`); tests
+//! that need edit, undo and safety use the real engine session.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -491,11 +491,10 @@ fn kittest_palette_click_assigns_selection() {
 }
 
 #[test]
-#[ignore = "needs I2: WP6's layer.assign and undo (the WP0 engine has no documents)"]
 fn kittest_palette_click_assigns_selection_end_to_end() {
     let mut h = harness();
     h.state_mut().session.execute_as(Origin::Synthetic, "file.new", serde_json::json!({})).unwrap();
-    h.state_mut().session.execute_as(Origin::Synthetic, "tools.rectangle", serde_json::json!({ "rectMm": [[0, 0], [10, 10]] })).unwrap();
+    h.state_mut().session.execute_as(Origin::Synthetic, "tools.rectangle", serde_json::json!({ "xMm": 0, "yMm": 0, "wMm": 10, "hMm": 10 })).unwrap();
     h.run();
     h.get_by_label("Layer 05").click();
     h.run();
@@ -629,7 +628,6 @@ fn kittest_cut_settings_ok_is_one_command() {
 }
 
 #[test]
-#[ignore = "needs I2: WP6's layer.cutSettings.set and history (the WP0 engine edit/undo return NotImplemented)"]
 fn kittest_cut_settings_ok_is_one_undo_step() {
     let mut h = harness();
     h.state_mut().session.execute_as(Origin::Synthetic, "file.new", serde_json::json!({})).unwrap();
@@ -658,10 +656,10 @@ fn kittest_refusal_badge_for_off_table_pulse() {
 }
 
 #[test]
-#[ignore = "needs I2: WP3's safety::validate behind WP6's live_check (the WP0 build_job refuses everything as not implemented)"]
 fn kittest_refusal_badge_for_off_table_pulse_end_to_end() {
     let mut h = harness();
     h.state_mut().session.execute_as(Origin::Synthetic, "file.new", serde_json::json!({})).unwrap();
+    h.state_mut().session.execute_as(Origin::Synthetic, "tools.rectangle", serde_json::json!({ "xMm": -5, "yMm": -5, "wMm": 10, "hMm": 10 })).unwrap();
     h.state_mut().session.execute_as(Origin::Synthetic, "layer.cutSettings.set", serde_json::json!({ "layer": 0, "galvo": { "qPulseNs": 7 } })).unwrap();
     h.run();
     assert!(h.query_all_by_label_contains("Refusals C00").next().is_some());
@@ -2471,11 +2469,13 @@ fn camera_panel_opens_and_enumerates_lazily() {
     // Painting the panel enumerates once: Some(devices) or Some(error message), never a block or a panic.
     h.run();
     assert!(h.state().ui.camera.devices.is_some(), "panel did not enumerate");
-    // camera.* are agent-safe view-state commands in the GUI session too (camera.stop is idempotent).
+    // camera.stop is agent-safe and idempotent; capture start and calibration writes are human-only.
     control(&mut h, "engine.execute", serde_json::json!({ "command": "camera.stop" })).unwrap_or_else(|e| panic!("{e}"));
     let status = control(&mut h, "engine.execute", serde_json::json!({ "command": "camera.status" })).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(status["running"], false);
     assert_eq!(status["calibration"]["calibrated"], false);
+    let refused = control(&mut h, "engine.execute", serde_json::json!({ "command": "camera.start" })).unwrap_err();
+    assert!(refused.contains("human-only"), "synthetic control input started the camera: {refused}");
 }
 
 // ---- Camera phase 6b: Calibrate wizard, View Style toggle and the canvas underlay ------------------------------------------
@@ -2488,12 +2488,10 @@ fn seam_frame(w: u32, hgt: u32) -> openlaser_engine::CameraFrame {
 /// Four corner pairs over a 64×48 seam feed: cam (0,0)..(64,48) ↔ bed (-50,-50)..(50,50).
 fn add_four_pairs(h: &mut H) {
     for (cam, bed) in [([0.0, 0.0], [-50.0, -50.0]), ([64.0, 0.0], [50.0, -50.0]), ([64.0, 48.0], [50.0, 50.0]), ([0.0, 48.0], [-50.0, 50.0])] {
-        control(
-            h,
-            "engine.execute",
-            serde_json::json!({ "command": "camera.calibrate.addPair", "params": { "camX": cam[0], "camY": cam[1], "bedX": bed[0], "bedY": bed[1] } }),
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
+        h.state_mut()
+            .session
+            .execute_as(Origin::Human, "camera.calibrate.addPair", serde_json::json!({ "camX": cam[0], "camY": cam[1], "bedX": bed[0], "bedY": bed[1] }))
+            .unwrap();
     }
 }
 
@@ -2502,7 +2500,7 @@ fn add_four_pairs(h: &mut H) {
 #[test]
 fn camera_background_menu_toggle() {
     // NoSurface: the control dispatcher serves mutations (NoHuman counts a human surface as always open).
-    let mut h = with_human(NoSurface);
+    let mut h = with_human(HumanFrames);
     h.run();
     assert!(!h.state().ui.camera_background);
     // The catalogue row is live (the shell handles it).
@@ -2539,7 +2537,7 @@ fn camera_background_menu_toggle() {
 /// in the session (and would persist through the injected store in the real app).
 #[test]
 fn camera_calibrate_wizard_adds_and_fits() {
-    let mut h = with_human(NoSurface);
+    let mut h = with_human(HumanFrames);
     // Open the panel and give the seam a live feed.
     control(&mut h, "ui.menu.invoke", serde_json::json!({ "id": "window.show:camera" })).unwrap_or_else(|e| panic!("{e}"));
     h.state_mut().seam.camera_running = true;
@@ -2573,12 +2571,10 @@ fn camera_calibrate_wizard_adds_and_fits() {
     assert!(h.state().ui.camera.pending_cam.is_none(), "a committed pair clears the pending click");
     // Three more pairs through the command path, then Fit.
     for (cam, bed) in [([64.0, 0.0], [50.0, -50.0]), ([64.0, 48.0], [50.0, 50.0]), ([0.0, 48.0], [-50.0, 50.0])] {
-        control(
-            &mut h,
-            "engine.execute",
-            serde_json::json!({ "command": "camera.calibrate.addPair", "params": { "camX": cam[0], "camY": cam[1], "bedX": bed[0], "bedY": bed[1] } }),
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
+        h.state_mut()
+            .session
+            .execute_as(Origin::Human, "camera.calibrate.addPair", serde_json::json!({ "camX": cam[0], "camY": cam[1], "bedX": bed[0], "bedY": bed[1] }))
+            .unwrap();
     }
     h.get_by_label("Fit camera calibration").click();
     h.step();
@@ -2603,7 +2599,7 @@ fn camera_underlay_paints_only_live_and_calibrated() {
     h.step();
     assert!(!h.state().seam.camera_overlay, "no calibration yet — nothing paints");
     add_four_pairs(&mut h);
-    control(&mut h, "engine.execute", serde_json::json!({ "command": "camera.calibrate.fit" })).unwrap_or_else(|e| panic!("{e}"));
+    h.state_mut().session.execute_as(Origin::Human, "camera.calibrate.fit", serde_json::json!({})).unwrap();
     h.step();
     assert!(h.state().seam.camera_overlay, "calibrated + streaming + toggle on → the feed is under the design");
     // A stopped stream removes the underlay next frame.
@@ -2614,7 +2610,7 @@ fn camera_underlay_paints_only_live_and_calibrated() {
     // And a cleared calibration removes it too.
     h.state_mut().seam.camera_running = true;
     h.state_mut().seam.camera_frame = Some(seam_frame(64, 48));
-    control(&mut h, "engine.execute", serde_json::json!({ "command": "camera.calibrate.clear" })).unwrap_or_else(|e| panic!("{e}"));
+    h.state_mut().session.execute_as(Origin::Human, "camera.calibrate.clear", serde_json::json!({})).unwrap();
     h.step();
     assert!(!h.state().seam.camera_overlay, "a cleared calibration must not leave a stale map");
 }
