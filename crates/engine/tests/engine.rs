@@ -1066,7 +1066,11 @@ mod gantry {
 #[test]
 fn panic_hunt() {
     let params = openlaser_testkit::adversarial::params();
-    let ids: Vec<&'static str> = registry().specs().iter().map(|s| s.id).collect();
+    // `camera.start` opens a real webcam through the OS (no injected provider): on a machine with a camera it
+    // blocks on the OS permission prompt, and a test must never open real devices. Its refusal for agents is
+    // pinned by `camera_access_matches_human_only_boundary`; its parameter decoding by the camera unit tests.
+    const OPENS_REAL_DEVICES: &[&str] = &["camera.start"];
+    let ids: Vec<&'static str> = registry().specs().iter().map(|s| s.id).filter(|id| !OPENS_REAL_DEVICES.contains(id)).collect();
     let handle = std::thread::Builder::new()
         .stack_size(64 << 20)
         .spawn(move || {

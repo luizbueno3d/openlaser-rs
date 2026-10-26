@@ -13,6 +13,8 @@ pub(crate) const STOP_RED: egui::Color32 = egui::Color32::from_rgb(196, 18, 28);
 
 pub(crate) const NOT_YET: &str = "Not in OpenLaser yet";
 pub(crate) const FILES_WHILE_ACTIVE: &str = "Stop the active frame or job before opening, importing or saving files.";
+/// The Laser panel's notice list scrolls inside this height so it never pushes the rest of the panel away.
+const NOTICES_MAX_HEIGHT: f32 = 160.0;
 
 /// Lucide icons (ISC, `assets/icons`, ATTRIBUTION.md), recoloured white and tinted by egui.
 /// A toolbar icon, tinted with the theme's text colour. The SVGs are rasterised white, and the tint multiplies,
@@ -810,7 +812,14 @@ impl OpenLaserApp {
             if refresh.clicked() {
                 self.refresh_cameras();
             }
-            let start = ui.add_enabled(!running, egui::Button::new("Start"));
+            // Opening a camera runs on this thread and can stall (a slow device, the OS permission prompt). Never
+            // during a frame or a job: a stalled window would freeze the on-screen STOP until it returns.
+            let busy = self.safety_active();
+            let start = ui.add_enabled(!running && !busy, egui::Button::new("Start")).on_disabled_hover_text(if busy {
+                "Not while framing or marking: stop the machine first."
+            } else {
+                "The camera is already running."
+            });
             self.labeled(&start, egui::WidgetType::Button, "Start camera", false);
             if start.clicked() {
                 // No device list (or none enumerated): let `camera.start` pick the first camera itself.
@@ -1251,6 +1260,10 @@ impl OpenLaserApp {
             }
         });
 
+        // Requests from agents come first, right under the controls: a person must never have to scroll past a
+        // long notice list to find "Approve framing" or a submitted job.
+        self.request_cards(ui, &ctx);
+
         // 5. Estimate; 6. refusals and notices.
         ui.separator();
         match &plan {
@@ -1280,8 +1293,15 @@ impl OpenLaserApp {
             }
         }
         if let Some(plan) = &plan {
-            for notice in plan.notices() {
-                ui.label(format!("{}. {}", notice.n, notice.message));
+            let notices = plan.notices();
+            if !notices.is_empty() {
+                ui.label(format!("{} notice(s):", notices.len()));
+                // Bounded, so a long list (the business card has 67) never pushes the rest of the panel away.
+                egui::ScrollArea::vertical().id_salt("laser-notices").max_height(NOTICES_MAX_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
+                    for notice in notices {
+                        ui.label(format!("{}. {}", notice.n, notice.message));
+                    }
+                });
             }
         }
         if let Err(reason) = &start {
@@ -1289,7 +1309,6 @@ impl OpenLaserApp {
         }
         ui.separator();
         ui.weak("STOP works while this window is focused; the E-stop always works.");
-        self.request_cards(ui, &ctx);
     }
 
     fn disabled_button(&mut self, ui: &mut egui::Ui, label: &str, reason: &str) {

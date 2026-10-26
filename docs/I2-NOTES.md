@@ -84,3 +84,18 @@ Commit attempt: `git add` and `git commit` were refused by the filesystem sandbo
 `/Users/luizbueno/AI/OpenLaser/openlaser/.git/worktrees/integration/index.lock` (`Operation not permitted`).
 The session does not allow permission escalation. Changes remain uncommitted on `integration`; the latest
 existing commit is `d0f0e96`. No push, merge, branch switch or restricted-crate edit was performed.
+
+## Fixes found by the whole-app tests (2026-10-26)
+- ARM dialog (crates/human/src/arm_dialog.rs): with the business card's 67 notices the checklist, the ARM field and
+  Confirm were pushed off-screen, so a person could not arm. The summary now scrolls inside a bounded area; the
+  bench power cap stays outside the scroll and always visible.
+- Laser panel (crates/ui-egui/src/panels.rs): agent request cards ("Approve framing", submitted jobs) were drawn
+  below the notice list, about 2000 px down. They now come first, and the notice list scrolls in 160 px.
+- panic_hunt hung for 10 minutes: as the Human origin it called `camera.start`, which opened the real webcam and
+  blocked on the macOS permission prompt. The hunt now skips device-opening commands; it runs in ~9 s with no
+  contained panics.
+- Follow-up from the same finding: opening a camera runs on the UI thread and can stall. Camera Start is now
+  disabled while framing or marking, so a stall can never freeze the on-screen STOP mid-job. Open the camera on
+  a worker thread (Phase 3).
+- `t6_stop_p99_under_100ms_all_states` exceeded the budget (152–211 ms) only while other builds loaded the CPU;
+  3/3 runs pass on a quiet machine. It is a real-time simulator test; watch it in CI.

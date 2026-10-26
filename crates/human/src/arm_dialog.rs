@@ -24,6 +24,10 @@ const FIELD_HINT: &str = "Type ARM";
 /// An empty checklist can never be confirmed (`mint` refuses it too, SPEC §3.9).
 pub const NO_CHECKLIST: &str = "This machine profile has no checklist, so nothing can be armed. Add one in Device Settings.";
 const THUMB_SIDE: f32 = 160.0;
+/// Height kept free below the scrolling summary for the heading, separator, field, messages and buttons.
+const CONTROLS_RESERVE: f32 = 230.0;
+/// The summary never shrinks below this, so the layer rows stay readable in a tiny window.
+const SUMMARY_MIN_HEIGHT: f32 = 120.0;
 
 /// What identifies one opening: a different `PendingArm` is a different dialog. Everything the person confirms by
 /// ticking and typing is in it: the bytes (whose decoded summary is shown), the frame receipt, the checklist items
@@ -128,10 +132,20 @@ impl Human {
         let mut clicked = Clicked::Nothing;
         let mut confirm: Option<egui::Response> = None;
         let state = &mut self.arm;
+        // The summary (layer rows, numbered notices, the cap) scrolls inside a bounded area, so the checklist, the
+        // ARM field and Confirm/Cancel below it stay on screen however many rows and notices the job has (the
+        // business card alone carries 67 notices) and however small the window is.
+        let checklist_height = 30.0 * model.checklist.len() as f32;
+        let summary_max = (ctx.content_rect().height() - CONTROLS_RESERVE - checklist_height).max(SUMMARY_MIN_HEIGHT);
         egui::Modal::new(egui::Id::new("openlaser-human::arm-dialog")).show(ctx, |ui| {
             ui.set_max_width(980.0);
             ui.heading(TITLE);
-            draw_summary(ui, model);
+            egui::ScrollArea::vertical()
+                .id_salt("openlaser-human::arm-summary")
+                .max_height(summary_max)
+                .auto_shrink([false, true])
+                .show(ui, |ui| draw_summary(ui, model));
+            // The bench power cap and its violations stay outside the scroll: they must always be visible.
             draw_cap(ui, model.emission_cap_pct, &violations);
             ui.separator();
             ui.label("Before you arm:");
