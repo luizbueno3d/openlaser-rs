@@ -27,6 +27,10 @@ This software controls a Class 4 laser that can blind, burn and start fires.
    - the Python prototype's live mode.
 
    Hardware sessions are run by a human at the machine.
+
+   A Claude Code hook in this repo (`.claude/hooks/no_hw.py`, wired in `.claude/settings.json`) refuses any Bash
+   command that builds with `hw`/`--all-features`, sets `OPENLASER_HW_PRESENT`, uses `.target/hw`, or runs
+   `openlaser-hw` without `--sim`. Hardware sessions follow [`HARDWARE.md`](HARDWARE.md).
 2. **Agents may operate everything else.** Design, import, layers, cut settings, planning, preview,
    estimate, G-code export, and submitting a job *for human approval* are all allowed. Arming a job
    requires a human confirmation in the GUI (or a physical input) that no agent, API, script or MCP
