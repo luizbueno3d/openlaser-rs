@@ -30,12 +30,17 @@ const PLATFORMS: &[&str] = &["aarch64-apple-darwin", "x86_64-apple-darwin", "x86
 /// Names without the `openlaser-` prefix are workspace crates.
 const TABLE: &[(&str, &[&str], &[&str])] = &[
     ("types", &[], &["serde", "thiserror"]),
-    ("geom", &["types"], &["kurbo", "rstar", "serde", "thiserror"]),
-    ("doc", &["types", "geom"], &["kurbo", "serde", "serde_json", "thiserror"]),
+    ("geom", &["types"], &["kurbo", "i_overlay", "rstar", "serde", "thiserror"]),
+    ("doc", &["types", "geom"], &["kurbo", "i_overlay", "serde", "serde_json", "thiserror"]),
     ("machine", &["types", "geom", "doc"], &["serde", "thiserror"]),
-    ("format", &["types", "geom", "doc", "machine"], &["zip", "flate2", "serde", "serde_json", "blake3", "craft-atomic", "craft-settings", "thiserror"]),
+    (
+        "format",
+        &["types", "geom", "doc", "machine", "camera"],
+        &["zip", "flate2", "serde", "serde_json", "blake3", "craft-atomic", "craft-settings", "thiserror"],
+    ),
     ("import", &["types", "geom", "doc"], &["usvg", "image", "serde", "serde_json", "blake3", "thiserror"]),
     ("plan", &["types", "geom", "doc", "machine"], &["blake3", "serde", "thiserror"]),
+    ("text", &["types", "geom"], &["kurbo", "skrifa", "harfrust", "serde", "thiserror"]),
     ("safety", &["types", "geom", "doc", "machine", "plan"], &["serde", "thiserror"]),
     ("arm", &["types"], &["getrandom"]),
     ("render", &["types", "geom", "doc", "machine", "plan"], &["tiny-skia", "thiserror"]),
@@ -45,9 +50,10 @@ const TABLE: &[(&str, &[&str], &[&str])] = &[
     ("driver", &["types", "machine", "lmc", "gcode"], &["crossbeam-channel", "serde", "thiserror", "log"]),
     ("lmc-sim", &["types", "machine", "lmc", "driver"], &["crossbeam-channel", "thiserror"]),
     ("transport", &["types", "machine", "lmc", "driver"], &["nusb", "serialport", "keepawake", "craft-settings", "serde", "serde_json", "thiserror"]),
+    ("camera", &[], &["nokhwa", "thiserror", "log", "serde"]),
     (
         "engine",
-        &["types", "geom", "doc", "machine", "format", "import", "plan", "safety", "lmc", "gcode", "driver"],
+        &["types", "geom", "doc", "machine", "format", "import", "plan", "safety", "lmc", "gcode", "driver", "text", "camera"],
         &["serde", "serde_json", "schemars", "thiserror", "log"],
     ),
     ("control", &["types"], &["serde", "serde_json", "cap-std", "getrandom", "craft-atomic", "thiserror"]),
@@ -58,7 +64,7 @@ const TABLE: &[(&str, &[&str], &[&str])] = &[
     ),
     (
         "ui-egui",
-        &["types", "geom", "doc", "machine", "plan", "engine", "control", "render"],
+        &["types", "geom", "doc", "machine", "plan", "engine", "control", "render", "text"],
         &["egui", "eframe", "egui_extras", "craft-ui", "craft-settings", "craft-atomic", "serde", "serde_json", "log"],
     ),
     ("human", &["types", "ui-egui", "arm"], &["egui"]),
@@ -493,7 +499,7 @@ fn check_source_rules(root: &Path, rust_files: &[std::path::PathBuf], v: &mut Ve
 
             // Rule 13: Origin::Human only where a human is (the engine defines and matches it).
             let human_ok = ["crates/ui-egui/", "crates/human/", "apps/openlaser/", "apps/openlaser-hw/", "crates/engine/"].iter().any(|p| r.starts_with(p));
-            if !human_ok && code.contains(&origin_human) {
+            if !human_ok && names_path(code, &origin_human) {
                 v.push(format!("rule 13: {at} names {origin_human}; only ui-egui, human, the GUI, openlaser-hw (and the engine) may"));
             }
             // Rule 14: test-only modules only from tests/ and #[cfg(test)].
@@ -553,9 +559,25 @@ fn uses_process_command(text: &str) -> bool {
     false
 }
 
+/// `code` names `path` (e.g. `Origin::Human`) as a path of its own: an occurrence preceded by an identifier character
+/// (`FrameOrigin::Human`, a different enum) does not count.
+fn names_path(code: &str, path: &str) -> bool {
+    code.match_indices(path).any(|(i, _)| !code.get(..i).and_then(|before| before.chars().next_back()).is_some_and(|c| c.is_alphanumeric() || c == '_'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rule_13_matches_the_engine_origin_not_frame_origin() {
+        let p = ["Origin::", "Human"].concat();
+        assert!(names_path("let o = Origin::Human;", &p));
+        assert!(names_path("x(openlaser_engine::Origin::Human)", &p));
+        assert!(!names_path("use openlaser_types::FrameOrigin::Human;", &p));
+        assert!(!names_path("let o = MyOrigin::Human;", &p));
+        assert!(names_path("FrameOrigin::Human; Origin::Human", &p));
+    }
 
     #[test]
     fn process_command_grep() {

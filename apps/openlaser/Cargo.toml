@@ -39,9 +39,13 @@ muda = { workspace = true }
 signal-hook = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-ctrlc = { workspace = true }
+ctrlc = { workspace = true, features = ["termination"] }
 
 [dev-dependencies]
 egui_kittest = { workspace = true }
 openlaser-testkit = { workspace = true }
 tempfile = { workspace = true }
+openlaser-automation = { workspace = true }
+openlaser-doc = { workspace = true }
+openlaser-lmc = { workspace = true }
+openlaser-machine = { workspace = true }

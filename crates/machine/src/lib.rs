@@ -1,7 +1,5 @@
 //! Machine profiles (SPEC §3.4; owned by WP1). No I/O.
 //!
-//! WP0 stubs: the data types are complete; `jpt_m7_200`/`_sim` carry the SPEC's numbers (WP1 checks them against
-//! the OM profile); the queries and importers return neutral values or `Error::NotImplemented`.
 #![forbid(unsafe_code)]
 
 mod builtin;
@@ -23,6 +21,126 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum Error {
+    #[error("invalid machine profile: {0}")]
+    InvalidProfile(String),
+    #[error("invalid markcfg: {0}")]
+    InvalidMarkCfg(String),
+    #[error("invalid OM calibration: {0}")]
+    InvalidCalibration(String),
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jpt_m7_matches_om_profile() {
+        let profile = jpt_m7_200();
+        let Kinematics::Galvo(ref galvo) = profile.kind else {
+            panic!("expected galvo profile");
+        };
+        assert_eq!(profile.id.0, "jpt-m7-200");
+        assert_eq!(galvo.board.vid, 0x9588);
+        assert_eq!(galvo.board.pid, 0x9899);
+        assert_eq!(galvo.encoding_field.get(), 200.0);
+        assert_eq!(galvo.cal.scale, [1.1834, 1.1834]);
+        assert_eq!(galvo.field_f(), [236.68, 236.68]);
+        assert_eq!(galvo.source.freq_khz, [1.0, 4000.0]);
+        assert_eq!(galvo.source.pulse_table_ns, openlaser_types::galvo::JPT_M7_PULSES_NS);
+        assert_eq!(galvo.jump_speed.get(), 3000.0);
+        assert_eq!(galvo.light_speed.get(), 3000.0);
+        assert_eq!(galvo.max_speed.get(), 6000.0);
+        assert_eq!(galvo.mo_settle.get(), 8000.0);
+        assert_eq!(galvo.timings.laser_on_us, 100.0);
+        assert_eq!(galvo.timings.laser_off_us, 100.0);
+        assert_eq!(galvo.timings.polygon_us, 100.0);
+        assert_eq!(galvo.timings.jump_delay_short_us, 8.0);
+        assert_eq!(galvo.timings.jump_delay_long_us, 200.0);
+        assert_eq!(galvo.first_jump.delay_us, 200.0);
+        assert_eq!(galvo.first_jump.settle_10us, 100);
+        assert_eq!(galvo.run_ahead.max_packets, 3);
+        assert_eq!(galvo.run_ahead.max_emission_s, 2.0);
+        assert_eq!(galvo.run_ahead.watchdog_factor, 1.5);
+        assert_eq!(galvo.run_ahead.watchdog_slack_s, 2.0);
+        assert_eq!(galvo.ports.laser_bit, 0);
+        assert_eq!(galvo.ports.red_bit, 8);
+        assert_eq!(galvo.transfer_timeout_ms, 250);
+        assert!(!galvo.usb_set_configuration);
+        assert_eq!(galvo.work_area.min, [-100.0, -100.0]);
+        assert_eq!(galvo.work_area.max, [100.0, 100.0]);
+        assert!(validate_profile(&profile).is_ok());
+    }
+
+    #[test]
+    fn markcfg_parses_om_profile() {
+        let bytes = std::fs::read(openlaser_testkit::golden_dir().join("inputs/openmopa-machine.ini")).unwrap();
+        let parsed = markcfg::parse(&bytes).unwrap();
+        assert_eq!(parsed.values.get("FIELDSIZE").map(String::as_str), Some("200"));
+        let (profile, applied) = markcfg::apply(&parsed, &jpt_m7_200()).unwrap();
+        let Kinematics::Galvo(galvo) = profile.kind else {
+            panic!("expected galvo profile");
+        };
+        assert_eq!(galvo.encoding_field.get(), 200.0);
+        assert_eq!(galvo.source.freq_khz, [1.0, 4000.0]);
+        assert!(applied.applied.iter().any(|key| key == "FIELDSIZE"));
+    }
+
+    #[test]
+    fn calibration_out_of_range_refused() {
+        let fixture = std::fs::read(openlaser_testkit::golden_dir().join("inputs/calibration.json")).unwrap();
+        assert_eq!(om::parse_calibration(&fixture).unwrap(), 1.1834);
+        assert!(om::parse_calibration(br#"{"scale_correction":2.01}"#).is_err());
+    }
+
+    #[test]
+    fn effective_work_area_is_rated_field() {
+        let profile = jpt_m7_200();
+        let Kinematics::Galvo(galvo) = profile.kind else {
+            panic!("expected galvo profile");
+        };
+        let area = galvo.effective_work_area();
+        assert_eq!(area.min, [-100.0, -100.0]);
+        assert_eq!(area.max, [100.0, 100.0]);
+    }
+
+    #[test]
+    fn validate_profile_rejects_empty_checklist() {
+        let mut profile = jpt_m7_200();
+        profile.checklist.clear();
+        assert!(validate_profile(&profile).is_err());
+    }
+
+    #[test]
+    fn om_gantries_all_validate() {
+        let profiles = om_gantries();
+        assert_eq!(profiles.len(), 3);
+        for profile in profiles {
+            assert!(validate_profile(&profile).is_ok(), "{}", profile.id.0);
+        }
+    }
+
+    #[test]
+    fn markcfg_fieldsize_keeps_user_shrunk_work_area() {
+        let mut base = jpt_m7_200();
+        let Kinematics::Galvo(galvo) = &mut base.kind else { panic!("expected galvo profile") };
+        galvo.work_area.min = [-50.0, -40.0];
+        galvo.work_area.max = [50.0, 40.0];
+        let cfg = markcfg::parse(b"[LMC_CFG]\nFIELDSIZE=200\n").unwrap();
+        let (applied, _) = markcfg::apply(&cfg, &base).unwrap();
+        let Kinematics::Galvo(galvo) = applied.kind else { panic!("expected galvo profile") };
+        assert_eq!(galvo.work_area.min, [-50.0, -40.0]);
+        assert_eq!(galvo.work_area.max, [50.0, 40.0]);
+    }
+
+    #[test]
+    fn work_area_cannot_grow_past_h27_cleared() {
+        let mut profile = jpt_m7_200();
+        let Kinematics::Galvo(galvo) = &mut profile.kind else {
+            panic!("expected galvo profile");
+        };
+        galvo.h27_cleared = Some(FieldRect { min: [-90.0, -90.0], max: [90.0, 90.0] });
+        assert!(validate_profile(&profile).is_err());
+    }
 }

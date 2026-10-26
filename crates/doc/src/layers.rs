@@ -29,6 +29,29 @@ pub struct ColorLayer {
     pub air_assist: bool,
 }
 
+impl CutTable {
+    /// Every pass count is at least 1. A `passes` of 0 would plan no sections for the layer's shapes — the
+    /// planner must never drop them silently — so `format` refuses it on load and save and the planner refuses
+    /// it through the same check ([`crate::Error::ZeroPasses`]).
+    pub fn check_passes(&self) -> Result<(), crate::Error> {
+        for layer in &self.colors {
+            let key = LayerKey::Color(layer.index);
+            for (op, sub) in layer.ops.iter().zip(0usize..) {
+                if op.passes == 0 {
+                    return Err(crate::Error::ZeroPasses { layer: key, field: format!("ops[{sub}].passes") });
+                }
+            }
+            if layer.global_passes == 0 {
+                return Err(crate::Error::ZeroPasses { layer: key, field: "globalPasses".to_owned() });
+            }
+            if layer.image.passes == 0 {
+                return Err(crate::Error::ZeroPasses { layer: key, field: "image.passes".to_owned() });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Never outputs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

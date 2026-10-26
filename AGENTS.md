@@ -6,8 +6,10 @@ It aims for LightBurn-equivalent workflow, layout and file compatibility, built 
 is drivable by agents through `openlaser-cli` and its MCP server. No Tauri, Electron or webview shells.
 
 Its first and most important machine is a **JPT M7 MOPA fiber laser on a JCZ/BJJCZ LMC galvo board**
-(USB `0x9588:0x9899`). The build spec is [`docs/SPEC.md`](docs/SPEC.md). The research and plan behind
-it are in `~/AI/ClaudeCode/openlaser-rust-plan/` (`PLAN.md`, `research/05-hardware-protocols-and-test-inputs.md`).
+(USB `0x9588:0x9899`). The build spec is [`docs/SPEC.md`](docs/SPEC.md). The research, design decisions
+and history behind it live in [`docs/research/`](docs/research/README.md) — read `PLAN.md` and
+`design/redteam-review.md` there before architectural work; they explain the safety posture, why the
+LMC encoder must match golden bytes, and why prior art (Rayforge, balor, MeerK40t) is read-only.
 
 ## 1. Laser safety (outranks everything)
 
@@ -103,3 +105,11 @@ toolchain for the Windows target (no `ring`/`openssl`; blake3 `pure`, flate2 `ru
 integrator checks it from the Mac in the gui lane, once per integration step, with ≥ 8 GB free:
 `cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings`. CI
 (`.github/workflows/ci.yml`) runs fmt, clippy, tests and `xtask deps` on macOS, Windows and Linux.
+
+## 7. Project history
+
+The complete planning corpus — six research reports, three design proposals and their judging, the
+red-team review, the Rayforge evaluation evidence and `PLAN.md` — is preserved in
+[`docs/research/`](docs/research/README.md). It descends from `OpenMopa`, the Python prototype
+(`~/AI/OpenLaser/OpenMopa`; its B1–B12 safety-bug fixes live on `fix/safety-b1-b12`). Where the corpus
+and the code disagree, the code and `docs/SPEC-CHANGES.md` win.

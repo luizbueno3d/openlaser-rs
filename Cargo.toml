@@ -17,6 +17,7 @@ publish = false
 openlaser-types = { path = "crates/types" }
 openlaser-geom = { path = "crates/geom" }
 openlaser-doc = { path = "crates/doc" }
+openlaser-text = { path = "crates/text" }
 openlaser-machine = { path = "crates/machine" }
 openlaser-format = { path = "crates/format" }
 openlaser-import = { path = "crates/import" }
@@ -35,6 +36,7 @@ openlaser-automation = { path = "crates/automation" }
 openlaser-ui-egui = { path = "crates/ui-egui" }
 openlaser-human = { path = "crates/human" }
 openlaser-testkit = { path = "crates/testkit" }
+openlaser-camera = { path = "crates/camera" }
 
 # ---- GUI stack (S6; only ui-egui, human and apps/openlaser, §2.3 rule 2) ----------------------------------------
 # SPEC §2.4 features (PhotoCraft's): egui `default_fonts`; eframe `wgpu` + `accesskit`; egui_extras `svg`; egui_kittest
@@ -55,6 +57,9 @@ rfd = { version = "=0.17.2" }
 
 # ---- geometry, raster, files (S7: one kurbo, one usvg, one tiny-skia with egui_extras[svg]) ---------------------
 kurbo = { version = "=0.11.3" }
+# Text shaping (S19): already resolved to these versions through the GUI stack; used by openlaser-text.
+skrifa = { version = "=0.44.0" }
+harfrust = { version = "=0.12.0" }
 usvg = { version = "=0.45.1", default-features = false }
 tiny-skia = { version = "=0.11.4" }
 rstar = { version = "=0.13.0" }
@@ -66,6 +71,12 @@ flate2 = { version = "=1.1.10", default-features = false, features = ["rust_back
 dxf = { version = "=0.6.2" }
 i_overlay = { version = "=9.1.0" }
 quick-xml = { version = "=0.42.0" }
+
+# ---- camera (only openlaser-camera; §2.6: pure-Rust native backends, no decoding/mozjpeg/opencv/wgpu) --------------
+# `input-native` keeps AVFoundation (macOS), MSMF/`windows` (Windows) and v4l (Linux); `default-features = false`
+# drops the `decoding` path so no C toolchain is needed on Windows (S19). `camera-sync-impl` makes
+# `nokhwa::Camera` `Send` so the crate can own it on a pump thread (it pulls no extra dependencies).
+nokhwa = { version = "=0.10.11", default-features = false, features = ["input-native", "camera-sync-impl"] }
 
 # ---- devices (only openlaser-transport, §2.3 rule 1) ------------------------------------------------------------
 nusb = { version = "=0.2.8" }

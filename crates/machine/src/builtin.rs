@@ -5,8 +5,8 @@ use openlaser_types::galvo::JPT_M7_PULSES_NS;
 use openlaser_types::{Deg, Hz, MachineId, Mm, MmPerS, Ns, Percent, Us};
 
 use crate::profile::{
-    FieldCalibration, FieldRect, FirstJump, GalvoLink, GalvoMachine, GalvoTimingDefaults, JobLimits, Kinematics, LaserSource, LmcBoardFilter, MachineProfile,
-    PortMap, RedDotCal, RunAhead, SourceKind,
+    FieldCalibration, FieldRect, FirstJump, GalvoLink, GalvoMachine, GalvoTimingDefaults, GantryLink, GantryMachine, GantryTool, JobLimits, Kinematics,
+    LaserSource, LmcBoardFilter, MachineProfile, PortMap, RedDotCal, RunAhead, SourceKind,
 };
 
 /// A unit literal checked at compile time: an out-of-range literal fails the build (the `None` arm is dead).
@@ -31,9 +31,85 @@ pub fn jpt_m7_200_sim() -> MachineProfile {
     jpt_m7(MachineId("jpt-m7-200-sim".to_owned()), "JPT M7 · Simulator", GalvoLink::Sim)
 }
 
-/// co2-grbl-600x400, diode-grbl-400x400, plotter-grbl-a4 (OM machines.py, T2). WP0 stub: none.
+/// co2-grbl-600x400, diode-grbl-400x400, plotter-grbl-a4 (OM machines.py, T2).
 pub fn om_gantries() -> Vec<MachineProfile> {
-    Vec::new()
+    vec![
+        gantry(
+            "co2-grbl-600x400",
+            "CO₂ cutter · GRBL 600 × 400 mm",
+            [600.0, 400.0],
+            lit!(MmPerS, 500.0),
+            GantryTool::Laser { dynamic: false },
+            true,
+            lit!(MmPerS, 100.0),
+            lit!(Percent, 20.0),
+        ),
+        gantry(
+            "diode-grbl-400x400",
+            "Diode laser · GRBL 400 × 400 mm",
+            [400.0, 400.0],
+            lit!(MmPerS, 250.0),
+            GantryTool::Laser { dynamic: true },
+            true,
+            lit!(MmPerS, 50.0),
+            lit!(Percent, 20.0),
+        ),
+        gantry(
+            "plotter-grbl-a4",
+            "Pen plotter · GRBL A4",
+            [210.0, 297.0],
+            lit!(MmPerS, 150.0),
+            GantryTool::Pen,
+            false,
+            lit!(MmPerS, 50.0),
+            lit!(Percent, 100.0),
+        ),
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gantry(
+    id: &str,
+    name: &str,
+    bed_mm: [f64; 2],
+    max_speed: MmPerS,
+    tool: GantryTool,
+    air_assist: bool,
+    default_speed: MmPerS,
+    default_power: Percent,
+) -> MachineProfile {
+    let dynamic = matches!(tool, GantryTool::Laser { dynamic: true });
+    MachineProfile {
+        id: MachineId(id.to_owned()),
+        name: name.to_owned(),
+        kind: Kinematics::Gantry(GantryMachine {
+            bed_mm,
+            origin: openlaser_doc::WorkspaceOrigin::BottomLeft,
+            max_speed,
+            travel_speed: max_speed,
+            s_max: 1000,
+            tool,
+            air_assist,
+            frame_before_mark: false,
+            home_on_connect: false,
+            link: GantryLink::ExportOnly,
+        }),
+        limits: JobLimits { max_paths: 3000, max_points_per_path: 2000, max_points_per_pass: 20000 },
+        layer_defaults: LayerDefaults {
+            galvo: GalvoParams {
+                speed: lit!(MmPerS, 1000.0),
+                power: lit!(Percent, 30.0),
+                min_power: lit!(Percent, 0.0),
+                frequency: lit!(Hz, 30_000),
+                q_pulse: Some(lit!(Ns, 200.0)),
+                timings: None,
+                wobble: None,
+            },
+            gantry: GantryParams { speed: default_speed, power_max: default_power, power_min: lit!(Percent, 0.0), constant_power: !dynamic },
+            fill: FillParams { interval: lit!(Mm, 0.1), angle: lit!(Deg, 0.0), angle_increment: lit!(Deg, 90.0), bidirectional: true, cross_hatch: false },
+        },
+        checklist: vec!["Machine area clear and material secured".to_owned()],
+    }
 }
 
 fn jpt_m7(id: MachineId, name: &str, link: GalvoLink) -> MachineProfile {
@@ -69,7 +145,7 @@ fn jpt_m7(id: MachineId, name: &str, link: GalvoLink) -> MachineProfile {
             speed: lit!(MmPerS, 1000.0),
             power: lit!(Percent, 30.0),
             min_power: lit!(Percent, 0.0),
-            frequency: hz(30_000),
+            frequency: lit!(Hz, 30_000),
             q_pulse: Some(lit!(Ns, 200.0)),
             timings: None,
             wobble: None,
@@ -91,13 +167,3 @@ fn jpt_m7(id: MachineId, name: &str, link: GalvoLink) -> MachineProfile {
         ],
     }
 }
-
-/// Compile-time checked frequency literal.
-const fn hz(v: u32) -> Hz {
-    match Hz::new_const(v) {
-        Some(h) => h,
-        None => Hz::MAX_VALID,
-    }
-}
-
-const _: () = assert!(Hz::new_const(30_000).is_some(), "built-in profile frequency out of range");

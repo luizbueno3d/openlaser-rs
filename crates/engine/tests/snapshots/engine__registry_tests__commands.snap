@@ -1,0 +1,5118 @@
+---
+source: crates/engine/tests/engine.rs
+expression: rows
+---
+[
+  {
+    "id": "file.new",
+    "label": "New",
+    "menu": [
+      "File"
+    ],
+    "shortcut": "Cmd+N",
+    "defaultShortcut": "Cmd+N",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{name?, machine?}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`file.new`.",
+      "properties": {
+        "machine": {
+          "default": null,
+          "description": "Machine profile id (`device.list`). Default: the session's first machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "default": null,
+          "description": "Project name. Default \"Untitled\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "NewParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "file.open",
+    "label": "Open…",
+    "menu": [
+      "File"
+    ],
+    "shortcut": "Cmd+O",
+    "defaultShortcut": "Cmd+O",
+    "kind": "io",
+    "agent": "rootsOnly",
+    "params": "{path} (.olp, or a design file opened as a new project)",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{path}`.",
+      "properties": {
+        "path": {
+          "description": "File path. For agents it must resolve inside the granted automation roots.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "PathParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "file.import",
+    "label": "Import…",
+    "menu": [
+      "File"
+    ],
+    "shortcut": "Cmd+I",
+    "defaultShortcut": "Cmd+I",
+    "kind": "edit",
+    "agent": "rootsOnly",
+    "params": "{path, layer?, centerMm?:[x,y], scale?, svgUnits?:\"physical\"|\"px96\"|\"px72\"}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`file.import`.",
+      "properties": {
+        "centerMm": {
+          "default": null,
+          "description": "Centre the import here (design mm). Default: file coordinates (SVG/DXF), the origin (images).",
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "description": "A LightBurn layer: colour 0..=29, or \"C05\", \"05\", \"T1\", \"T2\" (case-insensitive).",
+              "oneOf": [
+                {
+                  "maximum": 29,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "^([CcTt]?[0-9]{1,2})$",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Put every imported object on this layer. Default: colour → palette match, else the current layer."
+        },
+        "path": {
+          "description": "File path (SVG, DXF, PNG/JPEG/BMP/TIFF/WebP/GIF, or an OpenMopa `workspace.json`).",
+          "type": "string"
+        },
+        "scale": {
+          "default": null,
+          "description": "Scale factor (> 0). Default 1.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "svgUnits": {
+          "default": null,
+          "description": "SVG units. Default \"physical\": an SVG without physical units is refused.",
+          "enum": [
+            "physical",
+            "px96",
+            "px72",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "ImportParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "file.save",
+    "label": "Save",
+    "menu": [
+      "File"
+    ],
+    "shortcut": "Cmd+S",
+    "defaultShortcut": "Cmd+S",
+    "kind": "io",
+    "agent": "rootsOnly",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "file.saveAs",
+    "label": "Save As…",
+    "menu": [
+      "File"
+    ],
+    "shortcut": "Cmd+Shift+S",
+    "defaultShortcut": "Cmd+Shift+S",
+    "kind": "io",
+    "agent": "rootsOnly",
+    "params": "{path} (.olp)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{path}`.",
+      "properties": {
+        "path": {
+          "description": "File path. For agents it must resolve inside the granted automation roots.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "PathParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "file.saveMachineFile",
+    "label": "Save GCode…",
+    "menu": [
+      "File"
+    ],
+    "shortcut": "Alt+Shift+L",
+    "defaultShortcut": "Alt+Shift+L",
+    "kind": "io",
+    "agent": "rootsOnly",
+    "params": "{path, selectedOnly?} (GRBL profiles)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`file.saveMachineFile`.",
+      "properties": {
+        "path": {
+          "description": "Where to write the G-code.",
+          "type": "string"
+        },
+        "selectedOnly": {
+          "default": null,
+          "description": "Only the selected objects (Cut Selected Graphics). Default: the project setting.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "MachineFileParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "file.exit",
+    "label": "Quit OpenLaser",
+    "menu": [
+      "OpenLaser"
+    ],
+    "shortcut": "Cmd+Q",
+    "defaultShortcut": "Cmd+Q",
+    "kind": "view",
+    "agent": "ui",
+    "params": "{} (stops every machine first if one is active)",
+    "enabled": false,
+    "disabledReason": "needs the OpenLaser window (bridge mode)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.undo",
+    "label": "Undo",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": "Cmd+Z",
+    "defaultShortcut": "Cmd+Z",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.redo",
+    "label": "Redo",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": "Cmd+Shift+Z",
+    "defaultShortcut": "Cmd+Shift+Z",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.selectAll",
+    "label": "Select All",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": "Cmd+A",
+    "defaultShortcut": "Cmd+A",
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.select",
+    "label": "Select",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{ids?, rectMm?:{min:[x,y],max:[x,y]}, crossing?, mode?:\"replace\"|\"add\"|\"remove\"|\"toggle\"}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`edit.select`.",
+      "properties": {
+        "crossing": {
+          "default": null,
+          "description": "Marquee: also pick objects that cross it (default false: fully enclosed only).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "ids": {
+          "default": null,
+          "description": "Object ids to select.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "mode": {
+          "default": null,
+          "description": "How the picked objects combine with the selection. Default \"replace\".",
+          "enum": [
+            "replace",
+            "add",
+            "remove",
+            "toggle",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rectMm": {
+          "additionalProperties": false,
+          "default": null,
+          "description": "Marquee in design mm (Y up).",
+          "properties": {
+            "max": {
+              "items": {
+                "format": "double",
+                "type": "number"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            "min": {
+              "items": {
+                "format": "double",
+                "type": "number"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            }
+          },
+          "required": [
+            "min",
+            "max"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "title": "SelectParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.selectNone",
+    "label": "Select None",
+    "menu": [],
+    "shortcut": "Escape",
+    "defaultShortcut": "Escape",
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.delete",
+    "label": "Delete",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": "Backspace",
+    "defaultShortcut": "Backspace",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.duplicate",
+    "label": "Duplicate",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": "Cmd+D",
+    "defaultShortcut": "Cmd+D",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.cut",
+    "label": "Cut",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": "Cmd+X",
+    "defaultShortcut": "Cmd+X",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (copy to the session clipboard, then delete: one undo step)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.copy",
+    "label": "Copy",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": "Cmd+C",
+    "defaultShortcut": "Cmd+C",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (session clipboard; no undo step)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.paste",
+    "label": "Paste",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": "Cmd+V",
+    "defaultShortcut": "Cmd+V",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{xMm?, yMm?} (centre lands there; default +5, -5 mm from the copy)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`edit.paste`.",
+      "properties": {
+        "xMm": {
+          "default": null,
+          "description": "x the pasted set's bounding-box centre lands on (default: the copied centre + 5 mm).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "yMm": {
+          "default": null,
+          "description": "y the centre lands on (default: the copied centre - 5 mm).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "title": "PasteParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.pasteInPlace",
+    "label": "Paste in Place",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": "Alt+V",
+    "defaultShortcut": "Alt+V",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.closePath",
+    "label": "Close Path",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?, toleranceMm?: 0.5}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`edit.closePath`, `edit.autoJoin`.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "toleranceMm": {
+          "default": null,
+          "description": "Largest gap to close or join, in mm (> 0, ≤ 100).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "title": "ToleranceParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.autoJoin",
+    "label": "Auto-Join Selected Shapes",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": "Alt+J",
+    "defaultShortcut": "Alt+J",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?, toleranceMm?: 0.05}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`edit.closePath`, `edit.autoJoin`.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "toleranceMm": {
+          "default": null,
+          "description": "Largest gap to close or join, in mm (> 0, ≤ 100).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "title": "ToleranceParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.deleteDuplicates",
+    "label": "Delete Duplicates",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": "Alt+D",
+    "defaultShortcut": "Alt+D",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (default: the selection, else every object)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.settings",
+    "label": "Settings…",
+    "menu": [
+      "OpenLaser"
+    ],
+    "shortcut": "Cmd+,",
+    "defaultShortcut": "Cmd+,",
+    "kind": "view",
+    "agent": "ui",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "needs the OpenLaser window (bridge mode)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.deviceSettings",
+    "label": "Device Settings…",
+    "menu": [
+      "Edit"
+    ],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "ui",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "needs the OpenLaser window (bridge mode)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "path.get",
+    "label": "Get Path Data",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{id} → {d, xform:[a,b,c,d,e,f]} (object space)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`path.get` parameters.",
+      "properties": {
+        "id": {
+          "description": "The shape id.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "PathGetParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "path.set",
+    "label": "Set Path Data",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{id, d, coalesce?} replaces the object-space path; one undo step",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`path.set` parameters.",
+      "properties": {
+        "coalesce": {
+          "default": null,
+          "description": "Consecutive sets sharing a key merge into one history entry (arrow-key nudges).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "d": {
+          "description": "SVG path data in the shape's object space (\"M…Z…\"). Must start with MoveTo; every number finite.",
+          "type": "string"
+        },
+        "id": {
+          "description": "The shape id.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "d"
+      ],
+      "title": "PathSetParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.text",
+    "label": "Edit Text",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Cmd+T",
+    "defaultShortcut": "Cmd+T",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{xMm, yMm, text, family?, style?, heightMm?(10), letterSpacingMm?(0), lineSpacing?(1), align?\"left\"|\"center\"|\"right\", layer?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`tools.text` parameters.",
+      "properties": {
+        "align": {
+          "default": null,
+          "description": "\"left\" (default), \"center\" or \"right\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "family": {
+          "default": null,
+          "description": "Font family; default: the first available of the usual system names, else the first indexed family.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "heightMm": {
+          "default": null,
+          "description": "Cap height in mm (default 10).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "description": "A LightBurn layer: colour 0..=29, or \"C05\", \"05\", \"T1\", \"T2\" (case-insensitive).",
+              "oneOf": [
+                {
+                  "maximum": 29,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "^([CcTt]?[0-9]{1,2})$",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Layer. Default: C00."
+        },
+        "letterSpacingMm": {
+          "default": null,
+          "description": "Extra advance per character in mm (default 0).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "lineSpacing": {
+          "default": null,
+          "description": "Line-height multiplier (default 1.0).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "style": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "description": "The text; `\\n` splits lines.",
+          "type": "string"
+        },
+        "xMm": {
+          "description": "Baseline anchor point (the alignment point), world mm.",
+          "format": "double",
+          "type": "number"
+        },
+        "yMm": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "xMm",
+        "yMm",
+        "text"
+      ],
+      "title": "TextParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "text.edit",
+    "label": "Edit Text…",
+    "menu": [],
+    "shortcut": "Cmd+E",
+    "defaultShortcut": "Cmd+E",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{id, text?, family?, style?, heightMm?, letterSpacingMm?, lineSpacing?, align?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`text.edit` parameters: every field optional except `id`.",
+      "properties": {
+        "align": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "coalesce": {
+          "default": null,
+          "description": "Consecutive edits sharing a key merge into one history entry.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "family": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "heightMm": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "letterSpacingMm": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "lineSpacing": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "style": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "TextEditParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "text.fonts",
+    "label": "List Fonts",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{fonts:[{family, styles}]}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "edit.convertToPath",
+    "label": "Convert to Path",
+    "menu": [
+      "Arrange"
+    ],
+    "shortcut": "Cmd+Shift+C",
+    "defaultShortcut": "Cmd+Shift+C",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (text and parametric shapes become Geom::Path, xform kept)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.select",
+    "label": "Select",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "ui",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "needs the OpenLaser window (bridge mode)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.rectangle",
+    "label": "Rectangle",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Cmd+R",
+    "defaultShortcut": "Cmd+R",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{xMm, yMm, wMm, hMm, cornerRadiusMm?, layer?} (x, y = lower-left corner)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`tools.rectangle`.",
+      "properties": {
+        "cornerRadiusMm": {
+          "default": null,
+          "description": "Corner radius (0..=min(w, h)/2). Default 0.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "hMm": {
+          "description": "Height (> 0).",
+          "format": "double",
+          "type": "number"
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "description": "A LightBurn layer: colour 0..=29, or \"C05\", \"05\", \"T1\", \"T2\" (case-insensitive).",
+              "oneOf": [
+                {
+                  "maximum": 29,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "^([CcTt]?[0-9]{1,2})$",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Layer. Default: the current layer."
+        },
+        "wMm": {
+          "description": "Width (> 0).",
+          "format": "double",
+          "type": "number"
+        },
+        "xMm": {
+          "description": "Lower-left corner x (design mm, Y up).",
+          "format": "double",
+          "type": "number"
+        },
+        "yMm": {
+          "description": "Lower-left corner y.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "xMm",
+        "yMm",
+        "wMm",
+        "hMm"
+      ],
+      "title": "RectangleParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.ellipse",
+    "label": "Ellipse",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Cmd+E",
+    "defaultShortcut": "Cmd+E",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{cxMm, cyMm, wMm, hMm, layer?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`tools.ellipse`.",
+      "properties": {
+        "cxMm": {
+          "description": "Centre x (design mm).",
+          "format": "double",
+          "type": "number"
+        },
+        "cyMm": {
+          "description": "Centre y.",
+          "format": "double",
+          "type": "number"
+        },
+        "hMm": {
+          "description": "Height (> 0).",
+          "format": "double",
+          "type": "number"
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "description": "A LightBurn layer: colour 0..=29, or \"C05\", \"05\", \"T1\", \"T2\" (case-insensitive).",
+              "oneOf": [
+                {
+                  "maximum": 29,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "^([CcTt]?[0-9]{1,2})$",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Layer. Default: the current layer."
+        },
+        "wMm": {
+          "description": "Width (> 0).",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "cxMm",
+        "cyMm",
+        "wMm",
+        "hMm"
+      ],
+      "title": "EllipseParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.editNodes",
+    "label": "Edit Nodes",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Ctrl+Backtick",
+    "defaultShortcut": "Ctrl+Backtick",
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.drawLines",
+    "label": "Draw Lines",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Cmd+L",
+    "defaultShortcut": "Cmd+L",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{pointsMm?:[[x,y],…] | d?:\"M0 0L10 0…\", closed?, layer?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`tools.drawLines`: exactly one of `pointsMm` and `d`.",
+      "properties": {
+        "closed": {
+          "default": null,
+          "description": "Close the polyline (pointsMm only). Default false.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "d": {
+          "default": null,
+          "description": "SVG path data in design mm (Y up as given).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "description": "A LightBurn layer: colour 0..=29, or \"C05\", \"05\", \"T1\", \"T2\" (case-insensitive).",
+              "oneOf": [
+                {
+                  "maximum": 29,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "^([CcTt]?[0-9]{1,2})$",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Layer. Default: the current layer."
+        },
+        "pointsMm": {
+          "default": null,
+          "description": "Polyline vertices in design mm (≥ 2).",
+          "items": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "DrawLinesParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.polygon",
+    "label": "Polygon",
+    "menu": [
+      "Tools",
+      "Shape"
+    ],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{cxMm, cyMm, radiusMm, sides? (3..=64, default 6), rotateDeg?, layer?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`tools.polygon`: a regular polygon, first vertex straight up unless `rotateDeg` turns it (CCW, Y up).",
+      "properties": {
+        "cxMm": {
+          "description": "Centre x (design mm).",
+          "format": "double",
+          "type": "number"
+        },
+        "cyMm": {
+          "description": "Centre y.",
+          "format": "double",
+          "type": "number"
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "description": "A LightBurn layer: colour 0..=29, or \"C05\", \"05\", \"T1\", \"T2\" (case-insensitive).",
+              "oneOf": [
+                {
+                  "maximum": 29,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "^([CcTt]?[0-9]{1,2})$",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Layer. Default: the current layer."
+        },
+        "radiusMm": {
+          "description": "Vertex radius (> 0).",
+          "format": "double",
+          "type": "number"
+        },
+        "rotateDeg": {
+          "default": null,
+          "description": "Rotation about the centre, degrees counter-clockwise. Default 0.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "sides": {
+          "default": null,
+          "description": "Vertex count, 3..=64. Default 6.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cxMm",
+        "cyMm",
+        "radiusMm"
+      ],
+      "title": "PolygonParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.traceImage",
+    "label": "Trace Image",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Alt+T",
+    "defaultShortcut": "Alt+T",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{id?, threshold?(128), invert?, ignoreLessThan?(2), smoothness?(1.0), optimize?(0.5), deleteImage?, layer?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`tools.traceImage` {id?, threshold?, invert?, ignoreLessThan?, smoothness?, optimize?, deleteImage?, layer?}.",
+      "properties": {
+        "deleteImage": {
+          "default": null,
+          "description": "Remove the source image in the same undo step.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "id": {
+          "default": null,
+          "description": "The bitmap object. Default: the single selected shape.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ignoreLessThan": {
+          "default": null,
+          "description": "Drop rings under this area in px² (default 2).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "invert": {
+          "default": null,
+          "description": "Trace the light side.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "description": "A LightBurn layer: colour 0..=29, or \"C05\", \"05\", \"T1\", \"T2\" (case-insensitive).",
+              "oneOf": [
+                {
+                  "maximum": 29,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "pattern": "^([CcTt]?[0-9]{1,2})$",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "optimize": {
+          "default": null,
+          "description": "Douglas–Peucker tolerance in px (default 0.5).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "smoothness": {
+          "default": null,
+          "description": "0..=1.33 (default 1.0); 0 gives polygons.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "threshold": {
+          "default": null,
+          "description": "Ink threshold 1..=255 (default 128): gray < threshold is ink.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "TraceParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.measure",
+    "label": "Measure",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Alt+M",
+    "defaultShortcut": "Alt+M",
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{fromMm:[x,y], toMm:[x,y]} → {distanceMm, dxMm, dyMm, angleDeg (CCW from +X, Y up)}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`tools.measure`: a pure query — never touches the document or history.",
+      "properties": {
+        "fromMm": {
+          "description": "Start point, design mm.",
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "toMm": {
+          "description": "End point, design mm.",
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        }
+      },
+      "required": [
+        "fromMm",
+        "toMm"
+      ],
+      "title": "MeasureParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.weld",
+    "label": "Weld Shapes",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Cmd+W",
+    "defaultShortcut": "Cmd+W",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (≥ 2 closed objects, unioned into one path)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.booleanUnion",
+    "label": "Boolean Union",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Alt+Plus",
+    "defaultShortcut": "Alt+Plus",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (exactly 2 closed objects)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.booleanSubtract",
+    "label": "Boolean Subtract",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Alt+Minus",
+    "defaultShortcut": "Alt+Minus",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (exactly 2 closed objects; the topmost is subtracted)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.booleanIntersect",
+    "label": "Boolean Intersection",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Alt+Shift+8",
+    "defaultShortcut": "Alt+Shift+8",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (exactly 2 closed objects)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "tools.offsetShapes",
+    "label": "Offset Shapes…",
+    "menu": [
+      "Tools"
+    ],
+    "shortcut": "Alt+O",
+    "defaultShortcut": "Alt+O",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?, distanceMm (>0, ≤1000), direction?\"outward\"|\"inward\"|\"both\", corner?\"round\"|\"sharp\"|\"bevel\", deleteOriginal?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`tools.offsetShapes`.",
+      "properties": {
+        "corner": {
+          "default": null,
+          "description": "\"round\" (default), \"sharp\" (miter, limit 4) or \"bevel\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deleteOriginal": {
+          "default": null,
+          "description": "Remove the originals. Default false.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "direction": {
+          "default": null,
+          "description": "\"outward\" (default), \"inward\" or \"both\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "distanceMm": {
+          "description": "Offset distance in mm (> 0, ≤ 1000). Outward grows, inward shrinks, open paths get a stroke this wide/2.",
+          "format": "double",
+          "type": "number"
+        },
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "distanceMm"
+      ],
+      "title": "OffsetParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "arrange.flipH",
+    "label": "Flip Horizontal",
+    "menu": [
+      "Arrange"
+    ],
+    "shortcut": "Cmd+Shift+H",
+    "defaultShortcut": "Cmd+Shift+H",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "arrange.flipV",
+    "label": "Flip Vertical",
+    "menu": [
+      "Arrange"
+    ],
+    "shortcut": "Cmd+Shift+V",
+    "defaultShortcut": "Cmd+Shift+V",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "arrange.rotateCw90",
+    "label": "Rotate 90° Clockwise",
+    "menu": [
+      "Arrange"
+    ],
+    "shortcut": ".",
+    "defaultShortcut": ".",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "arrange.rotateCcw90",
+    "label": "Rotate 90° Counter-Clockwise",
+    "menu": [
+      "Arrange"
+    ],
+    "shortcut": ",",
+    "defaultShortcut": ",",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "arrange.transform",
+    "label": "Numeric Edits",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?, xMm?, yMm?, wMm?, hMm?, scalePct?, rotateDeg?, anchor?, lockRatio?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`arrange.transform` (the Numeric Edits toolbar and the selection handles).",
+      "properties": {
+        "anchor": {
+          "default": null,
+          "description": "Reference point on the bounding box. Default \"center\".",
+          "enum": [
+            "center",
+            "topLeft",
+            "top",
+            "topRight",
+            "left",
+            "right",
+            "bottomLeft",
+            "bottom",
+            "bottomRight",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hMm": {
+          "default": null,
+          "description": "New height (> 0).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "lockRatio": {
+          "default": null,
+          "description": "Keep the aspect ratio when only one of wMm/hMm is given. Default false.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "rotateDeg": {
+          "default": null,
+          "description": "Rotation about the anchor, degrees counter-clockwise (Y up).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "scalePct": {
+          "default": null,
+          "description": "Uniform scale in percent (> 0), applied after w/h.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "wMm": {
+          "default": null,
+          "description": "New width of the selection's bounding box (> 0).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "xMm": {
+          "default": null,
+          "description": "New x of the anchor (design mm).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "yMm": {
+          "default": null,
+          "description": "New y of the anchor.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "title": "TransformParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "arrange.nudge",
+    "label": "Nudge",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?, dxMm, dyMm} (consecutive nudges are one undo step)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`arrange.nudge`.",
+      "properties": {
+        "dxMm": {
+          "description": "Move right by this many mm (negative: left).",
+          "format": "double",
+          "type": "number"
+        },
+        "dyMm": {
+          "description": "Move up by this many mm (negative: down).",
+          "format": "double",
+          "type": "number"
+        },
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "dxMm",
+        "dyMm"
+      ],
+      "title": "NudgeParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "arrange.rotateBy",
+    "label": "Rotate",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?, deg, anchor?} (counter-clockwise, Y up)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`arrange.rotateBy`.",
+      "properties": {
+        "anchor": {
+          "default": null,
+          "description": "Pivot on the bounding box. Default \"center\".",
+          "enum": [
+            "center",
+            "topLeft",
+            "top",
+            "topRight",
+            "left",
+            "right",
+            "bottomLeft",
+            "bottom",
+            "bottomRight",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deg": {
+          "description": "Degrees, counter-clockwise (Y up).",
+          "format": "double",
+          "type": "number"
+        },
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "deg"
+      ],
+      "title": "RotateParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "arrange.moveSelection.pageCenter",
+    "label": "Move Selected Objects to Page Center",
+    "menu": [
+      "Arrange",
+      "Move Selected Objects"
+    ],
+    "shortcut": "P",
+    "defaultShortcut": "P",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "arrange.group",
+    "label": "Group",
+    "menu": [
+      "Arrange"
+    ],
+    "shortcut": "Cmd+G",
+    "defaultShortcut": "Cmd+G",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (≥ 2 top-level objects)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "arrange.ungroup",
+    "label": "Ungroup",
+    "menu": [
+      "Arrange"
+    ],
+    "shortcut": "Cmd+U",
+    "defaultShortcut": "Cmd+U",
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{ids?} (every group target is replaced by its children)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{ids?}`: object ids; default: the selection.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the current selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "title": "IdsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "layer.select",
+    "label": "Select Layer",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{layer}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{layer}`.",
+      "properties": {
+        "layer": {
+          "description": "Layer: 0..=29, \"C05\", \"05\", \"T1\" or \"T2\".",
+          "oneOf": [
+            {
+              "maximum": 29,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "pattern": "^([CcTt]?[0-9]{1,2})$",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "layer"
+      ],
+      "title": "LayerParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "layer.setCurrent",
+    "label": "Set Current Layer",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{layer}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{layer}`.",
+      "properties": {
+        "layer": {
+          "description": "Layer: 0..=29, \"C05\", \"05\", \"T1\" or \"T2\".",
+          "oneOf": [
+            {
+              "maximum": 29,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "pattern": "^([CcTt]?[0-9]{1,2})$",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "layer"
+      ],
+      "title": "LayerParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "layer.assign",
+    "label": "Assign Layer",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{layer, ids?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`layer.assign`.",
+      "properties": {
+        "ids": {
+          "default": null,
+          "description": "Object ids. Default: the selection.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "layer": {
+          "description": "Target layer: 0..=29, \"C05\", \"T1\", \"T2\".",
+          "oneOf": [
+            {
+              "maximum": 29,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "pattern": "^([CcTt]?[0-9]{1,2})$",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "layer"
+      ],
+      "title": "AssignParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "layer.cutSettings.set",
+    "label": "Cut Settings",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{layer, subLayer?, name?, output?, show?, mode?, passes?, globalPasses?, airAssist?, galvo?:{speedMmS, powerPct, minPowerPct, frequencyKhz | frequencyHz, qPulseNs}, gantry?:{speedMmS, powerMaxPct, powerMinPct, constantPower}, fill?:{intervalMm | lpi, angleDeg, angleIncrementDeg, bidirectional, crossHatch}, image?:{mode, intervalMm, angleDeg, bidirectional, negative, threshold, passes}}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`layer.cutSettings.set`: every field optional (a partial update); one undo step.",
+      "properties": {
+        "airAssist": {
+          "default": null,
+          "description": "Air assist (gantry only).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "fill": {
+          "additionalProperties": false,
+          "description": "Fill geometry.",
+          "properties": {
+            "angleDeg": {
+              "default": null,
+              "description": "Scan angle, degrees.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "angleIncrementDeg": {
+              "default": null,
+              "description": "Angle added on each pass, degrees.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "bidirectional": {
+              "default": null,
+              "description": "Bi-directional fill.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "crossHatch": {
+              "default": null,
+              "description": "Cross-hatch (a +90° pass after each pass).",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "intervalMm": {
+              "default": null,
+              "description": "Line interval in mm (> 0). Exactly one of intervalMm and lpi.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "lpi": {
+              "default": null,
+              "description": "Lines per inch (> 0).",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "galvo": {
+          "additionalProperties": false,
+          "description": "Galvo energy block.",
+          "properties": {
+            "frequencyHz": {
+              "default": null,
+              "description": "Pulse frequency in Hz (1..=10000000).",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "frequencyKhz": {
+              "default": null,
+              "description": "Pulse frequency in kHz (a whole number of hertz). Exactly one of frequencyKhz and frequencyHz.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "minPowerPct": {
+              "default": null,
+              "description": "Min power, percent (0..=100).",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "powerPct": {
+              "default": null,
+              "description": "Max power, percent (0..=100).",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "qPulseNs": {
+              "default": null,
+              "description": "Q-pulse width in ns (MOPA; snapped to the source's pulse table at plan time).",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "speedMmS": {
+              "default": null,
+              "description": "Mark speed, mm/s (0 < v ≤ 100000; the machine's max speed is checked at plan time).",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "gantry": {
+          "additionalProperties": false,
+          "description": "Gantry energy block.",
+          "properties": {
+            "constantPower": {
+              "default": null,
+              "description": "Constant power (M3) instead of dynamic (M4).",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "powerMaxPct": {
+              "default": null,
+              "description": "Max power, percent.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "powerMinPct": {
+              "default": null,
+              "description": "Min power, percent.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "speedMmS": {
+              "default": null,
+              "description": "Speed, mm/s.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "globalPasses": {
+          "default": null,
+          "description": "Global passes: repeats the whole sub-layer stack (galvo; 1..=999).",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "image": {
+          "additionalProperties": false,
+          "description": "Image settings.",
+          "properties": {
+            "angleDeg": {
+              "default": null,
+              "description": "Scan angle, degrees.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "bidirectional": {
+              "default": null,
+              "description": "Bi-directional scanning.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "intervalMm": {
+              "default": null,
+              "description": "Line interval in mm (> 0).",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "mode": {
+              "default": null,
+              "description": "Dithering mode.",
+              "enum": [
+                "threshold",
+                "jarvis",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "negative": {
+              "default": null,
+              "description": "Negative image.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "passes": {
+              "default": null,
+              "description": "Passes (1..=999).",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "threshold": {
+              "default": null,
+              "description": "Threshold (0..=255).",
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "layer": {
+          "description": "Layer: 0..=29, \"C05\", \"T1\", \"T2\". Tool layers take only name and show.",
+          "oneOf": [
+            {
+              "maximum": 29,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "pattern": "^([CcTt]?[0-9]{1,2})$",
+              "type": "string"
+            }
+          ]
+        },
+        "mode": {
+          "default": null,
+          "description": "Mode.",
+          "enum": [
+            "line",
+            "fill",
+            "offsetFill",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "default": null,
+          "description": "Layer name (≤ 64 characters).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output": {
+          "default": null,
+          "description": "Output: burn this layer.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "passes": {
+          "default": null,
+          "description": "Passes (1..=999).",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "show": {
+          "default": null,
+          "description": "Show: draw this layer (a hidden layer with Output on is refused at plan time).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "subLayer": {
+          "default": null,
+          "description": "Sub-layer index (0 = the layer itself). Default 0.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "layer"
+      ],
+      "title": "CutSettingsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "layer.cutSettings.get",
+    "label": "Get Cut Settings",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{layer}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{layer}`.",
+      "properties": {
+        "layer": {
+          "description": "Layer: 0..=29, \"C05\", \"05\", \"T1\" or \"T2\".",
+          "oneOf": [
+            {
+              "maximum": 29,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "pattern": "^([CcTt]?[0-9]{1,2})$",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "layer"
+      ],
+      "title": "LayerParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "layer.cutSettings.open",
+    "label": "Open Cut Settings Editor",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "ui",
+    "params": "{layer}",
+    "enabled": false,
+    "disabledReason": "needs the OpenLaser window (bridge mode)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{layer}`.",
+      "properties": {
+        "layer": {
+          "description": "Layer: 0..=29, \"C05\", \"05\", \"T1\" or \"T2\".",
+          "oneOf": [
+            {
+              "maximum": 29,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "pattern": "^([CcTt]?[0-9]{1,2})$",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "layer"
+      ],
+      "title": "LayerParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "layer.setMode",
+    "label": "Mode",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{layer, mode:\"line\"|\"fill\"|\"offsetFill\"}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`layer.setMode`.",
+      "properties": {
+        "layer": {
+          "description": "Colour layer: 0..=29 or \"C05\".",
+          "oneOf": [
+            {
+              "maximum": 29,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "pattern": "^([CcTt]?[0-9]{1,2})$",
+              "type": "string"
+            }
+          ]
+        },
+        "mode": {
+          "description": "\"line\", \"fill\" or \"offsetFill\" (P1: refused at plan time).",
+          "enum": [
+            "line",
+            "fill",
+            "offsetFill"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "layer",
+        "mode"
+      ],
+      "title": "ModeParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "layer.setOutput",
+    "label": "Output",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{layer, on}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`layer.setOutput`, `layer.setShow`.",
+      "properties": {
+        "layer": {
+          "description": "Layer: 0..=29, \"C05\", \"T1\", \"T2\".",
+          "oneOf": [
+            {
+              "maximum": 29,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "pattern": "^([CcTt]?[0-9]{1,2})$",
+              "type": "string"
+            }
+          ]
+        },
+        "on": {
+          "description": "On or off.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "layer",
+        "on"
+      ],
+      "title": "OnParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "layer.setShow",
+    "label": "Show",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{layer, on}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`layer.setOutput`, `layer.setShow`.",
+      "properties": {
+        "layer": {
+          "description": "Layer: 0..=29, \"C05\", \"T1\", \"T2\".",
+          "oneOf": [
+            {
+              "maximum": 29,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "pattern": "^([CcTt]?[0-9]{1,2})$",
+              "type": "string"
+            }
+          ]
+        },
+        "on": {
+          "description": "On or off.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "layer",
+        "on"
+      ],
+      "title": "OnParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "layer.reorder",
+    "label": "Move Layer",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{layer, toIndex}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`layer.reorder`.",
+      "properties": {
+        "layer": {
+          "description": "The layer to move (it must be in use).",
+          "oneOf": [
+            {
+              "maximum": 29,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "pattern": "^([CcTt]?[0-9]{1,2})$",
+              "type": "string"
+            }
+          ]
+        },
+        "toIndex": {
+          "description": "Its new position in the Cuts / Layers list (0 = first to burn).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "layer",
+        "toIndex"
+      ],
+      "title": "ReorderParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "laser.status",
+    "label": "Machine Status",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{machine?} (cached; never device I/O)",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{machine?}` for the Stop commands.",
+      "properties": {
+        "machine": {
+          "default": null,
+          "description": "Machine profile id. Default: every connected machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "MachineParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "laser.liveFraming",
+    "label": "Live Framing",
+    "menu": [],
+    "shortcut": "F1",
+    "defaultShortcut": "F1",
+    "kind": "view",
+    "agent": "ui",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "needs the OpenLaser window (bridge mode)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "laser.frame",
+    "label": "Frame",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "device",
+    "agent": "humanOnly",
+    "params": "{style?:\"bounds\"|\"contour\", source?:\"job\"|\"toolLayersOnly\"|\"jobAndToolLayers\", loop?}",
+    "enabled": false,
+    "disabledReason": "human-only: started by a person in the OpenLaser window",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`laser.frame`.",
+      "properties": {
+        "loop": {
+          "default": null,
+          "description": "Loop until stopped (Live Framing). Default false: frame once.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "description": "What to trace. Default: the project's setting. A tool-layers-only frame never counts toward Start.",
+          "enum": [
+            "job",
+            "toolLayersOnly",
+            "jobAndToolLayers",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "style": {
+          "default": null,
+          "description": "Outline style. Default: the project's setting. Never changes the fingerprint (S21).",
+          "enum": [
+            "bounds",
+            "contour",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "FrameParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "laser.frameStop",
+    "label": "Stop Framing",
+    "menu": [],
+    "shortcut": "Escape",
+    "defaultShortcut": "Escape",
+    "kind": "device",
+    "agent": "stop",
+    "params": "{machine?}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{machine?}` for the Stop commands.",
+      "properties": {
+        "machine": {
+          "default": null,
+          "description": "Machine profile id. Default: every connected machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "MachineParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "laser.start",
+    "label": "Start",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "device",
+    "agent": "humanOnly",
+    "params": "{} (opens the ARM dialog; never emits by itself)",
+    "enabled": false,
+    "disabledReason": "human-only: started by a person in the OpenLaser window",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "laser.stop",
+    "label": "Stop",
+    "menu": [],
+    "shortcut": "Escape",
+    "defaultShortcut": "Escape",
+    "kind": "device",
+    "agent": "stop",
+    "params": "{machine?}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{machine?}` for the Stop commands.",
+      "properties": {
+        "machine": {
+          "default": null,
+          "description": "Machine profile id. Default: every connected machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "MachineParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "laser.clearFault",
+    "label": "Clear Fault",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "device",
+    "agent": "humanOnly",
+    "params": "{machine?}",
+    "enabled": false,
+    "disabledReason": "human-only: started by a person in the OpenLaser window",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{machine?}` for the Stop commands.",
+      "properties": {
+        "machine": {
+          "default": null,
+          "description": "Machine profile id. Default: every connected machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "MachineParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "laser.cutSelected",
+    "label": "Cut Selected Graphics",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{on}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{on}`.",
+      "properties": {
+        "on": {
+          "description": "On or off.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "on"
+      ],
+      "title": "OnOff",
+      "type": "object"
+    }
+  },
+  {
+    "id": "laser.repeat",
+    "label": "Repeat",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{count} (1..=999)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`laser.repeat`.",
+      "properties": {
+        "count": {
+          "description": "How many times the whole job runs (1..=999); shown at confirmation.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "count"
+      ],
+      "title": "RepeatParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "device.list",
+    "label": "Devices",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "device.select",
+    "label": "Select Device",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{device} (refused while a machine is busy)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`device.select`.",
+      "properties": {
+        "device": {
+          "description": "Machine profile id (`device.list`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "device"
+      ],
+      "title": "SelectDevice",
+      "type": "object"
+    }
+  },
+  {
+    "id": "device.connect",
+    "label": "Connect",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "device",
+    "agent": "humanOnly",
+    "params": "{device?}",
+    "enabled": false,
+    "disabledReason": "human-only: started by a person in the OpenLaser window",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{device?}`: a machine profile id; default the active document's machine.",
+      "properties": {
+        "device": {
+          "default": null,
+          "description": "Machine profile id (`device.list`). Default: the active document's machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "DeviceParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "device.disconnect",
+    "label": "Disconnect",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "device",
+    "agent": "humanOnly",
+    "params": "{device?}",
+    "enabled": false,
+    "disabledReason": "human-only: started by a person in the OpenLaser window",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{device?}`: a machine profile id; default the active document's machine.",
+      "properties": {
+        "device": {
+          "default": null,
+          "description": "Machine profile id (`device.list`). Default: the active document's machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "DeviceParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "device.detect",
+    "label": "Find My Laser",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "device",
+    "agent": "humanOnly",
+    "params": "{} (read-only enumeration)",
+    "enabled": false,
+    "disabledReason": "human-only: started by a person in the OpenLaser window",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "device.settings.get",
+    "label": "Device Settings",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{device?}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{device?}`: a machine profile id; default the active document's machine.",
+      "properties": {
+        "device": {
+          "default": null,
+          "description": "Machine profile id (`device.list`). Default: the active document's machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "DeviceParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "device.settings.set",
+    "label": "Save Device Settings",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "settings",
+    "agent": "humanOnly",
+    "params": "{device?, …galvo keys of CAT §7 (fieldWidthMm, scaleXPct, negateX, …)}",
+    "enabled": false,
+    "disabledReason": "human-only: started by a person in the OpenLaser window",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`device.settings.set`: Device Settings (CAT §7) for a galvo profile. Every key optional.",
+      "properties": {
+        "checklist": {
+          "default": null,
+          "description": "The job checklist ticked at ARM (≥ 1 item).",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "device": {
+          "default": null,
+          "description": "Profile id. Default: the active document's machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fieldAngleDeg": {
+          "default": null,
+          "description": "Field angle, degrees.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "fieldHeightMm": {
+          "default": null,
+          "description": "Field (work area) height, mm.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "fieldOffsetXMm": {
+          "default": null,
+          "description": "Field offset X, mm.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "fieldOffsetYMm": {
+          "default": null,
+          "description": "Field offset Y, mm.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "fieldWidthMm": {
+          "default": null,
+          "description": "Field (work area) width, mm. Grows only as far as hardware item H27 cleared.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "frameSpeedMmS": {
+          "default": null,
+          "description": "Frame (red light) speed, mm/s.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "galvo1IsX": {
+          "default": null,
+          "description": "\"Galvo 1 is X axis\".",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "jumpMaxDelayUs": {
+          "default": null,
+          "description": "Max jump delay, µs.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "jumpMinDelayUs": {
+          "default": null,
+          "description": "Min jump delay, µs.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "jumpSpeedMmS": {
+          "default": null,
+          "description": "Jump speed, mm/s.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "laserOffTcUs": {
+          "default": null,
+          "description": "Laser Off TC, µs.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "laserOnTcUs": {
+          "default": null,
+          "description": "Laser On TC, µs.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "maxPowerPct": {
+          "default": null,
+          "description": "Source power ceiling, percent.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "maxSpeedMmS": {
+          "default": null,
+          "description": "Max layer speed, mm/s (above it is refused).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "name": {
+          "default": null,
+          "description": "Display name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "negateX": {
+          "default": null,
+          "description": "Reverse direction of X.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "negateY": {
+          "default": null,
+          "description": "Reverse direction of Y.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "openMoDelayUs": {
+          "default": null,
+          "description": "Open-MO delay, µs.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "polygonTcUs": {
+          "default": null,
+          "description": "Polygon TC, µs.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "pulseTableNs": {
+          "default": null,
+          "description": "Accepted pulse widths, ns, ascending.",
+          "items": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "pwmMaxKhz": {
+          "default": null,
+          "description": "Highest pulse frequency, kHz.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "pwmMinKhz": {
+          "default": null,
+          "description": "Lowest pulse frequency, kHz.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "qPulseEnabled": {
+          "default": null,
+          "description": "Enable the Q-pulse width setting (MOPA).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "redDotOffsetXMm": {
+          "default": null,
+          "description": "Red dot offset X, mm.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "redDotOffsetYMm": {
+          "default": null,
+          "description": "Red dot offset Y, mm.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "redDotScaleX": {
+          "default": null,
+          "description": "Red dot scale X (factor).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "redDotScaleY": {
+          "default": null,
+          "description": "Red dot scale Y (factor).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "scaleXPct": {
+          "default": null,
+          "description": "Axis 1 scale, percent (50..=200).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "scaleYPct": {
+          "default": null,
+          "description": "Axis 2 scale, percent (50..=200).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "title": "SettingsParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "device.create",
+    "label": "New Device",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "settings",
+    "agent": "humanOnly",
+    "params": "{id, name, from?}",
+    "enabled": false,
+    "disabledReason": "human-only: started by a person in the OpenLaser window",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`device.create`.",
+      "properties": {
+        "from": {
+          "default": null,
+          "description": "Profile to copy. Default: the active document's machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "New profile id: [a-z0-9-]{1,64}.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Display name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "title": "CreateParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "device.importEzcad",
+    "label": "Import EZCAD Settings",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "settings",
+    "agent": "humanOnly",
+    "params": "{path, device?}",
+    "enabled": false,
+    "disabledReason": "human-only: started by a person in the OpenLaser window",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`device.importEzcad`.",
+      "properties": {
+        "device": {
+          "default": null,
+          "description": "Profile to update. Default: the active document's machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "An EZCAD `markcfg` file.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "ImportEzcadParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "device.calibrateAxis",
+    "label": "Calibrate Axis",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "settings",
+    "agent": "humanOnly",
+    "params": "{axis:1|2, requestedMm, measuredMm, device?}",
+    "enabled": false,
+    "disabledReason": "human-only: started by a person in the OpenLaser window",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`device.calibrateAxis`: new scale = old × requested / measured.",
+      "properties": {
+        "axis": {
+          "description": "Galvo axis: 1 or 2.",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "device": {
+          "default": null,
+          "description": "Profile. Default: the active document's machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "measuredMm": {
+          "description": "The length measured on the material, mm.",
+          "format": "double",
+          "type": "number"
+        },
+        "requestedMm": {
+          "description": "The length that was marked, mm.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "axis",
+        "requestedMm",
+        "measuredMm"
+      ],
+      "title": "CalibrateParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "device.inspectProfile",
+    "label": "Inspect Device Profile",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{device?}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{device?}`: a machine profile id; default the active document's machine.",
+      "properties": {
+        "device": {
+          "default": null,
+          "description": "Machine profile id (`device.list`). Default: the active document's machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "DeviceParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "job.plan",
+    "label": "Plan Job",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{selectedOnly?, machine?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`job.plan`, `job.validate`, `job.summary`.",
+      "properties": {
+        "machine": {
+          "default": null,
+          "description": "Plan for this machine profile. Default: the document's machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selectedOnly": {
+          "default": null,
+          "description": "Only the selected objects. Default: the project's Cut Selected Graphics setting.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "JobParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "job.validate",
+    "label": "Validate Job",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{selectedOnly?, machine?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`job.plan`, `job.validate`, `job.summary`.",
+      "properties": {
+        "machine": {
+          "default": null,
+          "description": "Plan for this machine profile. Default: the document's machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selectedOnly": {
+          "default": null,
+          "description": "Only the selected objects. Default: the project's Cut Selected Graphics setting.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "JobParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "job.summary",
+    "label": "Emission Summary",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{selectedOnly?, machine?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`job.plan`, `job.validate`, `job.summary`.",
+      "properties": {
+        "machine": {
+          "default": null,
+          "description": "Plan for this machine profile. Default: the document's machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selectedOnly": {
+          "default": null,
+          "description": "Only the selected objects. Default: the project's Cut Selected Graphics setting.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "JobParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "job.dump",
+    "label": "Export Job",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "io",
+    "agent": "rootsOnly",
+    "params": "{path} (packets hex + listing + summary JSON)",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{path}`.",
+      "properties": {
+        "path": {
+          "description": "File path. For agents it must resolve inside the granted automation roots.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "PathParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "preview.stats",
+    "label": "Preview Statistics",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "job.submit",
+    "label": "Submit Job",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "request",
+    "agent": "allowed",
+    "params": "{note?} (bridge only; a person frames and arms it)",
+    "enabled": false,
+    "disabledReason": "needs bridge mode (the OpenLaser window)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`job.submit`.",
+      "properties": {
+        "note": {
+          "default": null,
+          "description": "A note for the person (plain text, ≤ 280 characters), shown outside the confirmation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "SubmitParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "job.status",
+    "label": "Job Status",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{submission?}",
+    "enabled": false,
+    "disabledReason": "needs bridge mode (the OpenLaser window)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`job.status`.",
+      "properties": {
+        "submission": {
+          "default": null,
+          "description": "Submission id. Default: every submission and frame request.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "StatusParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "job.withdraw",
+    "label": "Withdraw Job",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "request",
+    "agent": "allowed",
+    "params": "{submission}",
+    "enabled": false,
+    "disabledReason": "needs bridge mode (the OpenLaser window)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`job.withdraw`.",
+      "properties": {
+        "submission": {
+          "description": "Submission (or frame request) id.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "submission"
+      ],
+      "title": "WithdrawParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "job.frameRequest",
+    "label": "Request Framing",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "request",
+    "agent": "allowed",
+    "params": "{mode?:\"once\"|\"loop\"} (bridge only; a person approves it)",
+    "enabled": false,
+    "disabledReason": "needs bridge mode (the OpenLaser window)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`job.frameRequest`.",
+      "properties": {
+        "mode": {
+          "default": null,
+          "description": "\"once\" (default) or \"loop\".",
+          "enum": [
+            "once",
+            "loop",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "FrameRequestParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.list",
+    "label": "Cameras",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.status",
+    "label": "Camera Status",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.start",
+    "label": "Start Camera",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "humanOnly",
+    "params": "{index?} (view state; never touches laser state)",
+    "enabled": false,
+    "disabledReason": "human-only: started by a person in the OpenLaser window",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`camera.start`.",
+      "properties": {
+        "index": {
+          "default": null,
+          "description": "Device index (`camera.list`). Default: the open camera, else the first enumerated one.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "StartParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.stop",
+    "label": "Stop Camera",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{} (idempotent)",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.calibrate.addPair",
+    "label": "Add Calibration Point",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "humanOnly",
+    "params": "{camX, camY, bedX, bedY} (px ↔ mm)",
+    "enabled": false,
+    "disabledReason": "human-only: started by a person in the OpenLaser window",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`camera.calibrate.addPair`: `camX`/`camY` in image pixels, `bedX`/`bedY` in bed millimetres.",
+      "properties": {
+        "bedX": {
+          "description": "The same physical point measured on the bed (millimetres).",
+          "format": "double",
+          "type": "number"
+        },
+        "bedY": {
+          "format": "double",
+          "type": "number"
+        },
+        "camX": {
+          "description": "The clicked image point (pixels).",
+          "format": "double",
+          "type": "number"
+        },
+        "camY": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "camX",
+        "camY",
+        "bedX",
+        "bedY"
+      ],
+      "title": "AddPairParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.calibrate.removeLast",
+    "label": "Remove Last Calibration Point",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "humanOnly",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "human-only: started by a person in the OpenLaser window",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.calibrate.fit",
+    "label": "Fit Camera Calibration",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "humanOnly",
+    "params": "{} (≥3 pairs; persists through the machine-local store)",
+    "enabled": false,
+    "disabledReason": "human-only: started by a person in the OpenLaser window",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.calibrate.clear",
+    "label": "Clear Camera Calibration",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "humanOnly",
+    "params": "{} (pairs and the fitted calibration)",
+    "enabled": false,
+    "disabledReason": "human-only: started by a person in the OpenLaser window",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.map.bedToPx",
+    "label": "Map Bed to Camera Pixels",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{x, y} mm → {camX, camY} px",
+    "enabled": false,
+    "disabledReason": "the camera is not calibrated",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`camera.map.*`: `{x, y}` in the input's own units (mm for `bedToPx`, px for `pxToBed`).",
+      "properties": {
+        "x": {
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "title": "MapParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "camera.map.pxToBed",
+    "label": "Map Camera Pixels to Bed",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{x, y} px → {bedX, bedY} mm",
+    "enabled": false,
+    "disabledReason": "the camera is not calibrated",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`camera.map.*`: `{x, y}` in the input's own units (mm for `bedToPx`, px for `pxToBed`).",
+      "properties": {
+        "x": {
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "title": "MapParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "document.inspect",
+    "label": "Inspect Document",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{index?, objects?:\"summary\"|\"all\"}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`document.inspect`.",
+      "properties": {
+        "index": {
+          "default": null,
+          "description": "Document index (`session.list`). Default: the active document.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "objects": {
+          "description": "\"summary\" (default: at most 200 objects) or \"all\".",
+          "enum": [
+            "summary",
+            "all",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "InspectParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "document.select",
+    "label": "Select Document",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{index}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`document.select`.",
+      "properties": {
+        "index": {
+          "description": "Document index (`session.list`).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "index"
+      ],
+      "title": "IndexParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "document.close",
+    "label": "Close Document",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "allowed",
+    "params": "{index?}",
+    "enabled": false,
+    "disabledReason": "no document open",
+    "needsDocument": true,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`document.close`.",
+      "properties": {
+        "index": {
+          "default": null,
+          "description": "Document index. Default: the active document.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "CloseParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "session.list",
+    "label": "Session",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "command.list",
+    "label": "List Commands",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{filter?, enabledOnly?, agent?, schema?}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`command.list`.",
+      "properties": {
+        "agent": {
+          "default": null,
+          "description": "Only this agent class.",
+          "enum": [
+            "allowed",
+            "rootsOnly",
+            "ui",
+            "humanOnly",
+            "stop",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabledOnly": {
+          "default": null,
+          "description": "Only commands enabled now for this caller.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "filter": {
+          "default": null,
+          "description": "Substring of the id or label (case-insensitive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema": {
+          "default": null,
+          "description": "Include each command's JSON Schema.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "ListParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "command.schema",
+    "label": "Command Schema",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{id}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`command.schema`.",
+      "properties": {
+        "id": {
+          "description": "Command id (camelCase, or its snake_case alias).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "SchemaParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "help.about",
+    "label": "About OpenLaser",
+    "menu": [
+      "OpenLaser"
+    ],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "query",
+    "agent": "allowed",
+    "params": "{}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "prefs.get",
+    "label": "Get Preference",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "settings",
+    "agent": "allowed",
+    "params": "{key?}",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`prefs.get`.",
+      "properties": {
+        "key": {
+          "default": null,
+          "description": "Preference key. Default: every preference.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "PrefGet",
+      "type": "object"
+    }
+  },
+  {
+    "id": "prefs.set",
+    "label": "Set Preference",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "settings",
+    "agent": "allowed",
+    "params": "{key, value} (refuses machine.*, safety.*, automation.*, humanOnly.*)",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`prefs.set`.",
+      "properties": {
+        "key": {
+          "description": "Preference key, e.g. \"output.curveToleranceMm\" or \"shortcuts.edit.undo\".",
+          "type": "string"
+        },
+        "value": {
+          "description": "The new value (JSON)."
+        }
+      },
+      "required": [
+        "key",
+        "value"
+      ],
+      "title": "PrefSet",
+      "type": "object"
+    }
+  },
+  {
+    "id": "view.zoomIn",
+    "label": "Zoom In",
+    "menu": [
+      "Window"
+    ],
+    "shortcut": "Cmd+=",
+    "defaultShortcut": "Cmd+=",
+    "kind": "view",
+    "agent": "ui",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "needs the OpenLaser window (bridge mode)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "view.zoomOut",
+    "label": "Zoom Out",
+    "menu": [
+      "Window"
+    ],
+    "shortcut": "Cmd+-",
+    "defaultShortcut": "Cmd+-",
+    "kind": "view",
+    "agent": "ui",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "needs the OpenLaser window (bridge mode)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "view.zoomPage",
+    "label": "Zoom to Page",
+    "menu": [
+      "Window"
+    ],
+    "shortcut": "Cmd+0",
+    "defaultShortcut": "Cmd+0",
+    "kind": "view",
+    "agent": "ui",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "needs the OpenLaser window (bridge mode)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "view.zoomSelection",
+    "label": "Zoom to Selection",
+    "menu": [
+      "Window"
+    ],
+    "shortcut": "Cmd+Shift+A",
+    "defaultShortcut": "Cmd+Shift+A",
+    "kind": "view",
+    "agent": "ui",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "needs the OpenLaser window (bridge mode)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "view.pan",
+    "label": "Pan",
+    "menu": [],
+    "shortcut": "Space",
+    "defaultShortcut": "Space",
+    "kind": "view",
+    "agent": "ui",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "needs the OpenLaser window (bridge mode)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "view.cameraBackground",
+    "label": "Camera Background",
+    "menu": [
+      "Window"
+    ],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "ui",
+    "params": "{} (toggle; the shell draws the calibrated feed under the design)",
+    "enabled": false,
+    "disabledReason": "needs the OpenLaser window (bridge mode)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "window.show",
+    "label": "Show Window",
+    "menu": [],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "view",
+    "agent": "ui",
+    "params": "{panel, visible}",
+    "enabled": false,
+    "disabledReason": "needs the OpenLaser window (bridge mode)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`window.show`.",
+      "properties": {
+        "panel": {
+          "description": "Panel id: \"cuts\", \"laser\", \"move\", \"console\", \"library\", \"camera\", \"preview\", \"shapeProperties\", \"undoHistory\".",
+          "type": "string"
+        },
+        "visible": {
+          "description": "Show or hide it.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "panel",
+        "visible"
+      ],
+      "title": "WindowParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "preview.open",
+    "label": "Preview",
+    "menu": [
+      "Window"
+    ],
+    "shortcut": "Alt+P",
+    "defaultShortcut": "Alt+P",
+    "kind": "view",
+    "agent": "ui",
+    "params": "{}",
+    "enabled": false,
+    "disabledReason": "needs the OpenLaser window (bridge mode)",
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`{}`: the command takes no params.",
+      "title": "NoParams",
+      "type": "object"
+    }
+  }
+]

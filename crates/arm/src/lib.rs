@@ -1,8 +1,11 @@
 //! ARM minting (SPEC §3.9; owned by WP3, red zone).
 //!
 //! Only a human can ARM (SPEC §1.3 rule 4). The constructors of [`HumanConfirm`] and of the witnesses are clippy
-//! `disallowed-methods` outside one file each (§2.3 rule 11). WP0 stubs fail closed: `mint` and `tty_nonce` refuse.
-//! `testing` (feature `test-witness`, in `src/mint.rs`) is WP0's and real.
+//! `disallowed-methods` outside one file each (§2.3 rule 11), and this crate's normal reverse dependencies are
+//! exactly {`openlaser-human`, `openlaser-hw`} (§2.3 rule 4). [`mint`] binds the token to the plan fingerprint, the
+//! confirmed bytes (`bytes_hash`, S22), the machine and the session, for 60 s, and only after a human-originated,
+//! executed, recent frame of the same job (frame ⊇ burn, §4.6 mechanism 5).
+//! `testing` (feature `test-witness`, in `src/mint.rs`) is WP0's.
 #![forbid(unsafe_code)]
 
 #[cfg(all(feature = "test-witness", not(debug_assertions)))]
@@ -10,7 +13,7 @@ compile_error!("openlaser-arm: the `test-witness` feature is test-only (dev-depe
 
 mod mint;
 
-pub use mint::{mint, tty_nonce};
+pub use mint::{ARM_TEXT, CONFIRM_MAX_AGE, TTY_NONCE_RANGE, mint, tty_nonce};
 pub use openlaser_types::{ArmToken, EmissionSummary, FrameReceipt, MonoTime, Refusal, SessionId};
 
 /// Proof that a human confirmed. (no Clone) Constructors are clippy disallowed-methods outside one file each.
@@ -64,3 +67,7 @@ impl HumanConfirm {
 /// Dev-dependency only; `compile_error!` without debug_assertions. Lives in `src/mint.rs` (SPEC §3.0).
 #[cfg(feature = "test-witness")]
 pub use mint::testing;
+
+#[cfg(test)]
+#[cfg(feature = "test-witness")]
+mod tests;
