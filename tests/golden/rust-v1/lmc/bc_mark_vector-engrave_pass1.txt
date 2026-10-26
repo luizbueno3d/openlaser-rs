@@ -1,4 +1,4 @@
-# rust-v1 CANDIDATE (unsigned, SPEC S15 / D13)
+# rust-v1 (signed 2026-10-26 for controlled hardware validation, SPEC S15 / D13)
 # bc_mark_vector-engrave_pass1; millimetre inputs: t1_lmc/v1/bc_mark_vector-engrave_pass1.json
 # Includes all 256 slots per packet, including explicit EOL and padding.
 packet 0 sha256=7088b032f60345d566a7f285bbf531d79d0c9d2bbbc3ca0d0e888241e25c5369 commands=256

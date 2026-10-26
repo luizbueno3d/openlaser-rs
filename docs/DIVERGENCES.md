@@ -1,12 +1,13 @@
 # Intentional divergences: shipping Rust vs the Python oracle
 
-> **Status: UNSIGNED.** Every line below is a proposal Luiz may veto. Nothing here is frozen until Luiz signs at
-> decision D13 (PLAN D13, SPEC S15, §9 item 11); only then do the `rust-v1` candidates move from
-> `tests/golden/rust-v1-candidate/` to `tests/golden/rust-v1/`.
+> **Status: D1–D11 SIGNED by Luiz on 2026-10-26, for controlled hardware validation only** (decision D13, PLAN D13,
+> SPEC S15, §9 item 11). This approves the protocol changes in §3 so the bench sessions of `HARDWARE.md` can run. It
+> does **not** declare the implementation hardware-safe: that is decided by the HIL results, and the open risks are
+> listed in `HARDWARE.md` § Remaining safety risks. The `rust-v1` candidates are frozen in `tests/golden/rust-v1/`.
 
 Written by WP0 from SPEC §5.6 (revision 2) and `tests/golden/README.md`, completed by the integrator at I1 from the
-rust-v1 candidate listings: `tests/golden/rust-v1-candidate/lmc/*.txt` (every packet of every T1 scenario, all 256
-slots, with a decoded listing) and `tests/golden/rust-v1-candidate/session/*.json` (the driver's wire stream on a
+rust-v1 listings (frozen 2026-10-26 from the candidates): `tests/golden/rust-v1/lmc/*.txt` (every packet of every T1 scenario, all 256
+slots, with a decoded listing) and `tests/golden/rust-v1/session/*.json` (the driver's wire stream on a
 READY FakeLmc).
 
 `py-compat` (test-only, SPEC §5.5) reproduces oracle **v0** (`6aed8ff`) exactly. Shipping packets are compared with
@@ -37,7 +38,7 @@ show (each OM layer-pass ran on a fresh GP controller): `mark_box10` 1957, `dot_
 ## 2. What the session looks like (rust-v1 session candidates vs the oracle streams)
 
 The oracle streams (`t1_lmc/v0|v1/*.json`) are one job per process: open, init, job, abort, close. The shipping
-session (`tests/golden/rust-v1-candidate/session/connect_frame_box10_mark_box10.json`) is one connection:
+session (`tests/golden/rust-v1/session/connect_frame_box10_mark_box10.json`) is one connection:
 
 ```
 connect     GetSerialNo GetVersion Reset WriteCorTable … EnableZ WriteAnalogPort1(0x07FF) EnableZ   (R05 §1.4, once)
@@ -71,9 +72,9 @@ framing, streaming, a full buffer, a packet in flight and BUSY (`t6_stop_p99_und
 | D4 | One session per connection: init (`GetSerialNo` … `EnableZ`, incl. `Reset`) once per connection; no per-job abort, close or USB reset | per job (v0, v1) | session candidates (§2) | PLAN §3.3 |
 | D5 | MO close and port-off only after BUSY clears; no wait ever proceeds on a deadline (a progress-aware watchdog stops a stuck board instead); abort only on stop or fault | v0: 3 s wait cap, MO closed at +3 s, StopExecute at +6 s | T6 `t6_busy_20s_completes_without_mo_close` | B1 |
 | D6 | The abort's dummy end-of-list packet goes out only if READY within 50 ms; its `ExecuteList` only if no list is executing (OM v1 `_safe_abort`); always MO(0) and **WritePort(0)** at the end | v0 sent it unconditionally and left the red-light bit set (`WritePort(0x0100)` after a frame) | `frame_box10`, `bc_frame` final `WritePort`; T6 `t6_abort_no_write_while_not_ready`, `t6_abort_mid_list_sends_no_execute_list` | B2, rev 2 |
-| D7 | An in-flight packet is completed before a stop (`cancel_all` only on overrun, flagged `possible_desync`) | — | T6 `t6_inflight_packet_completed_before_stop_execute` | PLAN §3.5 |
+| D7 | An in-flight packet is completed before a stop (`cancel_all` only on overrun, flagged `possible_desync`) | — | T6 `t6_inflight_packet_completed_before_stop_execute`; stop bound: see Sign-off, D7 | PLAN §3.5 |
 | D8 | Frame Loop sends one complete list per pass and counts a pass only after the board reports !BUSY | GP's FrameLoop appended to one endless list (never captured) | `*_loop_pass` candidates; T6 `t6_frame_receipt_only_after_executed_pass` | S20, rev 2 |
-| D9 | `ExecuteList` may come before the 3rd packet when the run-ahead window fills or READY drops; packet bytes unchanged, only the single-command order differs | GP waits for the 3rd packet | T6 `t6_slow_packets_execute_without_deadlock`, `t6_buffer_depth_1_and_2_complete` | SPEC §5.3, rev 2 |
+| D9 | `ExecuteList` may come before the 3rd packet when the run-ahead window fills or READY drops; packet bytes unchanged, only the single-command order differs | GP waits for the 3rd packet | T6 `t6_slow_packets_execute_without_deadlock`, `t6_buffer_depth_1_and_2_complete`; ordering and underrun: see Sign-off, D9 | SPEC §5.3, rev 2 |
 | D10 | Zero delays keep the `0x8000` sign word (`delay_word(0) = (0, 0x8000)`); the parameter cache resets at every list start, so every list carries the full parameter block | same as GP (kept on purpose until H9) | every list | GOLD item 9 |
 | D11 | (I1) The MO settle is rounded **up** to 10 µs (`ceil`), so the board never waits less than the profile says | OM truncated (`int()`): up to 10 µs shorter | only a settle that is not a multiple of 10 µs; the built-in 8000 µs is `DelayTime(800)` either way | WP3 follow-up |
 
@@ -129,6 +130,55 @@ Each B1–B10 test was mutation-checked at I1 (fix reverted locally, test fails,
 
 ## Sign-off
 
-- [ ] Luiz has read every row, vetoed or accepted each (SPEC §9 item 11 for D2, D3, D6, D8, D9), and signed:
-      name, date, oracle commits (v0 `6aed8ff`, v1 `5f7aa63`), rust-v1 candidate commit (the last commit touching
-      `tests/golden/rust-v1-candidate/`: `git log -1 -- tests/golden/rust-v1-candidate`).
+- [x] **D1–D11 (§3) approved by Luiz Bueno, 2026-10-26**, in his words "as the proposed protocol changes for
+      hardware validation … not for declaring the implementation hardware-safe".
+      - Oracle commits: v0 `6aed8ffa8be5a938d195bf35198cfd168bb07f4e`, v1 `5f7aa635ad4bf9ab0bd6592c4e9754909d6dd4bf`.
+      - rust-v1 candidate commit: `7128a6f21cee83beec99fa0eade89cfd2b7cfc8e` (the last commit touching
+        `tests/golden/rust-v1-candidate/`). Frozen into `tests/golden/rust-v1/` with every packet, hex word and sha256
+        unchanged; only the first header line of each `lmc/*.txt` and `meta.tier` of each `session/*.json` changed.
+        Pinned by `crates/lmc/tests/rust_v1.rs` and `crates/driver/tests/rust_v1_session.rs` (byte for byte) and by
+        `cargo xtask golden-verify` (sha256 and size in `tests/golden/manifest.json`; an unlisted file fails).
+      - Conditions attached to the approval: hardware access stays manual (Luiz at the machine, `openlaser-hw` behind
+        the TTY ARM; no AI agent may build the `hw` feature, open the board or activate the laser), and D7/D9 were
+        verified before any physical test (below).
+- [ ] §4–§6 (refusals, import/profile/confirmation, bug-fix map) are not part of this signature. None of them changes
+      a byte in the frozen scenarios; they stay documented behaviour, reviewed with the HIL results.
+
+### D7 and D9: verification before physical testing (2026-10-26)
+
+**D7, bounded stop latency.** Every wait of the driver thread is a ≤ 20 ms slice that checks the stop latch
+(`MAX_SLICE`; the real USB wire's `poll_single`/`poll_packet` cap each wait at 20 ms and `submit_*` never block).
+From the stop request:
+- **StopExecute** is written after ≤ 20 ms to see the stop + ≤ 20 ms in-flight grace. On the real wire add
+  ≤ 2 × 20 ms `CANCEL_COLLECT` when the packet had to be cancelled. So the worst case is ≤ 80 ms; it is ≤ 40 ms in
+  the simulator.
+- **MO(0)** follows StopExecute after ≤ 60 ms (the 50 ms abort transfer cap, polled in 20 ms slices), even when the
+  board does not answer.
+- **The whole sequence** is ≤ 40 ms + the 400 ms `EMERGENCY_BUDGET`.
+
+Pinned by:
+- `stop_at_every_wire_event_leaves_mo_closed_and_ports_zero`: StopExecute ≤ 40 ms after a stop at every wire event of
+  a job; the whole stop < 100 ms on a responsive board.
+- `stop_execute_and_mo_close_are_bounded_on_the_worst_path`: a stalled in-flight packet plus a board that goes mute.
+- `a_wedged_board_still_gets_mo_close_and_ports_zero_within_the_watchdog`.
+- T6 `t6_stop_p99_under_100ms_all_states` (real time, p99 ≤ 100 ms, worst ≤ 250 ms).
+
+The 250 ms acceptance in HARDWARE.md is measured on the bench, not assumed.
+
+**D9, no premature execution and no buffer overrun.**
+- `ExecuteList` is sent once per list. It follows the prelude's `Fiber_SetMo(1)`, every packet written so far having
+  completed its transfer, and a `SetEndOfList` with no other write in between. So the board is never told to run a
+  partial or unterminated list. Pinned by `execute_list_only_follows_a_completed_and_terminated_packet` over buffer
+  depths 1/2/3/8, slow packets and 1- and 2-packet lists.
+- No byte is written unless the most recent status read showed READY (`writes_while_not_ready == 0` in every session
+  and T6 test).
+- The run-ahead window caps what the board holds at 3 packets and 2 s
+  (`run_ahead_window_caps_packets_and_seconds`, `t6_run_ahead_cap_packets_and_seconds`).
+
+**D9, underrun.** Software cannot rule out an underrun. If the host is descheduled longer than the board's queue
+(≤ 2 s, often only a few hundred ms), the board runs dry mid-list:
+- `a_host_stall_that_starves_the_board_is_survived_or_stops_the_board` shows the host side is safe. A 1 s stall is
+  survived with no write while not READY, no second `ExecuteList` and MO(0) only after BUSY cleared. A 5 s stall
+  trips the watchdog, and the emergency stop follows.
+- What the real board does while dry (holds with the laser off and resumes on the next packet, as the simulator
+  assumes) is **unverified**: `HARDWARE.md` item H-UR, a red-light-only bench test.

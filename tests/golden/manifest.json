@@ -18,15 +18,30 @@
   "dxf/businessCard.dxf": {"sha256":"67b5cd7dcf6ef10d27f1f2274c1e1ba8c970d35d3a007b09753cdad900a9265a","bytes":458199,"copied_from":"~/Documents/Playground/tests/DXF/businessCard.dxf"}
  },
  "totals": {
-  "files": 168,
-  "bytes": 11458056,
+  "files": 182,
+  "bytes": 13449565,
   "t0_numeric": {"files":7,"bytes":5682900},
   "t1_lmc": {"files":132,"bytes":1159144},
   "t2_gcode": {"files":26,"bytes":3363150},
   "t3_hatch": {"files":1,"bytes":956679},
-  "t4_import": {"files":2,"bytes":296183}
+  "t4_import": {"files":2,"bytes":296183},
+  "rust-v1": {"files":14,"bytes":1991509,"signed":"Luiz, 2026-10-26, D13: controlled hardware validation only","from_candidate_commit":"7128a6f"}
  },
  "files": {
+  "rust-v1/lmc/README.md": {"sha256":"eedd47f725d8daa533fa028222cfdb4e94f5768e682c0606717c2656322921e2","bytes":1337},
+  "rust-v1/lmc/bc_frame.txt": {"sha256":"63c59d26ed8bab3081dadc15a24e871396b9b4d3fc8f8bad752c21b5afe2165a","bytes":1247765},
+  "rust-v1/lmc/bc_frame_loop_pass.txt": {"sha256":"cf6693fc5d5623dc42a7b9f715b87c7f4052f1f58b28c0fe75c1ba36bd5c66a2","bytes":212734},
+  "rust-v1/lmc/bc_mark_raster_pass1.txt": {"sha256":"18ba494a3e9db9b520b4f7c8820b8ab23522f9bc39d3336c6456a7862b425025","bytes":134147},
+  "rust-v1/lmc/bc_mark_vector-engrave_pass1.txt": {"sha256":"d9ec41585869e168f8eae03df769a0624747315025828add53e31d78721a558f","bytes":102044},
+  "rust-v1/lmc/dot_test.txt": {"sha256":"c3dd5ee149b16b34d9abd4c09af3f6c5f59077f3dfd3e2157d53c5b974c795e2","bytes":7360},
+  "rust-v1/lmc/frame_box10.txt": {"sha256":"25cd57f3b68c4c5880ad38d190b2c047fe641a3f87163f1640376d796f1d3cea","bytes":46021},
+  "rust-v1/lmc/frame_box10_loop_pass.txt": {"sha256":"7acb3495519a8e5a17207bf69a534836adc405c5fa6d9feda7e6f3cffa37240a","bytes":7335},
+  "rust-v1/lmc/line_test.txt": {"sha256":"2b7faafce232028346fc9f76acaeae2eb07ba9475b4f7267af48942ff25ae3c9","bytes":7366},
+  "rust-v1/lmc/long_job.txt": {"sha256":"5fda2e4516feaaa716b0266ce141fc5d60282694a1d7f305548fece5cc623d71","bytes":152011},
+  "rust-v1/lmc/mark_box10.txt": {"sha256":"a23c79d295717b55c949cd82e8b856373c016a5cd1362127512e652577fdd6aa","bytes":7500},
+  "rust-v1/session/README.md": {"sha256":"291afedc4b5fd86d914e8fc8bf8b218fe8c1d355c4142c213a7674056668a957","bytes":1740},
+  "rust-v1/session/connect_frame_box10.json": {"sha256":"445b4a184c4f7feb8ab30a4137d17eef5728453c222d96326de6691bce0950fb","bytes":30952},
+  "rust-v1/session/connect_frame_box10_mark_box10.json": {"sha256":"d017c4b96e3489d5bf212818ef5f55e68d367c08ced85a4c64b2c1d500bbdfba","bytes":33197},
   "t0_numeric/delay_word.json": {"sha256":"e641383a230473b95a86d4a1f30f071eba7a9547b68caac01f3370cff081d628","bytes":77968},
   "t0_numeric/distance_word.json": {"sha256":"6e8869db12ac2a8f04bedd5a98fca0806d5147d7bb38e379861b3854e613c628","bytes":375024},
   "t0_numeric/frequency_to_period.json": {"sha256":"1e7963074dfb012f4090f6daad74655cb606d15b12c8f5b641f66a9cafa42b04","bytes":870277},

@@ -1866,7 +1866,7 @@
   "meta": {
     "generator": "crates/driver/tests/rust_v1_session.rs",
     "schema": "openlaser-golden/1",
-    "tier": "rust-v1-candidate"
+    "tier": "rust-v1"
   },
   "scenario": "connect_frame_box10"
 }

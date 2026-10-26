@@ -342,10 +342,17 @@ def build(args, out_root: Path) -> dict:
         "worker_result": "every worker: self-test blocked 6 USB paths; 0 USB libraries loaded; 0 blocked attempts outside the self-test",
     }
 
+    # The signed rust-v1 goldens (D13) are not generated here: carry their entries over from the committed manifest.
+    committed_manifest = common.read_json(GOLDEN / "manifest.json") if (GOLDEN / "manifest.json").exists() else {}
+    for k, v in committed_manifest.get("files", {}).items():
+        if k.startswith(RUST_V1 + "/"):
+            written[k] = v
     totals = {"files": len(written), "bytes": sum(v["bytes"] for v in written.values())}
     for tier, d in TIER_DIRS.items():
         tb = [v["bytes"] for k, v in written.items() if k.startswith(d + "/")]
         totals[d] = {"files": len(tb), "bytes": sum(tb)}
+    if RUST_V1 in committed_manifest.get("totals", {}):
+        totals[RUST_V1] = committed_manifest["totals"][RUST_V1]
     summary["totals"] = totals
     manifest = {
         "meta": {**base_meta, "om_git_sha": shas, "om_refs": refs},
@@ -360,6 +367,9 @@ def build(args, out_root: Path) -> dict:
     else:
         summary["temp_dir"] = str(tmp)
     return summary
+
+
+RUST_V1 = "rust-v1"
 
 
 def _json_counts(body: dict) -> dict:

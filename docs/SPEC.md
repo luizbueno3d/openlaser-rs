@@ -3218,8 +3218,8 @@ driver and what must hold before the first real burn. **Luiz runs every step at 
 ### 8.1 Before the USB cable goes back in (software gates)
 
 - [ ] I1, I2 and I3 green; `cargo xtask ci` green on `main`.
-- [ ] Luiz has read and signed `docs/DIVERGENCES.md` (D13); the rust-v1 candidate streams are frozen into
-      `tests/golden/rust-v1/` and pinned by a test.
+- [x] Luiz has read and signed `docs/DIVERGENCES.md` (D13); the rust-v1 candidate streams are frozen into
+      `tests/golden/rust-v1/` and pinned by a test. (2026-10-26: D1–D11, for controlled hardware validation only.)
 - [ ] T6 summary reviewed (stop p99 and worst case), the B1–B10 mutation checks recorded, second-model reviews
       of every red-zone package done.
 - [ ] The prototype's HIL-P is done (PLAN §11): **H0 answered** (E-stop and key switch cut the source), oracle-v1

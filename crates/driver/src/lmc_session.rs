@@ -1392,6 +1392,119 @@ mod tests {
             assert_eq!((st.mo, st.port), (false, 0), "event {k}");
             assert!(report.confirmed, "event {k}: {report:?}");
             assert!(report.elapsed < Duration::from_millis(100), "event {k}: {:?}", report.elapsed);
+            // D7: wherever the stop lands, StopExecute leaves within one slice to see it + the in-flight grace.
+            let tripped = rig.latch.tripped_at().expect("the hook tripped the latch");
+            let stop_at = st.log.iter().find_map(|e| match e {
+                Ev::Single { at, words } if words[0] == STOP_EXECUTE => Some(*at),
+                _ => None,
+            });
+            let lag = stop_at.expect("StopExecute sent").saturating_since(tripped);
+            assert!(lag <= MAX_SLICE + IN_FLIGHT_GRACE, "event {k}: StopExecute {lag:?} after the stop");
+        }
+    }
+
+    #[test]
+    fn stop_execute_and_mo_close_are_bounded_on_the_worst_path() {
+        // D7, worst case: the stop lands while packet #2 is in flight, that packet never completes and the board
+        // stops answering at the same moment. Trip → StopExecute ≤ one slice to see the stop + the 20 ms in-flight
+        // grace (the real USB wire adds ≤ 2 × 20 ms CANCEL_COLLECT for cancel_all and drain_replies);
+        // StopExecute → MO(0) ≤ the 50 ms abort transfer cap, checked in 20 ms slices (so ≤ 60 ms); the whole sequence
+        // ≤ grace + slice + its 400 ms budget.
+        let rig = Rig::new();
+        let latch = Arc::clone(&rig.latch);
+        let board = Board::new(rig.clock.clone(), Faults { buffer_depth: 8, packet_stalls_from: Some(2), ..Faults::default() });
+        let state = Arc::clone(&board.state);
+        let board = board.with_hook(Box::new(move |ev| {
+            if matches!(ev, Ev::Packet { id: 2, .. }) {
+                state.lock().unwrap().faults.mute = true;
+                latch.trip();
+            }
+        }));
+        let mut s = Session::new(board, SessionCfg::from_machine(&machine()).unwrap(), Pkt { id: 9999, exec: Duration::ZERO });
+        let (pk, est) = packets(3, Duration::from_millis(100));
+        assert_eq!(run_one_list(&rig, &mut s, &pk, &est), Err(Halt::Stopped));
+        let report = s.emergency(&rig.cx());
+        let tripped = rig.latch.tripped_at().unwrap();
+        let st = s.wire.state.lock().unwrap();
+        let at = |i: usize| match &st.log[i] {
+            Ev::Single { at, .. } => *at,
+            other => panic!("{other:?}"),
+        };
+        let stop = st.log.iter().position(|e| e.op() == Some(STOP_EXECUTE)).unwrap();
+        let mo0 = stop + st.log[stop..].iter().position(|e| matches!(e, Ev::Single { words, .. } if words[0] == FIBER_SET_MO && words[1] == 0)).unwrap();
+        assert_eq!(mo0, stop + 1, "MO(0) is the very next write");
+        let to_stop = at(stop).saturating_since(tripped);
+        let to_mo = at(mo0).saturating_since(tripped);
+        assert!(to_stop <= MAX_SLICE + IN_FLIGHT_GRACE, "StopExecute {to_stop:?} after the stop");
+        assert!(to_mo <= MAX_SLICE + IN_FLIGHT_GRACE + ABORT_TRANSFER_CAP + MAX_SLICE, "MO(0) {to_mo:?} after the stop");
+        assert!(report.elapsed <= MAX_SLICE + IN_FLIGHT_GRACE + EMERGENCY_BUDGET, "{:?}", report.elapsed);
+        assert!(report.possible_desync && !report.confirmed, "{report:?}");
+        assert!(!st.log[stop..].iter().any(|e| matches!(e, Ev::Packet { .. })), "a mute board is never READY: no dummy packet");
+    }
+
+    #[test]
+    fn execute_list_only_follows_a_completed_and_terminated_packet() {
+        // D9 cannot execute early: whichever trigger sends it (the 3rd packet, a full window, READY dropping, the
+        // last packet), ExecuteList comes once per list, after the prelude's Fiber_SetMo(1), after every packet sent
+        // so far has completed its transfer, and right after a SetEndOfList with no other write in between.
+        let cases: [(usize, u32, u64); 7] = [(1, 6, 100), (2, 6, 100), (3, 6, 100), (8, 6, 100), (8, 9, 7200), (8, 1, 50), (8, 2, 50)];
+        for (depth, n, ms) in cases {
+            let case = format!("depth {depth}, {n} × {ms} ms");
+            let rig = Rig::new();
+            let mut s = rig.session(Faults { buffer_depth: depth, packet_latency: Duration::from_millis(3), ..Faults::default() });
+            let (pk, est) = packets(n, Duration::from_millis(ms));
+            run_one_list(&rig, &mut s, &pk, &est).unwrap();
+            let st = s.wire.state.lock().unwrap();
+            let execs: Vec<usize> = st.log.iter().enumerate().filter(|(_, e)| e.op() == Some(EXECUTE_LIST)).map(|(i, _)| i).collect();
+            assert_eq!(execs.len(), 1, "{case}");
+            let exec = execs[0];
+            let mo1 = st.log.iter().position(|e| matches!(e, Ev::Single { words, .. } if words[0] == FIBER_SET_MO && words[1] == 1)).unwrap();
+            assert!(mo1 < exec, "{case}");
+            let before = &st.log[..exec];
+            let sent = before.iter().filter(|e| matches!(e, Ev::Packet { .. })).count();
+            let done = before.iter().filter(|e| matches!(e, Ev::PacketDone { .. })).count();
+            assert!(sent >= 1 && sent == done, "{case}: {sent} packets sent, {done} completed before ExecuteList");
+            let last_write = before.iter().rposition(|e| matches!(e, Ev::Packet { .. }) || e.op().is_some_and(|op| op != GET_VERSION)).unwrap();
+            assert_eq!(before[last_write].op(), Some(SET_END_OF_LIST), "{case}");
+            assert_eq!(st.writes_while_not_ready, 0, "{case}");
+        }
+    }
+
+    #[test]
+    fn a_host_stall_that_starves_the_board_is_survived_or_stops_the_board() {
+        // D9 underrun: the host is descheduled right after packet #4 (at its SetEndOfList, so the completed transfer
+        // is not the progress that ends the stall) and the board runs dry mid-list. A short stall is
+        // survived: no fault, no write while not READY, one ExecuteList, MO(0) only after BUSY cleared, every packet
+        // run. A stall longer than the watchdog budget faults (fail-safe: the runtime's emergency stop follows).
+        // What a real board does while dry (holds with the laser off, resumes on the next packet) is hardware item
+        // H-UR in HARDWARE.md, not provable here: this sim board resumes.
+        for (stall, survives) in [(Duration::from_secs(1), true), (Duration::from_secs(5), false)] {
+            let rig = Rig::new();
+            let clock = rig.clock.clone();
+            let eols = AtomicU32::new(0);
+            let board = Board::new(rig.clock.clone(), Faults { buffer_depth: 3, ..Faults::default() }).with_hook(Box::new(move |ev| {
+                if ev.op() == Some(SET_END_OF_LIST) && eols.fetch_add(1, Ordering::SeqCst) == 3 {
+                    clock.advance(stall);
+                }
+            }));
+            let mut s = Session::new(board, SessionCfg::from_machine(&machine()).unwrap(), Pkt { id: 9999, exec: Duration::ZERO });
+            let (pk, est) = packets(8, Duration::from_millis(100));
+            let res = run_one_list(&rig, &mut s, &pk, &est);
+            if survives {
+                assert_eq!(res, Ok(()), "{stall:?}");
+            } else {
+                assert!(matches!(res, Err(Halt::Fault(DriverError::Watchdog { .. }))), "{stall:?}: {res:?}");
+                let report = s.emergency(&rig.cx());
+                assert!(report.confirmed, "{report:?}");
+            }
+            let st = s.wire.state.lock().unwrap();
+            assert_eq!(st.writes_while_not_ready, 0, "{stall:?}");
+            assert_eq!(st.mo_closed_while_busy, 0, "{stall:?}");
+            assert_eq!(st.log.iter().filter(|e| e.op() == Some(EXECUTE_LIST)).count(), 1, "{stall:?}");
+            if survives {
+                assert_eq!(st.log.iter().filter(|e| matches!(e, Ev::Packet { .. })).count(), 8);
+                assert!(!st.busy(rig.clock.now()) && !st.mo, "the list ran to the end and MO closed");
+            }
         }
     }
 

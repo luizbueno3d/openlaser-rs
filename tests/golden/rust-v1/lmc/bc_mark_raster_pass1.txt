@@ -1,4 +1,4 @@
-# rust-v1 CANDIDATE (unsigned, SPEC S15 / D13)
+# rust-v1 (signed 2026-10-26 for controlled hardware validation, SPEC S15 / D13)
 # bc_mark_raster_pass1; millimetre inputs: t1_lmc/v1/bc_mark_raster_pass1.json
 # Includes all 256 slots per packet, including explicit EOL and padding.
 packet 0 sha256=65ae13e80822ad1fae35974d5f9d914ae1529bc7b2c0d0b798c2535b5a8fc607 commands=256

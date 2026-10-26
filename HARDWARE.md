@@ -3,20 +3,31 @@
 This page is for Luiz, at the machine. **No AI agent runs any of this.** It is the order from `docs/SPEC.md` §8
 (items H0–H29 are explained in `docs/research/PLAN.md` §5.2). Tick each box and add a line to the log at the bottom.
 
+> **Status (2026-10-26):**
+> - **What is approved:** the D1–D11 protocol changes, for **controlled hardware validation** only
+>   (`docs/DIVERGENCES.md` § Sign-off). The reference bytes are frozen in `tests/golden/rust-v1/`. Before any physical
+>   test, D7 (bounded stop latency) and D9 (no premature execution, no overrun) were verified in software.
+> - **What is not established:** the implementation has **not** been declared hardware-safe. That is what these
+>   sessions find out.
+> - **Read before the cable goes in:** [Remaining safety risks](#remaining-safety-risks) and
+>   [Stop the session if](#stop-the-session-if).
+
 ## Rules for every session
 
 - Close every AI agent session (Claude, Codex, Devin) before the USB cable goes in. While agents work, the laser's
   USB stays **unplugged**.
 - Eyewear on. E-stop and key switch within reach of where you stand. Scrap material only. Stop after 2 hours.
-- MacBook lid open; keep the terminal (or the OpenLaser window) focused: **Esc, Space or Ctrl-C stop the machine**.
+- MacBook lid open (closing it sleeps the Mac mid-job), on power, other heavy apps closed (stop timing depends on an
+  idle host). Keep the terminal (or the OpenLaser window) focused: **Esc, Space or Ctrl-C stop the machine**.
+- After every stop, copy the printed `stop …: … in N ms (MO closed: …, ports at 0: …)` line into the log.
 - Start every session with `openlaser-hw bench start`. The software caps the first emission of a session at
   **10 % power**.
 - Record a USB trace for every step (`--trace <file>`), and keep the files: they are how problems get diagnosed.
 
 ## 0. One-time setup (before the cable goes in)
 
-- [ ] **Read and sign `docs/DIVERGENCES.md`.** It lists how the Rust bytes differ from the Python OpenLaser and why.
-      Tell Claude when you sign; Claude then freezes the reference bytes (`tests/golden/rust-v1/`).
+- [x] **`docs/DIVERGENCES.md` signed** (D1–D11, 2026-10-26, controlled hardware validation only). The reference bytes
+      are frozen in `tests/golden/rust-v1/`; a hardware trace of dot/line/box10/mark_box10 diffs against them.
 - [ ] **H0, E-stop and key switch.** With the source powered and the key on, press the E-stop: the source must
       power down (LEDs/fan off), not just the controller. Release, then turn the key off: same check. Write down what
       each one actually cuts.
@@ -53,15 +64,24 @@ olhw bench start
 
 - [ ] **Box loop + stops:** `olhw frame --builtin box10 --loop --trace hil1-box.jsonl`. Stop it with Esc 10 times
       (restart in between). Pass: every stop ≤ 250 ms, no USB resets.
-- [ ] **Long frame:** a large Frame Once that runs more than 8 s. Pass: it runs to the end (the old Python version cut
-      long jobs at 3 s).
+- [ ] **Long frame:** `olhw frame card.olp --trace hil1-long.jsonl` (the business card's Frame Once is 75 packets).
+      Pass: it runs to the end (the old Python version cut long jobs at 3 s).
+- [ ] **H-UR, underrun (red light only, never with `--allow-emission`):** start the long frame again; from a second
+      terminal run `kill -STOP $(pgrep -n openlaser-hw); sleep 1; kill -CONT $(pgrep -n openlaser-hw)`. While the
+      program is frozen, Esc does nothing: the key switch and E-stop are the stop.
+      Note what the red pointer does during the freeze (holds still? keeps going? goes off?) and after it (resumes
+      the outline? stops?). Then repeat with `sleep 5`: the program should report a watchdog fault and stop the board
+      (if the freeze happened to land on a packet transfer it may carry on instead; note which).
+      Pass: no USB reset, the stop report says MO closed and ports at 0, and the trace shows no write while not
+      READY. If the outline does **not** resume after the 1 s freeze, write it down: real jobs could then end
+      incomplete (risk 2 below).
 - [ ] **Orientation:** `olhw frame --builtin f-shape --trace hil1-f.jsonl`. Pass: the "F" reads correctly from where
       you stand. If mirrored or rotated: `olhw profile set cal.negate.x true` (or `.y`, or `cal.swapXy true`) and
       repeat.
 - [ ] **Corners:** `olhw frame --builtin corners --extent 100`, then `--extent 110`. Pass: 100 mm traces, 110 mm is
       refused (work area ±100 mm on the 200 mm lens).
 - [ ] **Crash test:** during a red frame, kill the program (`kill -9` from another terminal). Note what the board
-      does.
+      does and for how long: this is what a crash mid-burn would do with the laser (risk 1 below).
 
 ## 4. HIL-2: first real burns (scrap, eyewear, start at 1 %)
 
@@ -82,6 +102,62 @@ olhw bench start
 - [ ] `~/AI/OpenLaser/.target/hw/debug/openlaser`, choose the **JPT M7 · USB** machine, import the business card,
       Frame (human click), Start → ARM dialog (check the power, kHz, ns and actual speed shown) → mark. 20 STOPs from
       the GUI. One MOPA colour test.
+
+## Stop the session if
+
+- Any stop prints `MO closed: false` or `ports at 0: false`, or "no StopReport … use the key switch / E-stop". Key off
+  first, then E-stop if needed.
+- Any stop prints a note with `possible desync` / `H23`. Turn the key off and power-cycle the controller before
+  anything else.
+- A stop takes more than 250 ms, there is a USB reset or disconnect, or a watchdog fault you did not cause.
+- Emission continues after Esc, or after the program exits.
+- Anything lands somewhere other than where the frame showed.
+
+Write it in the log and tell Claude. Do not retry the same step in the same session.
+
+## Remaining safety risks
+
+The software has been checked on a simulator, never on this board. These risks stay open until the sessions above
+close them:
+
+1. **Software stop is not a safety system.** The E-stop and key switch (H0) are the only stops that do not depend on
+   the Mac, USB and the board's firmware.
+   - **A crash keeps marking.** If the program dies mid-job (crash, `kill -9`, Force Quit, cable pull, Mac sleep),
+     MO stays open and the board runs what it already holds. That is at most 3 packets and about 2 s by the time
+     estimate, and one long slow packet can hold more. If the board runs slower than estimated, it is longer.
+   - **The first-emission cap is software-only.** The 10 % limit is a software check, as is every power refusal.
+2. **Underrun behaviour is unknown (H-UR).**
+   - **The board may run dry.** If the Mac stalls longer than the board's queue (a few hundred ms to 2 s), the board
+     runs out of work mid-list. The software side is tested: no early write, no extra ExecuteList, and a watchdog stop
+     after a long stall.
+   - **Unverified: does the laser stay off?** We have not seen whether the real board holds with the laser off and
+     then resumes. If it does not resume, a job can end incomplete without an error.
+3. **A cancelled packet can desync the board (H23).** If a stop has to cancel a half-sent packet, the board may read
+   later commands as packet data. Writes are gated on READY, so this needs a packet that takes more than 20 ms to send
+   (normally about 2 ms), but it is unmeasured. That is why `possible desync` means a power-cycle.
+4. **Stop timing is a simulator number.**
+   - **Simulator results:** StopExecute ≤ 40 ms after Esc (≤ 80 ms with a cancelled packet), MO(0) ≤ 60 ms later,
+     the whole stop < 100 ms.
+   - **Under load:** under heavy CPU load the real-time test measured p99 up to about 210 ms.
+   - **The bench decides:** the 250 ms pass mark is measured here, not assumed. Windows is untested.
+5. **Board behaviour the software only assumes.** These items are still unverified on hardware:
+   - H1 and H2: READY and BUSY semantics and the real buffer depth. The post-crash bound in risk 1 depends on them.
+   - H3: mirror settle and first-jump timing.
+   - H4: power, frequency and pulse width actually reaching the source.
+   - H12: USB configuration on macOS.
+   - H13: transfer timeouts.
+   - H14: the abort variants.
+   - H22: position feedback for the watchdog.
+   - H25 and H27: field size and calibration (1.1834) and the safe work area.
+6. **Agents.**
+   - **The rule:** no agent may activate the laser. The `openlaser-cli`/MCP surfaces have no emission path (checked
+     by `xtask deps`). In the GUI, an agent can at most request a frame, and that waits for your click. Only the human
+     ARM dialog can start a burn, and synthetic input cannot ARM.
+   - **What enforces it for Claude Code:** a hook blocks hardware builds and runs.
+   - **What enforces it for Codex and Devin:** only `AGENTS.md`. The real guard is physical: close every agent
+     session before the USB cable goes in, and build the `hw` binaries yourself.
+7. **The GUI's camera.** Opening the camera runs on the UI thread and can freeze the window; it is disabled while
+   framing or marking. Start the GUI from a terminal, so Ctrl-C there still stops the machine if the window hangs.
 
 ## Log
 

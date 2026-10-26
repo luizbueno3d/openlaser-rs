@@ -1,15 +1,16 @@
-# rust-v1 candidate: driver session streams (WP5)
+# rust-v1 golden: driver session streams (frozen)
 
 The wire event streams of the shipping LMC session (SPEC §5.3) on a READY FakeLmc (buffer depth 8, no latency, no
-faults), written by `crates/driver/tests/rust_v1_session.rs`:
+faults), checked by `crates/driver/tests/rust_v1_session.rs`. Fresh candidates for a re-review:
 
 ```sh
 OPENLASER_NO_HW=1 UPDATE_RUST_V1=1 cargo test -p openlaser-driver --test rust_v1_session
 ```
 
-and compared byte for byte by the same tests without `UPDATE_RUST_V1`. They are **candidates**: they become
-`tests/golden/rust-v1/` only after Luiz signs `docs/DIVERGENCES.md` (PLAN D13). Nothing here is used by
-`cargo xtask golden-verify` until then.
+Signed by Luiz on 2026-10-26 (PLAN D13, `docs/DIVERGENCES.md`) **for controlled hardware validation only; this is
+not a hardware-safety certification.** Frozen from the candidates of commit `7128a6f` (only `meta.tier` changed) and
+listed in `tests/golden/manifest.json`. The tests compare with these files on every run; `UPDATE_RUST_V1=1` writes a
+fresh candidate to `tests/golden/rust-v1-candidate/session/` for a new review and never touches this folder.
 
 | File | Scenario |
 | --- | --- |

@@ -1,4 +1,4 @@
-# rust-v1 CANDIDATE (unsigned, SPEC S15 / D13)
+# rust-v1 (signed 2026-10-26 for controlled hardware validation, SPEC S15 / D13)
 # frame_box10; millimetre inputs: t1_lmc/v1/frame_box10.json
 # Includes all 256 slots per packet, including explicit EOL and padding.
 packet 0 sha256=aae28ef4043935a6521537a7f0560f713bebcbeb3d3d4816d2b270713d49b1e6 commands=256

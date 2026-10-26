@@ -1,4 +1,4 @@
-# rust-v1 CANDIDATE (unsigned, SPEC S15 / D13)
+# rust-v1 (signed 2026-10-26 for controlled hardware validation, SPEC S15 / D13)
 # bc_frame_loop_pass; millimetre inputs: t1_lmc/v1/bc_frame.json
 # Includes all 256 slots per packet, including explicit EOL and padding.
 packet 0 sha256=4bbb1fd8b893ffab5b0695434a1d7804bbec851575586e033db1a3ad6c4bae45 commands=256

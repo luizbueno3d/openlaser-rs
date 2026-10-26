@@ -1,4 +1,4 @@
-# rust-v1 CANDIDATE (unsigned, SPEC S15 / D13)
+# rust-v1 (signed 2026-10-26 for controlled hardware validation, SPEC S15 / D13)
 # long_job; millimetre inputs: t1_lmc/v1/long_job.json
 # Includes all 256 slots per packet, including explicit EOL and padding.
 packet 0 sha256=39fe116b452826a0e38ee5d1d43216e6e99e7ab26a2ac125416a2636535091d7 commands=256
