@@ -1981,3 +1981,5 @@ fn trace_by_id_works_whatever_is_selected() {
     s.execute("edit.select", json!({ "ids": [rid] })).unwrap();
     assert_eq!(s.execute("tools.traceImage", json!({})).unwrap_err().code(), "bad_params");
 }
+
+mod material_test;

@@ -133,42 +133,48 @@ fn lay_out(
     Ok((path, fam, sty))
 }
 
-fn tools_text(s: &mut Session, p: TextParams) -> Result<Created, EngineError> {
-    const ID: &str = "tools.text";
+/// Builds the same cached text geometry for tools.text and project generators, without editing a document.
+pub(super) fn text_shape(s: &Session, id: &str, p: TextParams) -> Result<Shape, EngineError> {
     if !p.x_mm.is_finite() || !p.y_mm.is_finite() {
-        return Err(EngineError::bad(ID, "/xMm", "position must be finite"));
+        return Err(EngineError::bad(id, "/xMm", "position must be finite"));
     }
     if p.text.is_empty() {
-        return Err(EngineError::bad(ID, "/text", "the text is empty"));
+        return Err(EngineError::bad(id, "/text", "the text is empty"));
     }
     let height = p.height_mm.unwrap_or(10.0);
     let letter = p.letter_spacing_mm.unwrap_or(0.0);
     let line = p.line_spacing.unwrap_or(1.0);
-    let align = align_of(ID, p.align.as_deref())?;
-    let (outline, family, style) = lay_out(s, ID, &p.text, p.family.as_deref(), p.style.as_deref(), height, letter, line, align)?;
+    let align = align_of(id, p.align.as_deref())?;
+    let (outline, family, style) = lay_out(s, id, &p.text, p.family.as_deref(), p.style.as_deref(), height, letter, line, align)?;
     let layer: LayerKey = p.layer.unwrap_or(LayerKey::Color(0));
     let offset = Affine::translate(openlaser_geom::Vec2::new(p.x_mm, p.y_mm));
+    Ok(Shape {
+        id: ObjectId(0),
+        name: None,
+        layer,
+        xform: offset,
+        geom: Geom::Text(Arc::new(TextGeom {
+            text: p.text.clone(),
+            family,
+            style,
+            height_mm: height,
+            letter_spacing_mm: letter,
+            line_spacing: line,
+            align,
+            outline: Arc::new(outline),
+        })),
+        locked: false,
+        power_scale: FULL_POWER,
+        priority: 0,
+    })
+}
+
+fn tools_text(s: &mut Session, p: TextParams) -> Result<Created, EngineError> {
+    let mut shape = text_shape(s, "tools.text", p)?;
     s.edit(Label::new("Text"), None, move |project, sel| {
         let id = project.alloc_id().map_err(geomx::doc_error)?;
-        project.shapes.push(Arc::new(Shape {
-            id,
-            name: None,
-            layer,
-            xform: offset,
-            geom: Geom::Text(Arc::new(TextGeom {
-                text: p.text.clone(),
-                family,
-                style,
-                height_mm: height,
-                letter_spacing_mm: letter,
-                line_spacing: line,
-                align,
-                outline: Arc::new(outline),
-            })),
-            locked: false,
-            power_scale: FULL_POWER,
-            priority: 0,
-        }));
+        shape.id = id;
+        project.shapes.push(Arc::new(shape));
         sel.ids = vec![id];
         sel.key = Some(id);
         Ok(Created { ids: vec![id] })

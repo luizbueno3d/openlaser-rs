@@ -421,8 +421,8 @@ mod undo {
         "tools.traceImage",
     ];
 
-    /// `edit.copy` only writes the session clipboard: it changes no document and records no history step.
-    const NOT_UNDOABLE: [&str; 4] = ["file.new", "edit.undo", "edit.redo", "edit.copy"];
+    /// `file.new` and Material Test open new tabs; `edit.copy` changes only the session clipboard.
+    const NOT_UNDOABLE: [&str; 5] = ["file.new", "laserTools.materialTest", "edit.undo", "edit.redo", "edit.copy"];
 
     #[test]
     fn undo_roundtrip_every_edit_command() {

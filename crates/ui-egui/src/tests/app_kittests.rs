@@ -2748,3 +2748,37 @@ fn palette_tool_buttons_arm_without_dispatching() {
     h.run();
     assert_ne!(h.state().ui.selected_tool, "Weld Shapes");
 }
+
+#[test]
+fn material_test_menu_creates_three_by_three_in_a_new_document() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../text/tests/fonts");
+    h.state_mut().session.set_font_dirs(vec![dir]);
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let old_index = h.state().session.active_index().unwrap();
+    h.get_by_label("Laser Tools").click();
+    h.run();
+    let menu_item = h.query_all_by_label_contains("Material Test…").next().expect("material test menu row");
+    assert!(!menu_item.accesskit_node().is_disabled());
+    menu_item.click();
+    h.run();
+    assert!(h.state().ui.material_test.is_some());
+    // Edit the actual count widgets, then dispatch through Create.
+    for label in ["Rows count", "Columns count"] {
+        h.get_by_label(label).focus();
+        h.get_by_label(label).type_text("3");
+        h.key_press(egui::Key::Enter);
+        h.run();
+    }
+    assert_eq!(h.state().ui.material_test.as_ref().unwrap().rows.count, 3);
+    assert_eq!(h.state().ui.material_test.as_ref().unwrap().cols.count, 3);
+    h.get_by_label("Create").click();
+    h.run();
+    assert!(h.state().ui.material_test.is_none(), "{}", h.state().ui.status_message);
+    assert_eq!(h.state().session.active_index(), Some(old_index + 1));
+    let p = &h.state().session.active().unwrap().project;
+    assert_eq!(p.layers.order.len(), 10);
+    assert_eq!(p.shapes.iter().filter(|s| matches!(s.geom, openlaser_doc::Geom::Rect { .. })).count(), 9);
+    assert_eq!(p.layers.order.last(), Some(&LayerKey::Color(9)));
+}

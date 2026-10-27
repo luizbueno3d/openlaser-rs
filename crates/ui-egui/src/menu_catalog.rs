@@ -267,6 +267,7 @@ pub static CATALOG: &[Row] = &[
     r(LASER_TOOLS, "Repeat Marking…", None, "hw:laserTools.repeatMarking"),
     r(LASER_TOOLS, "Focus Test…", None, "laserTools.focusTest"),
     r(LASER_TOOLS, "Interval Test…", None, "laserTools.intervalTest"),
+    // Registered design generator: opens a settings draft, then creates a new project.
     r(LASER_TOOLS, "Material Test…", None, "laserTools.materialTest"),
     r(LASER_TOOLS, "Center Finder…", None, "hw:laserTools.centerFinder"),
     sep(LASER_TOOLS),

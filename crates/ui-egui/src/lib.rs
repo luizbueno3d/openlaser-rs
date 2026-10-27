@@ -16,6 +16,7 @@ mod cut_editor;
 mod dialogs;
 mod dock;
 mod icon_data;
+mod material_test;
 pub mod menu_catalog;
 pub mod node_edit;
 mod panels;

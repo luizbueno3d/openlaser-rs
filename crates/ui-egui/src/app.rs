@@ -35,6 +35,7 @@ pub struct UiState {
     pub anchor: u8,
     /// The Offset Shapes dialog's values (remembered between opens, like LightBurn).
     pub offset: Option<OffsetUi>,
+    pub(crate) material_test: Option<crate::material_test::MaterialTestUi>,
     /// The inline text editor: `Some` while a canvas text box is open (new text when `editing` is `None`,
     /// re-editing an existing shape when it is `Some(id)`).
     /// The Trace Image dialog while open.
@@ -332,6 +333,7 @@ impl Default for UiState {
             polygon_sides: 6,
             lock_ratio: true,
             offset: None,
+            material_test: None,
             trace: None,
             trace_defaults: None,
             nodes: None,
@@ -786,6 +788,11 @@ impl OpenLaserApp {
             "edit.selectNone" => {
                 self.ui.selected_tool = "Select";
                 self.execute_widget(id, serde_json::json!({}));
+            }
+            "laserTools.materialTest" => {
+                if let Some(m) = self.active_machine() {
+                    self.ui.material_test = Some(crate::material_test::MaterialTestUi::new(m));
+                }
             }
             "tools.offsetShapes" => self.ui.offset = Some(self.ui.offset.unwrap_or_default()),
             "tools.traceImage" => {
@@ -1297,7 +1304,18 @@ impl eframe::App for OpenLaserApp {
 
 /// Anything that opens a file dialog or replaces the document: refused while a machine is active (UI §7.2).
 pub(crate) fn opens_files(id: &str) -> bool {
-    matches!(id, "file.new" | "file.open" | "file.import" | "file.save" | "file.saveAs" | "file.export" | "file.saveMachineFile" | "file.openRecent")
+    matches!(
+        id,
+        "laserTools.materialTest"
+            | "file.new"
+            | "file.open"
+            | "file.import"
+            | "file.save"
+            | "file.saveAs"
+            | "file.export"
+            | "file.saveMachineFile"
+            | "file.openRecent"
+    )
 }
 
 pub(crate) fn state_requires_stop(state: &MachineState) -> bool {

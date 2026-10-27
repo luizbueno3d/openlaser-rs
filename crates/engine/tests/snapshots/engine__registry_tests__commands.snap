@@ -1,5 +1,6 @@
 ---
 source: crates/engine/tests/engine.rs
+assertion_line: 334
 expression: rows
 ---
 [
@@ -3448,6 +3449,218 @@ expression: rows
         "count"
       ],
       "title": "RepeatParams",
+      "type": "object"
+    }
+  },
+  {
+    "id": "laserTools.materialTest",
+    "label": "Material Test…",
+    "menu": [
+      "Laser Tools"
+    ],
+    "shortcut": null,
+    "defaultShortcut": null,
+    "kind": "edit",
+    "agent": "allowed",
+    "params": "{rows:{param,min,max,count}, cols:{param,min,max,count}, cellWMm?, cellHMm?, gapMm?, centerMm?, mode?, base?, labels?, labelPowerPct?, labelSpeedMmS?}; at most 29 cells with labels, 30 without; descending ranges allowed; creates a new project, never burns",
+    "enabled": true,
+    "disabledReason": null,
+    "needsDocument": false,
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "additionalProperties": false,
+          "properties": {
+            "frequencyKhz": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "intervalMm": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "passes": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "powerPct": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "qPulseNs": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "speedMmS": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "cellHMm": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cellWMm": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "centerMm": {
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "cols": {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "description": "1..=30. One sample uses min; descending ranges are allowed.",
+              "format": "uint8",
+              "maximum": 30,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max": {
+              "format": "double",
+              "type": "number"
+            },
+            "min": {
+              "format": "double",
+              "type": "number"
+            },
+            "param": {
+              "enum": [
+                "powerPct",
+                "speedMmS",
+                "frequencyKhz",
+                "qPulseNs",
+                "intervalMm",
+                "passes"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "param",
+            "min",
+            "max",
+            "count"
+          ],
+          "type": "object"
+        },
+        "gapMm": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "labelPowerPct": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "labelSpeedMmS": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "labels": {
+          "description": "Default true: one extra layer, at most 29 cells.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "fill",
+            "line"
+          ],
+          "type": "string"
+        },
+        "rows": {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "description": "1..=30. One sample uses min; descending ranges are allowed.",
+              "format": "uint8",
+              "maximum": 30,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max": {
+              "format": "double",
+              "type": "number"
+            },
+            "min": {
+              "format": "double",
+              "type": "number"
+            },
+            "param": {
+              "enum": [
+                "powerPct",
+                "speedMmS",
+                "frequencyKhz",
+                "qPulseNs",
+                "intervalMm",
+                "passes"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "param",
+            "min",
+            "max",
+            "count"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "rows",
+        "cols"
+      ],
+      "title": "MaterialTestParams",
       "type": "object"
     }
   },

@@ -3358,7 +3358,7 @@ Ids follow S2; params are camelCase with units; `ids?` defaults to the selection
 | `job.submit` / `job.status` / `job.withdraw` / `job.frameRequest` | (OpenLaser, bridge only) | — | — | Agent | Request / Query | `{note?}` / `{submission?}` / `{submission}` / `{mode?}` |
 | `document.inspect` / `session.list` / `command.list` / `command.schema` / `help.about` | — | — | — | Agent | Query | per §4.1 |
 | `prefs.get` / `prefs.set` | Settings | dialog | — | Agent | Settings | `{key?}` / `{key, value}` (refuses `machine.*`, `safety.*`, `automation.*`, `humanOnly.*`) |
-| `laserTools.materialTest` † | Material Test | Laser Tools | — | Agent | Edit | CAT §8.2 keys; generates a project; burning is `laser.start` |
+| `laserTools.materialTest` | Material Test | Laser Tools | — | Agent | Edit | CAT §8.2 keys; generates a project; burning is `laser.start` |
 
 ## Appendix B. Prototype (OM) import mapping
 

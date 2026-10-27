@@ -76,6 +76,7 @@ impl OpenLaserApp {
         if self.ui.settings_open {
             self.settings_window(ctx);
         }
+        self.material_test_dialog(ctx);
         self.offset_dialog(ctx);
         self.trace_dialog(ctx);
         if self.ui.device_settings_open {

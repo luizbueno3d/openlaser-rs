@@ -287,7 +287,7 @@ fn label_for(p: &CutSettingsParams, key: LayerKey) -> Label {
 }
 
 /// Validates everything that does not need the project, then applies it to `layer` / `op`.
-fn apply_color(p: &CutSettingsParams, l: &mut ColorLayer) -> Result<(), EngineError> {
+pub(super) fn apply_color(p: &CutSettingsParams, l: &mut ColorLayer) -> Result<(), EngineError> {
     const ID: &str = "layer.cutSettings.set";
     let sub = usize::from(p.sub_layer.unwrap_or(0));
     if let Some(n) = &p.name {
