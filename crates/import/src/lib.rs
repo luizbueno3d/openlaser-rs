@@ -732,7 +732,22 @@ fn import_raster(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Impor
     let file_dpi = raster_dpi(bytes);
     let dpi = file_dpi.unwrap_or(254.0);
     let size_mm = [f64::from(width) * 25.4 / dpi * opts.scale, f64::from(height) * 25.4 / dpi * opts.scale];
-    let gray: Arc<[u8]> = image.to_luma8().into_raw().into();
+    // Preserve the existing luma conversion for opaque images, including 16-bit input. Alpha is coverage
+    // over white, not darkness: a transparent black RGB value must never become a black burn pixel.
+    let gray: Arc<[u8]> = if image.color().has_alpha() {
+        image
+            .to_luma_alpha8()
+            .pixels()
+            .map(|p| {
+                let [luma, alpha] = p.0;
+                let a = u32::from(alpha);
+                ((u32::from(luma) * a + 255 * (255 - a) + 127) / 255) as u8
+            })
+            .collect::<Vec<_>>()
+            .into()
+    } else {
+        image.to_luma8().into_raw().into()
+    };
     let [cx, cy] = opts.center_at.unwrap_or([0.0, 0.0]);
     let bounds = Bounds { min: [cx - size_mm[0] / 2.0, cy - size_mm[1] / 2.0], max: [cx + size_mm[0] / 2.0, cy + size_mm[1] / 2.0] };
     check_placed(bounds.min[0], bounds.min[1], "the image")?;

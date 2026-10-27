@@ -16,9 +16,11 @@
 
 use std::time::Duration;
 
+mod dither;
 mod estimate;
 mod fingerprint;
 mod frame;
+mod image;
 mod planner;
 pub mod quantise;
 mod transform;
@@ -31,6 +33,7 @@ pub use openlaser_types::{Fingerprint, FrameSource, FrameStyle, Hz, LayerKey, Ma
 
 pub use fingerprint::fingerprint_of;
 pub use frame::{HULL_FRAME_UNSUPPORTED, bounds_rect, frame_style_of};
+pub use image::{MAX_IMAGE_CELLS, MAX_IMAGE_INTERVAL_MM, MIN_IMAGE_INTERVAL_MM};
 pub use planner::{
     MAX_COORD_MM, MAX_DESIGN_POINTS, MAX_FLATTEN_TOL_MM, MAX_HATCH_LINES, MAX_PASSES_PER_LAYER, MAX_SECTION_POINTS, MAX_SECTIONS, MAX_SUB_LAYERS,
     MIN_FLATTEN_TOL_MM,

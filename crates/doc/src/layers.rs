@@ -149,12 +149,16 @@ pub struct ImageCut {
     pub gantry: GantryParams,
 }
 
-/// P0 subset (S16); others P1.
+/// On/off image dithering (S16); every run uses the same cut power.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageMode {
     Threshold,
     Jarvis,
+    FloydSteinberg,
+    Stucki,
+    Atkinson,
+    Ordered,
 }
 
 /// Defaults for a new colour layer, per device kind (machine profiles hold one per kind; B11).

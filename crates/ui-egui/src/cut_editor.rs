@@ -3,7 +3,7 @@
 //! Values are never clamped: a value the machine cannot run is a refusal from the planner (live in the Laser panel),
 //! and a value that is not a number at all keeps OK disabled with the reason.
 
-use openlaser_doc::{ColorLayer, CutMode};
+use openlaser_doc::{ColorLayer, CutMode, ImageMode};
 use openlaser_types::LayerKey;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +29,7 @@ pub struct Draft {
     pub angle_increment: f64,
     pub bidirectional: bool,
     pub cross_hatch: bool,
+    pub image_mode: ImageMode,
 }
 
 /// What the editor needs from the machine profile.
@@ -60,6 +61,7 @@ impl Draft {
             angle_increment: op.fill.angle_increment.get(),
             bidirectional: op.fill.bidirectional,
             cross_hatch: op.fill.cross_hatch,
+            image_mode: layer.image.mode,
         })
     }
 
@@ -107,6 +109,7 @@ impl Draft {
             "mode": match self.mode { CutMode::Line => "line", CutMode::Fill => "fill", CutMode::OffsetFill => "offset_fill" },
             "passes": self.passes,
             "galvo": { "speedMmS": self.speed, "powerPct": self.power, "frequencyKhz": self.frequency_khz, "qPulseNs": self.q_pulse_ns },
+            "image": { "mode": self.image_mode },
             "fill": {
                 "intervalMm": self.interval,
                 "angleDeg": self.angle,
@@ -130,6 +133,7 @@ impl Draft {
                     _ => return Err("mode must be line or fill (Offset Fill is P1)".into()),
                 }
             }
+            "imageMode" => self.image_mode = serde_json::from_value(value.clone()).map_err(|e| format!("invalid image mode: {e}"))?,
             "speedMmS" => self.speed = number()?,
             "powerPct" => self.power = number()?,
             "frequencyKhz" => self.frequency_khz = number()?,
@@ -188,6 +192,29 @@ impl Draft {
                 })
                 .inner;
             add(ui, "Mode", r, None);
+            ui.end_row();
+
+            crate::panels::caption(ui, "Image Mode");
+            let r = ui
+                .add_enabled_ui(enabled, |ui| {
+                    egui::ComboBox::from_id_salt("image-mode")
+                        .selected_text(format!("{:?}", self.image_mode))
+                        .show_ui(ui, |ui| {
+                            for (mode, label) in [
+                                (ImageMode::Threshold, "Threshold"),
+                                (ImageMode::Jarvis, "Jarvis"),
+                                (ImageMode::FloydSteinberg, "Floyd–Steinberg"),
+                                (ImageMode::Stucki, "Stucki"),
+                                (ImageMode::Atkinson, "Atkinson"),
+                                (ImageMode::Ordered, "Ordered (8×8 Bayer)"),
+                            ] {
+                                ui.selectable_value(&mut self.image_mode, mode, label);
+                            }
+                        })
+                        .response
+                })
+                .inner;
+            add(ui, "Image Mode", r, None);
             ui.end_row();
 
             crate::panels::caption(ui, "Speed (mm/s)");
@@ -340,6 +367,17 @@ mod tests {
         );
         assert!(draft.set_field("mode", &serde_json::json!("offset_fill")).is_err(), "Offset Fill is P1");
         assert!(draft.set_field("force", &serde_json::json!(true)).is_err());
+    }
+
+    #[test]
+    fn image_modes_reach_the_command() {
+        let mut draft = Draft::from_layer(&layer()).unwrap();
+        for name in ["threshold", "jarvis", "floyd_steinberg", "stucki", "atkinson", "ordered"] {
+            draft.set_field("imageMode", &serde_json::json!(name)).unwrap();
+            let params = draft.params();
+            assert_eq!(params["image"]["mode"], name);
+            let _: ImageMode = serde_json::from_value(params["image"]["mode"].clone()).unwrap();
+        }
     }
 
     #[test]

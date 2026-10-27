@@ -2783,6 +2783,10 @@ expression: rows
               "enum": [
                 "threshold",
                 "jarvis",
+                "floyd_steinberg",
+                "stucki",
+                "atkinson",
+                "ordered",
                 null
               ],
               "type": [

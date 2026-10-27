@@ -7,7 +7,7 @@ use openlaser_machine::{GalvoMachine, GantryMachine, JobLimits, Kinematics, Lase
 use openlaser_plan::quantise::{self, pulse_request, pulse_word, speed_field_mm};
 use openlaser_plan::{CutQ, GalvoCutQ, GantryCutQ, JobPlan, PlanFacts, Section};
 use openlaser_types::galvo::{self, PulseDecision};
-use openlaser_types::{DeviceKind, LayerKey, Notice, NoticeCode, Ns, ObjectId, Refusal, RefusalCode, SectionMode};
+use openlaser_types::{DeviceKind, LayerKey, Notice, NoticeCode, Ns, ObjectId, Refusal, RefusalCode};
 
 /// Float noise from transforms must not refuse a shape drawn exactly on an edge (OM v1 `FIELD_EDGE_TOLERANCE_MM`).
 /// Points are never moved: a point within the tolerance is sent as it is, and its encodability is checked exactly.
@@ -603,9 +603,6 @@ pub(crate) fn check_section(out: &mut Out, m: &MachineProfile, area: &Area, s: &
     }
     if k.is_tool() {
         out.refuse(Refusal::new(RefusalCode::UnsupportedMode, format!("{}: tool layers are framed, never burned; plan again", label(s))).layer(k));
-    }
-    if s.mode == SectionMode::Image {
-        out.refuse(Refusal::new(RefusalCode::UnsupportedMode, format!("{}: burning images is not in this build", label(s))).layer(k));
     }
     check_paths(out, area, &m.limits, &k.to_string(), Some(k), &s.paths);
 }

@@ -1306,3 +1306,17 @@ mod camera {
         assert!(store().load().is_none());
     }
 }
+
+#[test]
+fn image_modes_command_and_project_serde_roundtrip() {
+    let mut s = headless();
+    with_doc(&mut s);
+    for name in ["threshold", "jarvis", "floyd_steinberg", "stucki", "atkinson", "ordered"] {
+        s.execute("layer.cutSettings.set", json!({"layer":0,"image":{"mode":name}})).unwrap();
+        let project = &s.active().unwrap().project;
+        let bytes = openlaser_format::save(project).unwrap();
+        let decoded = openlaser_format::load(&bytes).unwrap();
+        assert_eq!(&decoded, project.as_ref());
+        assert_eq!(serde_json::to_value(decoded.layers.colors[0].image.mode).unwrap(), name);
+    }
+}

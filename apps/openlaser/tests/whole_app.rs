@@ -527,3 +527,8 @@ fn grouped_shape_lands_where_designed() {
     finish(&mut r);
     assert_burn(&r, &expected);
 }
+
+#[test]
+fn image_summary_uses_the_human_image_label() {
+    assert_eq!(format::mode(openlaser_types::SectionMode::Image), "Image");
+}

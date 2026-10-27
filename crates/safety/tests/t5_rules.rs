@@ -674,12 +674,6 @@ fn safety_unsupported_mode_refused() {
     p.facts.unsupported = vec![(LayerKey::Color(1), "C01: Offset Fill is not in this build; use Line or Fill".into())];
     let r = validate(&p, &m).unwrap_err();
     assert!(r.refusals.iter().any(|x| x.code == RefusalCode::UnsupportedMode && x.message.contains("Offset Fill")));
-    // An Image section (burning images is a stretch item, not built) is refused too.
-    let m = jpt();
-    let mut s = section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(default_words(&m)));
-    s.mode = SectionMode::Image;
-    let p = job(&m, vec![s]);
-    assert!(codes(&validate(&p, &m)).contains(&RefusalCode::UnsupportedMode));
     // A section on a tool layer (T1/T2 never burn, S8): a forged plan.
     let m = jpt();
     let mut s = section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(default_words(&m)));
@@ -691,6 +685,29 @@ fn safety_unsupported_mode_refused() {
     p.repeats = 1000;
     let p = refingerprint(p, &m);
     assert!(codes(&validate(&p, &m)).contains(&RefusalCode::UnsupportedMode));
+}
+
+#[test]
+fn safety_image_sections_use_the_same_area_cut_and_frame_checks_as_fill() {
+    for mode in [SectionMode::Fill, SectionMode::Image] {
+        let m = jpt();
+        let mut s = section(0, vec![line(&[[-2.0, 0.5], [2.0, 0.5]])], CutQ::Galvo(default_words(&m)));
+        s.mode = mode;
+        let mut p = job(&m, vec![s]);
+        p.frame = vec![square(0.0, 0.0, 3.0)];
+        assert!(validate(&p, &m).is_ok(), "{mode:?}");
+        p.sections[0].paths = vec![line(&[[150.0, 0.0], [151.0, 0.0]])];
+        p = refingerprint(p, &m);
+        assert!(codes(&validate(&p, &m)).contains(&RefusalCode::OutsideWorkArea));
+        p.sections[0].paths = vec![line(&[[10.0, 0.0], [11.0, 0.0]])];
+        p = refingerprint(p, &m);
+        assert!(codes(&validate(&p, &m)).contains(&RefusalCode::FrameDoesNotCoverJob), "{mode:?}: uncovered burn must be refused");
+        p.sections[0].paths = vec![line(&[[-2.0, 0.5], [2.0, 0.5]])];
+        let CutQ::Galvo(q) = &mut p.sections[0].cut else { panic!("galvo") };
+        q.mark_current = 0;
+        p = refingerprint(p, &m);
+        assert!(validate(&p, &m).is_err(), "{mode:?}: invalid cut words must be refused");
+    }
 }
 
 #[test]
