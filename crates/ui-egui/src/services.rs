@@ -55,6 +55,13 @@ pub struct UiSettings {
     /// Window ▸ Camera Background: draw the calibrated live feed under the design (phase 6b).
     #[serde(default)]
     pub camera_background: bool,
+    /// Settings ▸ Laser: Start needs a red-light frame of the job first. Off by default (Luiz, 2026-10-30).
+    #[serde(default)]
+    pub require_frame: bool,
+    /// Settings ▸ Laser: Start fires without the ARM confirmation. Off by default: then ARM is typed and the checklist
+    /// ticked once per app session.
+    #[serde(default)]
+    pub skip_arm: bool,
 }
 
 impl UiSettings {
@@ -65,6 +72,8 @@ impl UiSettings {
             show_cuts: true,
             show_laser: true,
             camera_background: false,
+            require_frame: false,
+            skip_arm: false,
         }
     }
 }
@@ -121,6 +130,13 @@ pub trait HumanSurfaces: Send {
     /// Connections): primary-button click, untainted frame, no AccessKit action this frame, focused window,
     /// widget visible ≥ 300 ms.
     fn is_human_click(&mut self, ctx: &egui::Context, response: &egui::Response) -> bool;
+    /// The Start button's gate: `is_human_click`, keeping the click so the ARM confirmation that follows can use it
+    /// when the person already armed this session (or turned the confirmation off).
+    fn start_click(&mut self, ctx: &egui::Context, response: &egui::Response) -> bool {
+        self.is_human_click(ctx, response)
+    }
+    /// Settings ▸ Laser ▸ skip the ARM confirmation.
+    fn set_skip_arm(&mut self, _skip: bool) {}
     /// Draws the ARM confirmation as a Modal (STOP stays above). Mints inside; returns the token once.
     fn arm_dialog(&mut self, ctx: &egui::Context, model: &ArmModel) -> ArmOutcome;
     /// Any human-only surface open: the dispatcher refuses mutating control methods (human_confirmation_open).

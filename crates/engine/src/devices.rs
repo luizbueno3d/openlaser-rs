@@ -488,7 +488,7 @@ impl Session {
             return Err(faulted(&machine, &slot.status));
         }
         let receipt = slot.status.receipt.clone();
-        if receipt.is_none() {
+        if receipt.is_none() && self.frame_required {
             // Explained before the build; check_receipt below applies every rule to the built job.
             return Err(EngineError::Refused(Refusal::new(
                 RefusalCode::FrameRequired,
@@ -506,7 +506,22 @@ impl Session {
             ));
         }
         let now = self.cfg.clock.now();
-        check_receipt(receipt.as_ref(), &built.summary, self.id, now).map_err(EngineError::Refused)?;
+        let receipt = match check_receipt(receipt.as_ref(), &built.summary, self.id, now) {
+            Ok(()) => receipt,
+            // Framing is optional (the person's setting): the Start click itself, by a person (require_human above),
+            // stands in for the frame. It binds this exact job, machine and session like a frame receipt does.
+            Err(_) if !self.frame_required => Some(FrameReceipt {
+                fingerprint: built.summary.fingerprint,
+                machine: machine.clone(),
+                session: self.id,
+                full_passes: 1,
+                at: now,
+                style: FrameStyle::Bounds,
+                source: FrameSource::Job,
+                origin: FrameOrigin::Human,
+            }),
+            Err(r) => return Err(EngineError::Refused(r)),
+        };
         let cap =
             provider.emission_cap_pct().map_err(|e| EngineError::refused(RefusalCode::BenchPowerCap, format!("the first-emission cap cannot be read: {e}")))?;
         check_cap(cap, &built.summary, &built.burned).map_err(EngineError::Refused)?;

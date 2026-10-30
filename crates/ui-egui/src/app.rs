@@ -482,9 +482,11 @@ impl OpenLaserApp {
         Self::with_context(&cc.egui_ctx, session, services)
     }
 
-    pub(crate) fn with_context(ctx: &egui::Context, session: Session, services: Services) -> Self {
+    pub(crate) fn with_context(ctx: &egui::Context, mut session: Session, mut services: Services) -> Self {
         egui_extras::install_image_loaders(ctx);
         let saved = services.settings.load();
+        session.set_frame_required(saved.require_frame);
+        services.human.set_skip_arm(saved.skip_arm);
         let ui = UiState { camera_background: saved.camera_background, ..UiState::default() };
         Self {
             session,

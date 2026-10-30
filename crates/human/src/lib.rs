@@ -50,6 +50,12 @@ pub struct Human {
     /// A `Cell` so that `frame_is_synthetic(&self)` can notice a surface closing too.
     surfaces: Cell<Surfaces>,
     pub(crate) arm: ArmDialogState,
+    /// The last real click on Start and when it happened (`start_click`); used once, by the ARM that follows it.
+    pub(crate) start: Option<(HumanGesture, MonoTime)>,
+    /// What the person typed and ticked the last time they armed in this session (ARM once per session).
+    pub(crate) remembered: Option<arm_dialog::Remembered>,
+    /// Settings ▸ Laser: no ARM confirmation at all.
+    pub(crate) skip_arm: bool,
     #[cfg(test)]
     pub(crate) test_mint: Option<MintFn>,
 }
@@ -62,6 +68,9 @@ impl Human {
             visibility: Visibility::default(),
             surfaces: Cell::new(Surfaces::default()),
             arm: ArmDialogState::default(),
+            start: None,
+            remembered: None,
+            skip_arm: false,
             #[cfg(test)]
             test_mint: None,
         }
@@ -186,6 +195,20 @@ impl HumanSurfaces for Human {
 
     fn is_human_click(&mut self, ctx: &egui::Context, response: &egui::Response) -> bool {
         self.gate(ctx, response).is_some()
+    }
+
+    fn start_click(&mut self, ctx: &egui::Context, response: &egui::Response) -> bool {
+        match self.gate(ctx, response) {
+            Some(g) => {
+                self.start = Some((g, self.now()));
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn set_skip_arm(&mut self, skip: bool) {
+        self.skip_arm = skip;
     }
 
     fn arm_dialog(&mut self, ctx: &egui::Context, model: &ArmModel) -> ArmOutcome {

@@ -1199,16 +1199,29 @@ impl OpenLaserApp {
         ui.horizontal(|ui| {
             let (text, color) = self.chip();
             ui.colored_label(color, text);
-            self.human_button(ui, &ctx, "Connect", if busy { Err("Stop the machine first.".to_owned()) } else { Ok(()) }, |app| {
-                let id = app.active_machine().map(|m| m.id.clone()).ok_or(openlaser_engine::EngineError::NoDevice)?;
-                app.session.connect(openlaser_engine::Origin::Human, &id)
-            });
+            let connected = self.active_machine().is_some_and(|m| self.session.status(&m.id).is_some());
+            if connected {
+                self.human_button(ui, &ctx, "Disconnect", if busy { Err("Stop the machine first.".to_owned()) } else { Ok(()) }, |app| {
+                    let id = app.active_machine().map(|m| m.id.clone()).ok_or(openlaser_engine::EngineError::NoDevice)?;
+                    app.session.disconnect(openlaser_engine::Origin::Human, &id)
+                });
+            } else {
+                self.human_button(ui, &ctx, "Connect", if busy { Err("Stop the machine first.".to_owned()) } else { Ok(()) }, |app| {
+                    let id = app.active_machine().map(|m| m.id.clone()).ok_or(openlaser_engine::EngineError::NoDevice)?;
+                    app.session.connect(openlaser_engine::Origin::Human, &id)
+                });
+            }
         });
 
         // 2. Job buttons: Pause, Stop, Start; Frame, Send, Home, Go to Origin.
         let plan = self.plan().cloned();
         let receipt = plan.as_ref().and_then(PlanView::summary).and_then(|s| self.receipt_for(&s.machine));
-        let start = start_gate(plan.as_ref(), receipt.as_ref(), self.session.id(), self.services.clock.now(), active);
+        let start = if self.session.frame_required() {
+            start_gate(plan.as_ref(), receipt.as_ref(), self.session.id(), self.services.clock.now(), active)
+        } else {
+            // Framing is optional (Settings): Start needs only a plannable job and an idle machine.
+            frame_gate(plan.as_ref(), active)
+        };
         let frame = frame_gate(plan.as_ref(), active);
         ui.horizontal(|ui| {
             self.disabled_button(ui, "Pause", if galvo { "Pause is not available on galvo machines in this build (H15). Use Stop." } else { NOT_YET });
@@ -1332,7 +1345,8 @@ impl OpenLaserApp {
     ) {
         let r = ui.add_enabled(gate.is_ok(), egui::Button::new(label).min_size(egui::vec2(56.0, 24.0)));
         self.track(&r, "button", label, true);
-        let human = self.services.human.is_human_click(ctx, &r);
+        // Start keeps its click for the ARM confirmation that follows (ARM once per session, Settings).
+        let human = if label == "Start" { self.services.human.start_click(ctx, &r) } else { self.services.human.is_human_click(ctx, &r) };
         let synthetic = self.frame_synthetic || self.services.human.frame_is_synthetic(ctx);
         if human && !synthetic && gate.is_ok() {
             #[cfg(test)]

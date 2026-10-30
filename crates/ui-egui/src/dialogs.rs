@@ -221,6 +221,33 @@ impl OpenLaserApp {
                 None => ui.weak("Agents cannot connect. Turn this on to let openlaser-cli mcp --bridge auto drive this window."),
             };
             ui.separator();
+            ui.heading("Laser");
+            // Human-only like the automation switch: only a person's real click changes how Start arms.
+            let mut settings = self.services.settings.load();
+            let mut require_frame = settings.require_frame;
+            let r = ui.checkbox(&mut require_frame, "Require framing before Start");
+            self.track(&r, "checkBox", "Require framing before Start", true);
+            let human = self.services.human.is_human_click(ctx, &r);
+            if human && !self.frame_synthetic && !self.services.human.frame_is_synthetic(ctx) {
+                settings.require_frame = require_frame;
+                self.session.set_frame_required(require_frame);
+                self.services.settings.save(&settings);
+            }
+            let mut skip_arm = settings.skip_arm;
+            let r = ui.checkbox(&mut skip_arm, "Skip the ARM confirmation (Start fires at once)");
+            self.track(&r, "checkBox", "Skip the ARM confirmation", true);
+            let human = self.services.human.is_human_click(ctx, &r);
+            if human && !self.frame_synthetic && !self.services.human.frame_is_synthetic(ctx) {
+                settings.skip_arm = skip_arm;
+                self.services.human.set_skip_arm(skip_arm);
+                self.services.settings.save(&settings);
+            }
+            ui.weak(if settings.skip_arm {
+                "Start fires the laser straight away. STOP and the E-stop still stop it."
+            } else {
+                "You type ARM and tick the checklist once each time OpenLaser opens; after that, Start fires at once."
+            });
+            ui.separator();
             ui.heading("Window");
             let mut menus = self.in_window_menus;
             let r = ui.checkbox(&mut menus, "Menus inside the window");
@@ -353,9 +380,9 @@ impl OpenLaserApp {
                                 }
                                 ui.weak("Drive diameter means object diameter for a chuck, roller diameter for a roller. Protocol unverified (D12).");
                             });
-                            let mut always = true;
-                            let r = ui.add_enabled(false, egui::Checkbox::new(&mut always, "Require framing before start"));
-                            let r = r.on_disabled_hover_text("Always required on galvos (D8).");
+                            let mut required = self.session.frame_required();
+                            let r = ui.add_enabled(false, egui::Checkbox::new(&mut required, "Require framing before start"));
+                            let r = r.on_disabled_hover_text("Change it in Settings ▸ Laser.");
                             tracked.push((r, "Require framing before start".into()));
                             ui.weak(format!(
                                 "Laser source: pulse table {:?} ns · {}–{} kHz",

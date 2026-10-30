@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use openlaser_types::{Fingerprint, FrameReceipt, MachineId, MonoTime, Refusal, RefusalCode, SessionId};
+use openlaser_types::{ArmToken, Fingerprint, FrameReceipt, MachineId, MonoTime, Refusal, RefusalCode, SessionId};
 use openlaser_ui_egui::{ArmModel, ArmOutcome};
 
 use crate::Human;
@@ -24,6 +24,8 @@ const FIELD_HINT: &str = "Type ARM";
 /// An empty checklist can never be confirmed (`mint` refuses it too, SPEC §3.9).
 pub const NO_CHECKLIST: &str = "This machine profile has no checklist, so nothing can be armed. Add one in Device Settings.";
 const THUMB_SIDE: f32 = 160.0;
+/// How long a Start click stays good for the ARM that follows it (the dialog is built in the next frames).
+const START_CLICK_WINDOW: Duration = Duration::from_secs(2);
 /// Height kept free below the scrolling summary for the heading, separator, field, messages and buttons.
 const CONTROLS_RESERVE: f32 = 230.0;
 /// The summary never shrinks below this, so the layer rows stay readable in a tiny window.
@@ -105,19 +107,64 @@ impl ArmDialogState {
     }
 }
 
+/// The typed text and ticks of the session's last successful ARM. Reused only for the same session and the same
+/// checklist items, together with a fresh real click on Start.
+#[derive(Debug, Clone)]
+pub(crate) struct Remembered {
+    session: SessionId,
+    checklist: Vec<String>,
+    typed: String,
+    ticked: Vec<bool>,
+}
+
 enum Clicked {
     Nothing,
     Cancel,
 }
 
 impl Human {
+    /// What to confirm with when the person need not go through the dialog: the constant ARM and every tick when the
+    /// confirmation is off (Settings), else what they typed and ticked when they last armed in this session.
+    fn standing_confirmation(&self, model: &ArmModel) -> Option<(String, Vec<bool>)> {
+        if self.skip_arm {
+            return Some((openlaser_arm::ARM_TEXT.to_owned(), vec![true; model.checklist.len()]));
+        }
+        self.remembered.as_ref().filter(|r| r.session == model.session && r.checklist == model.checklist).map(|r| (r.typed.clone(), r.ticked.clone()))
+    }
+
+    /// Start with a standing confirmation: mints from the person's real Start click (taken once, ≤ 2 s old) without
+    /// drawing the dialog. Never over the bench cap and never in a tainted frame: then the dialog opens as usual.
+    fn quick_arm(&mut self, ctx: &egui::Context, model: &ArmModel) -> Option<ArmToken> {
+        let (gesture, clicked_at) = self.start.take()?;
+        let now = self.now();
+        if now.saturating_since(clicked_at) > START_CLICK_WINDOW || self.tainted(ctx, ctx.cumulative_pass_nr(), now) {
+            return None;
+        }
+        if !format::cap_violations(&model.summary.rows, model.emission_cap_pct).is_empty() {
+            return None;
+        }
+        let (typed, ticked) = self.standing_confirmation(model)?;
+        let at = latest(now, model.now);
+        let confirmation = gesture.confirm(&typed, ticked, at);
+        self.mint(&model.summary, &model.receipt, confirmation, model.checklist.len(), model.session, at).ok()
+    }
+
     pub(crate) fn show_arm_dialog(&mut self, ctx: &egui::Context, model: &ArmModel) -> ArmOutcome {
+        if let Some(token) = self.quick_arm(ctx, model) {
+            self.arm.forget();
+            return ArmOutcome::Armed(token);
+        }
         let pass = ctx.cumulative_pass_nr();
         let now = self.now();
         self.refresh(pass);
         let key = ModelKey::of(model);
         if !self.arm.continues(&key, pass, model.checklist.len()) {
             self.arm.open(key, model.checklist.len());
+            // Already armed this session: the dialog opens filled in, so one click confirms.
+            if let Some((typed, ticked)) = self.standing_confirmation(model) {
+                self.arm.typed = typed;
+                self.arm.ticked = ticked;
+            }
         }
         self.arm.last_pass = Some(pass);
         self.mark_shown(pass);
@@ -196,9 +243,10 @@ impl Human {
         let at = latest(now, model.now);
         let typed = self.arm.typed.trim().to_owned();
         let ticked = self.arm.ticked.clone();
-        let confirmation = gesture.confirm(&typed, ticked, at);
+        let confirmation = gesture.confirm(&typed, ticked.clone(), at);
         match self.mint(&model.summary, &model.receipt, confirmation, model.checklist.len(), model.session, at) {
             Ok(token) => {
+                self.remembered = Some(Remembered { session: model.session, checklist: model.checklist.clone(), typed, ticked });
                 self.arm.forget();
                 self.close_surfaces();
                 ArmOutcome::Armed(token)

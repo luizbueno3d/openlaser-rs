@@ -693,6 +693,8 @@ fn kittest_laser_panel_galvo_disabled_reasons() {
 #[test]
 fn kittest_start_without_receipt_says_frame_first() {
     let mut h = harness();
+    // Settings ▸ Laser ▸ Require framing before Start (off by default).
+    h.state_mut().session.set_frame_required(true);
     h.state_mut().seam.project = Some(used_project());
     let s = ready_plan(&mut h);
     h.run();
