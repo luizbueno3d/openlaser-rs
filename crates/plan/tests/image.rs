@@ -207,3 +207,28 @@ fn image_interval_limits_and_partial_final_row() {
     layer(&mut p).image.interval = Mm::new(2.0).unwrap();
     assert!(!plan(&p, &m).facts.unsupported.is_empty());
 }
+
+#[test]
+fn rotary_image_angle_is_a_notice_and_scans_without_rotating_artwork() {
+    use openlaser_machine::{RotaryAxis, RotaryCfg};
+    let mut m = jpt_m7_200_sim();
+    let Kinematics::Galvo(g) = &mut m.kind else { panic!("galvo") };
+    g.rotary = Some(RotaryCfg { enabled: true, axis: RotaryAxis::X, split_mm: 1.0, ..Default::default() });
+    for angle in [90.0, 45.0, 180.0, 270.0] {
+        let mut p = project(&m);
+        layer(&mut p).image.angle = Deg::new(angle).unwrap();
+        let out = plan(&p, &m);
+        assert!(out.facts.unsupported.is_empty(), "{angle}: {:?}", out.facts.unsupported);
+        assert_eq!(out.facts.rotary_notices.len(), if angle == 90.0 || angle == 270.0 { 0 } else { 1 });
+        assert!(!out.sections.is_empty());
+        let radians = angle.to_radians();
+        for path in out.sections.iter().flat_map(|s| &s.paths) {
+            let [a, b] = path.0.as_slice() else { panic!("segment") };
+            let cross = (b[0] - a[0]) * radians.sin() - (b[1] - a[1]) * radians.cos();
+            assert!(cross.abs() < 1e-10, "{angle}: {path:?}");
+            for point in &path.0 {
+                assert!(point[0].abs() <= 0.5 && point[1].abs() <= 1.0, "{angle}: {point:?}");
+            }
+        }
+    }
+}

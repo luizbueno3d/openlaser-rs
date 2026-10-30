@@ -223,6 +223,9 @@ fn refusal_text(r: &Refusal) -> String {
 
 fn draw_summary(ui: &mut egui::Ui, model: &ArmModel) {
     let s = &model.summary;
+    if let Some(r) = &s.rotary {
+        ui.strong(r.to_string());
+    }
     ui.label(format!("Machine: {}", format::plain(&s.machine.0, format::MESSAGE_MAX_CHARS)));
     ui.label(format!("Job {}", s.fingerprint.short()));
     ui.horizontal(|ui| {

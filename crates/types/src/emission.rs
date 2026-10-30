@@ -60,6 +60,8 @@ pub struct PassRow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmissionSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotary: Option<RotarySummary>,
     pub fingerprint: Fingerprint,
     /// S22: blake3 over, in send order, every single command (12 bytes) and packet (3072 bytes) of one repeat,
     /// then the repeat count as u16 LE. Computed from the job's bytes, never from the plan.
@@ -87,4 +89,28 @@ pub struct EmittedSegment {
     pub a: [f64; 2],
     pub b: [f64; 2],
     pub power_pct: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RotarySummary {
+    pub strips: u32,
+    pub split_mm: f64,
+    pub total_degrees: f64,
+    pub total_pulses: u64,
+    pub return_to_start: bool,
+}
+
+impl std::fmt::Display for RotarySummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Rotary: {} strips of {} mm, total {:.2}° ({} pulses), returns to start: {}",
+            self.strips,
+            self.split_mm,
+            self.total_degrees,
+            self.total_pulses,
+            if self.return_to_start { "yes" } else { "no" }
+        )
+    }
 }

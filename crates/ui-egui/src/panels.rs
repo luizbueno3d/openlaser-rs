@@ -1161,6 +1161,9 @@ impl OpenLaserApp {
         let ctx = ui.ctx().clone();
         let active = self.ui.machine_active;
         let galvo = self.active_is_galvo();
+        if self.active_machine().is_some_and(|m| matches!(&m.kind, openlaser_machine::Kinematics::Galvo(g) if g.rotary.as_ref().is_some_and(|r| r.enabled))) {
+            ui.strong("ROTARY ON");
+        }
         let busy = self.is_machine_busy();
 
         // 1. Device row.
@@ -1474,6 +1477,7 @@ mod tests {
 
     fn summary() -> EmissionSummary {
         EmissionSummary {
+            rotary: None,
             fingerprint: openlaser_types::Fingerprint([7; 32]),
             bytes_hash: openlaser_types::Fingerprint([8; 32]),
             machine: openlaser_types::MachineId("jpt-m7-200-sim".into()),

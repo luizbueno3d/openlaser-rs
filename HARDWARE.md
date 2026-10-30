@@ -113,6 +113,30 @@ olhw bench start
       Frame (human click), Start → ARM dialog (check the power, kHz, ns and actual speed shown) → mark. 20 STOPs from
       the GUI. One MOPA colour test.
 
+## 6. Rotary (next session, after HIL-2 passes)
+
+D12 is **UNSIGNED, proposed** and is not covered by the D1–D11 sign-off. All axis units,
+sign-magnitude replies, direction, acceleration, moving-bit timing and timeout assumptions remain unverified.
+Rotary jobs and the human-only `rotary` CLI refuse until a human saves `rotary.enabled=true` in the profile
+(default off). The job currently requires controller position **0** at start; it refuses a nonzero position
+rather than change the exact absolute bytes approved at ARM. `rotary pos` shows the reported pulses.
+
+- [ ] **R0 — key switch OFF.** After checking the profile's pulses/rev, diameter and conservative speeds,
+      `olhw rotary move --deg 90 --trace rotary-r0.jsonl` (motion only, laser off). Check direction and pulses/rev;
+      `olhw rotary pos` must show the expected sign-magnitude position. No homing command is sent.
+- [ ] **R1 — one full turn.** `olhw rotary move --deg 360 --trace rotary-r1.jsonl`; the same physical mark must
+      return to the same place. Check chuck object diameter versus roller drive diameter. Undo bench motion
+      with the opposite degrees so the reported controller position is 0 before the job.
+- [ ] **R2 — red light.** Frame a rotary job and compare the union of centred strip outlines with the intended
+      tube layout; check receipt/ARM strip count, split, total degrees/pulses and return choice.
+- [ ] **R3 — low-power scrap.** Burn a ring of text on a scrap tube, with framing and typed ARM. Check seams,
+      overlap, direction, scale, rounding and return registration. Record the trace and stop timing.
+
+**Residual risk:** no stop-axis command is known. StopExecute may or may not stop the motor. A stop closes
+MO and ports with the unchanged emergency sequence, but **the rotary axis may finish its move**. A confirmed
+StopReport confirms laser-off/list-idle, not motor-stopped; the report notes this explicitly. Keep hands clear
+and use the physical E-stop/key switch. Never attempt a rotary bench move while any machine is active.
+
 ## Stop the session if
 
 - Any stop prints `MO closed: false` or `ports at 0: false`, or "no StopReport … use the key switch / E-stop". Key off

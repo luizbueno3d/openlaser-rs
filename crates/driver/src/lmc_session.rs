@@ -139,9 +139,12 @@ pub(crate) struct ListSpec<'a, P> {
 }
 
 /// A whole burn (`LmcJob`) as the session sends it.
+type JobList<'a, P> = (String, &'a [P], &'a [Duration], Option<openlaser_lmc::AxisMove>);
+
 pub(crate) struct JobSpec<'a, P> {
     pub(crate) prelude: &'a [Single],
-    pub(crate) lists: Vec<(String, &'a [P], &'a [Duration])>,
+    pub(crate) lists: Vec<JobList<'a, P>>,
+    pub(crate) return_axis: Option<openlaser_lmc::AxisMove>,
     pub(crate) postlude: &'a [Single],
     pub(crate) repeats: u16,
 }
@@ -322,15 +325,34 @@ pub(crate) struct Session<W: Wire> {
     list_executing: bool,
     /// `Fiber_SetMo(1)` was sent and no `Fiber_SetMo(0)` acknowledged since.
     mo_open: bool,
+    axis_in_progress: bool,
+    axis_deadline: Option<MonoTime>,
+    axis_position: i32,
+    port_word: u16,
 }
 
 impl<W: Wire> Session<W> {
     pub(crate) fn new(wire: W, cfg: SessionCfg, abort_packet: W::Pkt) -> Self {
-        Session { wire, cfg, abort_packet, packet_in_flight: false, read_abandoned: false, list_executing: false, mo_open: false }
+        Session {
+            wire,
+            cfg,
+            abort_packet,
+            axis_in_progress: false,
+            axis_deadline: None,
+            axis_position: 0,
+            port_word: 0,
+            packet_in_flight: false,
+            read_abandoned: false,
+            list_executing: false,
+            mo_open: false,
+        }
     }
 
     fn budget(&self, mode: Mode, now: MonoTime) -> Duration {
         match mode {
+            Mode::Live if self.axis_in_progress => {
+                self.axis_deadline.map_or(self.cfg.transfer_timeout, |deadline| self.cfg.transfer_timeout.min(deadline.saturating_since(now)))
+            }
             Mode::Live | Mode::Plain => self.cfg.transfer_timeout,
             Mode::Abort { deadline } => self.cfg.transfer_timeout.min(ABORT_TRANSFER_CAP).min(deadline.saturating_since(now).max(MAX_SLICE)),
         }
@@ -349,15 +371,23 @@ impl<W: Wire> Session<W> {
             // Conservative: once ExecuteList may have reached the board, the abort must not send another.
             self.list_executing = true;
         }
+        if matches!(mode, Mode::Live) && self.axis_in_progress && (op == EXECUTE_LIST || (op == FIBER_SET_MO && p1 != 0)) {
+            return Err(Halt::Fault(DriverError::Protocol("cannot execute a list or open MO during rotary motion".into())));
+        }
         if op == FIBER_SET_MO && p1 != 0 {
             self.mo_open = true;
         }
-        self.wire.submit_single(cmd).map_err(|e| xfer_fault(name, &e))?;
         let budget = self.budget(mode, cx.now());
+        if budget.is_zero() {
+            return Err(Halt::Fault(DriverError::Protocol("rotary axis did not stop within its motion timeout".into())));
+        }
+        self.wire.submit_single(cmd).map_err(|e| xfer_fault(name, &e))?;
         let start = cx.now();
         let mut polls: u32 = 0;
         loop {
-            match self.wire.poll_single(MAX_SLICE) {
+            let remaining = budget.saturating_sub(cx.now().saturating_since(start));
+            let slice = if matches!(mode, Mode::Live) && self.axis_in_progress { MAX_SLICE.min(remaining) } else { MAX_SLICE };
+            match self.wire.poll_single(slice) {
                 Err(e) => {
                     self.read_abandoned = true;
                     return Err(xfer_fault(name, &e));
@@ -371,6 +401,9 @@ impl<W: Wire> Session<W> {
                     }
                     if op == FIBER_SET_MO && p1 == 0 {
                         self.mo_open = false;
+                    }
+                    if op == WRITE_PORT {
+                        self.port_word = p1;
                     }
                     return Ok(reply);
                 }
@@ -556,15 +589,78 @@ impl<W: Wire> Session<W> {
 
     /// A whole burn: every list of every repeat, the stop checked between lists (§5.3).
     pub(crate) fn run_job(&mut self, job: &JobSpec<'_, W::Pkt>, cx: &Cx, progress: &mut Progress) -> Result<(), Halt> {
+        if job.lists.iter().any(|(_, _, _, mv)| mv.is_some()) && self.read_axis(cx)? != 0 {
+            return Err(Halt::Fault(DriverError::Protocol("rotary jobs require controller position 0 at start, so the absolute bytes match the ARM summary; position the axis with the human bench command first".into())));
+        }
         for repeat in 0..job.repeats {
-            for (label, packets, est) in &job.lists {
+            for (label, packets, est, axis_move) in &job.lists {
+                if let Some(mv) = axis_move {
+                    self.move_axis(mv, cx)?;
+                }
                 cx.check()?;
                 let label = if job.repeats > 1 { format!("repeat {}/{} {label}", repeat + 1, job.repeats) } else { label.clone() };
                 let spec = ListSpec { prelude: job.prelude, packets, est, postlude: job.postlude, label };
                 self.run_list(&spec, cx, Some(progress))?;
             }
         }
+        if let Some(mv) = job.return_axis {
+            self.move_axis(&mv, cx)?;
+        }
         Ok(())
+    }
+
+    pub(crate) fn darken(&mut self, cx: &Cx) -> Result<(), Halt> {
+        self.single(lmc_ops::single(FIBER_SET_MO, 0), cx, Mode::Live)?;
+        self.single(lmc_ops::single(WRITE_PORT, 0), cx, Mode::Live)?;
+        Ok(())
+    }
+
+    pub(crate) fn axis_status(&mut self, cx: &Cx) -> Result<StatusWord, Halt> {
+        self.status_word(cx, Mode::Live)
+    }
+
+    pub(crate) fn read_axis(&mut self, cx: &Cx) -> Result<i32, Halt> {
+        let reply = self
+            .single(lmc_ops::single(openlaser_lmc::op::GET_AXIS_POS, 0), cx, Mode::Live)?
+            .ok_or_else(|| Halt::Fault(DriverError::Protocol("GetAxisPos returned no reply".into())))?;
+        Ok(openlaser_lmc::axis_position(reply))
+    }
+
+    pub(crate) fn move_axis(&mut self, mv: &openlaser_lmc::AxisMove, cx: &Cx) -> Result<(), Halt> {
+        cx.check()?;
+        if !mv.valid() || self.list_executing || self.mo_open || self.port_word != 0 || self.packet_in_flight || self.axis_in_progress {
+            return Err(Halt::Fault(DriverError::Protocol("rotary move requires valid parameters, idle list and closed MO".into())));
+        }
+        let status = self.status_word(cx, Mode::Live)?;
+        if status.busy() || status.0 & StatusWord::AXIS != 0 {
+            return Err(Halt::Fault(DriverError::Protocol("rotary move refused: board or axis is active".into())));
+        }
+        self.axis_position = self.read_axis(cx)?;
+        let delta = (i64::from(mv.target_pulses) - i64::from(self.axis_position)).unsigned_abs();
+        let budget = Duration::try_from_secs_f64(delta as f64 / f64::from(mv.min_speed) * 1.5 + 2.0)
+            .map_err(|e| Halt::Fault(DriverError::Protocol(format!("rotary timeout: {e}"))))?;
+        for cmd in openlaser_lmc::axis_singles(mv) {
+            if lmc_ops::opcode(&cmd) == openlaser_lmc::op::MOVE_AXIS_TO {
+                self.axis_in_progress = true;
+                self.axis_deadline = Some(cx.now().plus(budget));
+            }
+            self.single(cmd, cx, Mode::Live)?;
+        }
+        let deadline = self.axis_deadline.unwrap_or_else(|| cx.now().plus(budget));
+        loop {
+            cx.check()?;
+            let s = self.status_word(cx, Mode::Live)?;
+            if s.0 & StatusWord::AXIS == 0 {
+                self.axis_in_progress = false;
+                self.axis_deadline = None;
+                self.axis_position = mv.target_pulses;
+                return Ok(());
+            }
+            if cx.now() >= deadline {
+                return Err(Halt::Fault(DriverError::Protocol(format!("rotary axis did not stop within {} ms", budget.as_millis()))));
+            }
+            cx.slice(POLL_INTERVAL.min(deadline.saturating_since(cx.now())))?;
+        }
     }
 
     /// A lighting list: ResetList · GetVersion · packets (same flow control) · executed (§5.3 frame).
@@ -666,6 +762,9 @@ impl<W: Wire> Session<W> {
         let deadline = cx.now().plus(EMERGENCY_BUDGET);
         let mode = Mode::Abort { deadline };
         let mut notes = Vec::new();
+        if self.axis_in_progress {
+            notes.push("the rotary axis may finish its move; no stop-axis command is known".into());
+        }
         let mut possible_desync = false;
 
         if self.packet_in_flight {

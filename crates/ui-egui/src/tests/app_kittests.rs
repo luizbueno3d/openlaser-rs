@@ -259,6 +259,7 @@ fn used_project() -> Arc<openlaser_doc::Project> {
 
 fn summary(rows: Vec<openlaser_types::PassRow>) -> openlaser_engine::EmissionSummary {
     openlaser_engine::EmissionSummary {
+        rotary: None,
         fingerprint: openlaser_types::Fingerprint([7; 32]),
         bytes_hash: openlaser_types::Fingerprint([8; 32]),
         machine: openlaser_machine::jpt_m7_200_sim().id,

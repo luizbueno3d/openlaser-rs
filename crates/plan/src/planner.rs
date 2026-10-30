@@ -411,6 +411,24 @@ impl<'a> Ctx<'a> {
         if !layer.output {
             return Ok(());
         }
+        if let Kinematics::Galvo(g) = &self.machine.kind
+            && let Some(r) = g.rotary.as_ref().filter(|r| r.enabled)
+        {
+            let expected = match r.axis {
+                openlaser_machine::RotaryAxis::Y => 0.0,
+                openlaser_machine::RotaryAxis::X => 90.0,
+            };
+            let aligned = |angle: f64| angle.rem_euclid(180.0) == expected;
+            let bad_fill = layer.ops.iter().filter(|op| op.enabled && op.mode == CutMode::Fill).any(|op| {
+                !aligned(op.fill.angle.get())
+                    || ((op.passes > 1 && !aligned(op.fill.angle.get() + op.fill.angle_increment.get()))
+                        || (op.fill.cross_hatch && !aligned(op.fill.angle.get() + 90.0)))
+            });
+            let bad_image = leaves.iter().any(|l| l.image.is_some()) && !aligned(layer.image.angle.get());
+            if bad_fill || bad_image {
+                self.facts.rotary_notices.push((key, format!("{key}: rotary Fill/Image scan angle should run along the non-rotary axis")));
+            }
+        }
         let images: Vec<&Leaf> = leaves.iter().copied().filter(|l| l.image.is_some()).collect();
         let vector: Vec<&Leaf> = leaves.iter().copied().filter(|l| l.image.is_none()).collect();
         if layer.ops.is_empty() || layer.ops.len() > MAX_SUB_LAYERS {
@@ -507,7 +525,8 @@ impl<'a> Ctx<'a> {
 
         if !images.is_empty() {
             let total = u32::from(layer.global_passes) * u32::from(layer.image.passes);
-            if layer.image.angle.get() != 0.0 {
+            let rotary = matches!(&self.machine.kind, Kinematics::Galvo(g) if g.rotary.as_ref().is_some_and(|r|r.enabled));
+            if layer.image.angle.get() != 0.0 && !rotary {
                 self.unsupported(key, format!("{key}: an image Scan Angle other than 0° is not in this build; set 0"));
             } else if total > MAX_PASSES_PER_LAYER {
                 self.unsupported(key, format!("{key} image: {total} passes is above the {MAX_PASSES_PER_LAYER} this build plans"));
@@ -516,7 +535,8 @@ impl<'a> Ctx<'a> {
                 let mut image_objects = Vec::new();
                 for leaf in &images {
                     let Some((bitmap, xf)) = &leaf.image else { continue };
-                    match crate::image::runs(bitmap, &layer.image) {
+                    let runs = if rotary { crate::image::rotary_runs(bitmap, &layer.image) } else { crate::image::runs(bitmap, &layer.image) };
+                    match runs {
                         Ok(runs) => {
                             if runs.is_empty() && !self.facts.empty_fill_layers.contains(&key) {
                                 self.facts.empty_fill_layers.push(key);
@@ -558,6 +578,7 @@ impl<'a> Ctx<'a> {
                     }
                     let estimate = self.estimate(paths, &op.cut);
                     self.sections.push(Section {
+                        rotary: None,
                         layer: key,
                         layer_name: layer.name.clone(),
                         sub: op.sub,
@@ -638,6 +659,17 @@ impl Ctx<'_> {
             self.unsupported(key, HULL_FRAME_UNSUPPORTED.to_owned());
         }
 
+        if let Kinematics::Galvo(g) = &self.machine.kind
+            && g.rotary.as_ref().is_some_and(|r| r.enabled)
+        {
+            match crate::rotary::strips(&self.sections, &self.frame_outlines, g, self.opts.repeats) {
+                Ok((sections, outlines)) => {
+                    self.sections = sections;
+                    self.frame_outlines = outlines;
+                }
+                Err(why) => self.unsupported(self.job_key(), why),
+            }
+        }
         let machine = self.machine;
         let opts = self.opts;
         let device = device_of(machine);

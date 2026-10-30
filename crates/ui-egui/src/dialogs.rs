@@ -253,62 +253,123 @@ impl OpenLaserApp {
         let read_only = self.ui.machine_active;
         egui::Window::new("Device Settings").open(&mut open).collapsible(false).show(ctx, |ui| {
             let mut tracked: Vec<(egui::Response, String)> = Vec::new();
-            match &mut self.device_draft {
-                Some(profile) => {
-                    ui.strong(&profile.name);
-                    if let openlaser_machine::Kinematics::Galvo(g) = &mut profile.kind {
-                        ui.label(format!(
-                            "Field Size {} mm (encoding) × scale → encodable ±{:.2} mm",
-                            g.encoding_field.get(),
-                            g.encoding_field.get() * g.cal.scale[0] / 2.0
-                        ));
-                        egui::Grid::new("device-fields").num_columns(3).show(ui, |ui| {
-                            for (label, values) in [
-                                ("Work Area min (mm)", &mut g.work_area.min),
-                                ("Work Area max (mm)", &mut g.work_area.max),
-                                ("Field Offset (mm)", &mut g.cal.offset_mm),
-                                ("Field Scale", &mut g.cal.scale),
-                                ("Red Dot Offset (mm)", &mut g.red_dot.offset_mm),
-                                ("Red Dot Scale", &mut g.red_dot.scale),
-                            ] {
-                                crate::panels::caption(ui, label);
-                                for (axis, value) in values.iter_mut().enumerate() {
-                                    let r = ui.add_enabled(!read_only, egui::DragValue::new(value).speed(0.01).max_decimals(4));
-                                    let name = format!("{label} {}", if axis == 0 { "X" } else { "Y" });
-                                    let n = name.clone();
-                                    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::DragValue, !read_only, n.clone()));
-                                    tracked.push((r, name));
+            egui::ScrollArea::vertical().id_salt("device-settings-scroll").max_height((ctx.content_rect().height() - 180.0).max(160.0)).show(ui, |ui| {
+                match &mut self.device_draft {
+                    Some(profile) => {
+                        ui.strong(&profile.name);
+                        if let openlaser_machine::Kinematics::Galvo(g) = &mut profile.kind {
+                            ui.label(format!(
+                                "Field Size {} mm (encoding) × scale → encodable ±{:.2} mm",
+                                g.encoding_field.get(),
+                                g.encoding_field.get() * g.cal.scale[0] / 2.0
+                            ));
+                            egui::Grid::new("device-fields").num_columns(3).show(ui, |ui| {
+                                for (label, values) in [
+                                    ("Work Area min (mm)", &mut g.work_area.min),
+                                    ("Work Area max (mm)", &mut g.work_area.max),
+                                    ("Field Offset (mm)", &mut g.cal.offset_mm),
+                                    ("Field Scale", &mut g.cal.scale),
+                                    ("Red Dot Offset (mm)", &mut g.red_dot.offset_mm),
+                                    ("Red Dot Scale", &mut g.red_dot.scale),
+                                ] {
+                                    crate::panels::caption(ui, label);
+                                    for (axis, value) in values.iter_mut().enumerate() {
+                                        let r = ui.add_enabled(!read_only, egui::DragValue::new(value).speed(0.01).max_decimals(4));
+                                        let name = format!("{label} {}", if axis == 0 { "X" } else { "Y" });
+                                        let n = name.clone();
+                                        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::DragValue, !read_only, n.clone()));
+                                        tracked.push((r, name));
+                                    }
+                                    ui.end_row();
                                 }
+                                crate::panels::caption(ui, "Field Angle (°)");
+                                let r = ui.add_enabled(!read_only, egui::DragValue::new(&mut g.cal.angle_deg).speed(0.1));
+                                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::DragValue, !read_only, "Field Angle (°)"));
+                                tracked.push((r, "Field Angle (°)".into()));
                                 ui.end_row();
+                            });
+                            let mut galvo_x = !g.cal.swap_xy;
+                            let r = ui.add_enabled(!read_only, egui::Checkbox::new(&mut galvo_x, "Galvo 1 is X Axis"));
+                            g.cal.swap_xy = !galvo_x;
+                            tracked.push((r, "Galvo 1 is X Axis".into()));
+                            for (axis, negate) in g.cal.negate.iter_mut().enumerate() {
+                                let label = format!("Reverse {} direction", if axis == 0 { "X" } else { "Y" });
+                                let r = ui.add_enabled(!read_only, egui::Checkbox::new(negate, label.as_str()));
+                                tracked.push((r, label));
                             }
-                            crate::panels::caption(ui, "Field Angle (°)");
-                            let r = ui.add_enabled(!read_only, egui::DragValue::new(&mut g.cal.angle_deg).speed(0.1));
-                            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::DragValue, !read_only, "Field Angle (°)"));
-                            tracked.push((r, "Field Angle (°)".into()));
-                            ui.end_row();
-                        });
-                        let mut galvo_x = !g.cal.swap_xy;
-                        let r = ui.add_enabled(!read_only, egui::Checkbox::new(&mut galvo_x, "Galvo 1 is X Axis"));
-                        g.cal.swap_xy = !galvo_x;
-                        tracked.push((r, "Galvo 1 is X Axis".into()));
-                        for (axis, negate) in g.cal.negate.iter_mut().enumerate() {
-                            let label = format!("Reverse {} direction", if axis == 0 { "X" } else { "Y" });
-                            let r = ui.add_enabled(!read_only, egui::Checkbox::new(negate, label.as_str()));
-                            tracked.push((r, label));
+                            ui.collapsing("Rotary (extended axis)", |ui| {
+                                // Merely opening settings does not install a config or change legacy profiles.
+                                let mut r = g.rotary.clone().unwrap_or_default();
+                                let old = r.clone();
+                                ui.add_enabled_ui(!read_only, |ui| {
+                                    let response = ui.checkbox(&mut r.enabled, "Enable rotary");
+                                    tracked.push((response, "Enable rotary".into()));
+                                    ui.horizontal(|ui| {
+                                        ui.label("Drive");
+                                        ui.selectable_value(&mut r.kind, openlaser_machine::RotaryKind::Chuck, "Chuck");
+                                        ui.selectable_value(&mut r.kind, openlaser_machine::RotaryKind::Roller, "Roller");
+                                        ui.label("Wrap axis");
+                                        ui.selectable_value(&mut r.axis, openlaser_machine::RotaryAxis::X, "X");
+                                        ui.selectable_value(&mut r.axis, openlaser_machine::RotaryAxis::Y, "Y");
+                                    });
+                                    egui::Grid::new("rotary-fields").num_columns(2).show(ui, |ui| {
+                                        for (label, value) in [
+                                            ("Drive diameter (mm)", &mut r.drive_diameter_mm),
+                                            ("Object diameter (mm, layout)", &mut r.object_diameter_mm),
+                                            ("Split (mm)", &mut r.split_mm),
+                                            ("Overlap (mm)", &mut r.overlap_mm),
+                                            ("Maximum turns per job", &mut r.max_turns_per_job),
+                                        ] {
+                                            ui.label(label);
+                                            let response = ui.add(egui::DragValue::new(value).speed(0.01));
+                                            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::DragValue, !read_only, label));
+                                            tracked.push((response, label.into()));
+                                            ui.end_row();
+                                        }
+                                        ui.label("Pulses per revolution");
+                                        let response = ui.add(egui::DragValue::new(&mut r.pulses_per_rev));
+                                        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::DragValue, !read_only, "Pulses per revolution"));
+                                        tracked.push((response, "Pulses per revolution".into()));
+                                        ui.end_row();
+                                        for (label, value) in [
+                                            ("Minimum speed (pulses/s)", &mut r.min_speed_pps),
+                                            ("Maximum speed (pulses/s)", &mut r.max_speed_pps),
+                                            ("Acceleration time (ms)", &mut r.accel_ms),
+                                        ] {
+                                            ui.label(label);
+                                            let response = ui.add(egui::DragValue::new(value));
+                                            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::DragValue, !read_only, label));
+                                            tracked.push((response, label.into()));
+                                            ui.end_row();
+                                        }
+                                    });
+                                    for (label, value) in [("Reverse rotary", &mut r.reverse), ("Return rotary to start", &mut r.return_to_start)] {
+                                        let response = ui.checkbox(value, label);
+                                        tracked.push((response, label.into()));
+                                    }
+                                });
+                                if r != old {
+                                    g.rotary = Some(r);
+                                }
+                                ui.weak("Drive diameter means object diameter for a chuck, roller diameter for a roller. Protocol unverified (D12).");
+                            });
+                            let mut always = true;
+                            let r = ui.add_enabled(false, egui::Checkbox::new(&mut always, "Require framing before start"));
+                            let r = r.on_disabled_hover_text("Always required on galvos (D8).");
+                            tracked.push((r, "Require framing before start".into()));
+                            ui.weak(format!(
+                                "Laser source: pulse table {:?} ns · {}–{} kHz",
+                                g.source.pulse_table_ns, g.source.freq_khz[0], g.source.freq_khz[1]
+                            ));
+                        } else {
+                            ui.label("Gantry device settings arrive with live GRBL (M4).");
                         }
-                        let mut always = true;
-                        let r = ui.add_enabled(false, egui::Checkbox::new(&mut always, "Require framing before start"));
-                        let r = r.on_disabled_hover_text("Always required on galvos (D8).");
-                        tracked.push((r, "Require framing before start".into()));
-                        ui.weak(format!("Laser source: pulse table {:?} ns · {}–{} kHz", g.source.pulse_table_ns, g.source.freq_khz[0], g.source.freq_khz[1]));
-                    } else {
-                        ui.label("Gantry device settings arrive with live GRBL (M4).");
+                    }
+                    None => {
+                        ui.label("No device profile.");
                     }
                 }
-                None => {
-                    ui.label("No device profile.");
-                }
-            }
+            });
             ui.separator();
             let r = ui.add_enabled(self.device_draft.is_some() && !read_only, egui::Button::new("Save device settings"));
             let human = self.services.human.is_human_click(ctx, &r);
@@ -329,7 +390,7 @@ impl OpenLaserApp {
                 Ok(()) => {
                     let params = match &profile.kind {
                         openlaser_machine::Kinematics::Galvo(g) => {
-                            serde_json::json!({ "device": profile.id.0, "workArea": g.work_area, "cal": g.cal, "redDot": g.red_dot })
+                            serde_json::json!({ "device": profile.id.0, "workArea": g.work_area, "cal": g.cal, "redDot": g.red_dot, "rotary": g.rotary })
                         }
                         openlaser_machine::Kinematics::Gantry(_) => serde_json::json!({ "device": profile.id.0 }),
                     };

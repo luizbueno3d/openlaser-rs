@@ -865,6 +865,7 @@ pub(crate) mod tests {
 
     pub(crate) fn summary(fp: Fingerprint, machine: &str, powers: &[f64]) -> EmissionSummary {
         EmissionSummary {
+            rotary: None,
             fingerprint: fp,
             bytes_hash: Fingerprint([0; 32]),
             machine: MachineId(machine.into()),

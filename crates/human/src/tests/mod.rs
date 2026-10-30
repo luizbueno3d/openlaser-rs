@@ -70,6 +70,7 @@ fn row() -> PassRow {
 
 fn summary(fp: u8) -> EmissionSummary {
     EmissionSummary {
+        rotary: None,
         fingerprint: Fingerprint([fp; 32]),
         bytes_hash: Fingerprint([fp.wrapping_add(100); 32]),
         machine: MachineId("jpt-m7-200-sim".into()),
