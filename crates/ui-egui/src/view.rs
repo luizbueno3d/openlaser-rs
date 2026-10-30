@@ -1502,9 +1502,12 @@ impl OpenLaserApp {
             if response.drag_stopped() {
                 self.view.marquee_from = None;
                 let (a, b) = (view.screen_to_world(from), view.screen_to_world(to));
+                // Screen Y grows down and design Y up: a drag toward the bottom gives the corners in the wrong order.
+                let min = [a[0].min(b[0]), a[1].min(b[1])];
+                let max = [a[0].max(b[0]), a[1].max(b[1])];
                 self.execute_widget(
                     "edit.select",
-                    serde_json::json!({ "rectMm": [a, b], "crossing": crossing, "mode": if shift { "add" } else { "replace" } }),
+                    serde_json::json!({ "rectMm": [min, max], "crossing": crossing, "mode": if shift { "add" } else { "replace" } }),
                 );
                 self.view.rotate_handles = false;
             }
