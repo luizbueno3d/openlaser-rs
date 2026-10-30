@@ -23,8 +23,11 @@ fn real_lbrn2_preview() {
             assert_eq!(color(i).image.mode, openlaser_doc::ImageMode::Stucki);
             assert_eq!(color(i).image.galvo.frequency, profile.layer_defaults.galvo.frequency);
             assert_eq!(color(i).image.galvo.q_pulse, profile.layer_defaults.galvo.q_pulse);
-            assert!(!color(i).output);
         }
+        // C00: vector ×4 vs image ×1 global repeats cannot share one colour layer → Output OFF. C02 differs only in
+        // priority (order, never what burns) → stays on.
+        assert!(!color(0).output);
+        assert!(color(2).output);
     }
     let text = std::str::from_utf8(&bytes).unwrap();
     // The thumbnail is an attribute on a single empty element. Extract without another XML dependency.
