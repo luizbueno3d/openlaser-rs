@@ -42,8 +42,10 @@ impl NativeFiles {
 
 fn filtered(dialog: rfd::AsyncFileDialog, kind: DialogKind) -> rfd::AsyncFileDialog {
     match kind {
-        DialogKind::OpenProject => dialog.add_filter("OpenLaser Project", &["olp"]),
-        DialogKind::Import => dialog.add_filter("Vector and image files", &["svg", "dxf", "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif", "json"]),
+        DialogKind::OpenProject => dialog.add_filter("Laser projects", &["olp", "lbrn2"]),
+        DialogKind::Import => {
+            dialog.add_filter("Vector and image files", &["lbrn2", "svg", "dxf", "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif", "json"])
+        }
         DialogKind::SaveProject => dialog.add_filter("OpenLaser Project", &["olp"]),
         DialogKind::ExportGcode => dialog.add_filter("G-code", &["gcode", "nc"]),
         DialogKind::ExportJob => dialog.add_filter("Job review (JSON)", &["json"]),

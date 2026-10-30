@@ -38,7 +38,7 @@ const TABLE: &[(&str, &[&str], &[&str])] = &[
         &["types", "geom", "doc", "machine", "camera"],
         &["zip", "flate2", "serde", "serde_json", "blake3", "craft-atomic", "craft-settings", "thiserror"],
     ),
-    ("import", &["types", "geom", "doc"], &["usvg", "image", "serde", "serde_json", "blake3", "thiserror"]),
+    ("import", &["types", "geom", "doc"], &["usvg", "roxmltree", "base64", "image", "serde", "serde_json", "blake3", "thiserror"]),
     ("plan", &["types", "geom", "doc", "machine"], &["blake3", "serde", "thiserror"]),
     ("text", &["types", "geom"], &["kurbo", "skrifa", "harfrust", "serde", "thiserror"]),
     ("safety", &["types", "geom", "doc", "machine", "plan"], &["serde", "thiserror"]),
