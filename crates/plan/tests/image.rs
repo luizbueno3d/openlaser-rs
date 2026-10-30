@@ -227,7 +227,9 @@ fn rotary_image_angle_is_a_notice_and_scans_without_rotating_artwork() {
             let cross = (b[0] - a[0]) * radians.sin() - (b[1] - a[1]) * radians.cos();
             assert!(cross.abs() < 1e-10, "{angle}: {path:?}");
             for point in &path.0 {
-                assert!(point[0].abs() <= 0.5 && point[1].abs() <= 1.0, "{angle}: {point:?}");
+                // Inside the 1 × 2 mm image, up to float noise: sin/cos round differently per platform (Windows gave
+                // 1.0000000000000002), and safety allows the same kind of noise at the field edge.
+                assert!(point[0].abs() <= 0.5 + 1e-12 && point[1].abs() <= 1.0 + 1e-12, "{angle}: {point:?}");
             }
         }
     }
