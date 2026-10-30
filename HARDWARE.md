@@ -197,4 +197,6 @@ close them:
 
 | Date | Step | Result (pass/fail + numbers) | Trace file | Notes |
 |---|---|---|---|---|
-| | | | | |
+| 2026-10-30 | HIL-0 `detect`, `status` | pass: 9588:9899 "20200507" USBLMCV4 found; GetSerialNo `0000 0007 0006 0220`, GetVersion `0000 8421 0009 0220`; status 0x0220 = READY, idle; 6 trace events in 2.6 ms, no Reset or laser command | `hil0.jsonl` | Bit 0x0200 set, not used by our code; `usbSetConfiguration` not needed on macOS |
+| 2026-10-30 | GUI frame (red light) | fail → fixed: the frame was X/Y transposed against the canvas ("rotated 90° CW and mirrored" seen from the front) | none (GUI) | Fixed with `cal.swapXy = true` in the saved profile `machines/jpt-m7-200.json` (Galvo 1 is X Axis OFF); confirmed. The built-in default stays identity: the rust-v1 frozen bytes are identity-mapped |
+| 2026-10-30 | GUI first burns | ARM dialog reached for C00 Line at 74.99 %, 2 passes; burn result not yet reported | none (GUI) | Bench cap refused 30 % on the first emission as designed. Field feedback → branch `phase3-field`: ARM once per session, framing optional, Disconnect, Device Settings save, marquee selection |
