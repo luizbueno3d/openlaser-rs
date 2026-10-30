@@ -111,7 +111,8 @@ fn main() -> ExitCode {
         viewport: egui::ViewportBuilder::default()
             .with_title(if real_laser { "OpenLaser — REAL LASER (USB)" } else { "OpenLaser" })
             .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([760.0, 480.0]),
+            .with_min_inner_size([760.0, 480.0])
+            .with_icon(app_icon()),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -214,4 +215,9 @@ fn device_provider() -> (Arc<dyn DeviceProvider>, bool) {
         emission_cap_pct: None,
     });
     (Arc::new(sim), false)
+}
+
+/// OpenLaser's own icon (assets/icon.svg); without it eframe shows its default icon in the Dock and taskbar.
+fn app_icon() -> Arc<egui::IconData> {
+    Arc::new(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png")).unwrap_or_default())
 }
