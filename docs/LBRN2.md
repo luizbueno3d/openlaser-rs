@@ -21,7 +21,7 @@ This implementation was written from format observations, the two authorized loc
 
 **Conclusion for the two 1.5.04 samples: design coordinates and backup text outlines are Y-up, in millimetres. No global Y inversion or X inversion is needed.**
 
-The opt-in render test uses `openlaser-render::document_list` and its existing CPU preview renderer. The logo's saved thumbnail is only 256×256 and includes a tiny artwork cluster at the upper right and remote attribution text at the lower left. Our full preview preserves that arrangement. A Y reflection would exchange their vertical positions. The separate attribution render reads **Created by Olena Panasovska** left-to-right and upright; it is neither mirrored nor upside-down. Main-artwork text is readable too. This is visual verification, not a pixel equality claim: preview styles, image handling and viewport padding differ.
+The opt-in render test uses `openlaser-render::document_list` and its existing CPU preview renderer. The logo's saved thumbnail is only 256×256 and includes a tiny artwork cluster at the upper right and remote attribution text at the lower left. Our full preview preserves that arrangement. A Y reflection would exchange their vertical positions. The separate attribution render (a "Created by …" credit line) reads left-to-right and upright; it is neither mirrored nor upside-down. Main-artwork text is readable too. This is visual verification, not a pixel equality claim: preview styles, image handling and viewport padding differ.
 
 Reviewer files (private local artifacts, excluded from the repository):
 

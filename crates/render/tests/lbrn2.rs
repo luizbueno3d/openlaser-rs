@@ -55,13 +55,13 @@ fn real_lbrn2_preview() {
     render(&list, world, "ours.png");
     // Main artwork detail (outlying attribution text otherwise dominates this sample's thumbnail).
     render(&list, Bounds { min: [-300., -200.], max: [550., 350.] }, "ours-detail.png");
-    // Render each attribution outline at a readable scale to settle Y direction and mirroring.
+    // Render each attribution outline (a "Created by …" text in the local sample) at a readable scale to settle Y direction and mirroring.
     fn find_text(shapes: &[Arc<openlaser_doc::Shape>], parent: openlaser_geom::Affine, out: &mut Vec<Arc<openlaser_doc::Shape>>) {
         for s in shapes {
             let xf = parent * s.xform;
             if let openlaser_doc::Geom::Group(children) = &s.geom {
                 find_text(children, xf, out);
-            } else if s.name.as_deref() == Some("Created by Olena Panasovska") {
+            } else if s.name.as_deref().is_some_and(|n| n.starts_with("Created by ")) {
                 let mut shape = s.as_ref().clone();
                 shape.xform = xf;
                 out.push(Arc::new(shape));
