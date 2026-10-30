@@ -33,14 +33,22 @@ This page is for Luiz, at the machine. **No AI agent runs any of this.** It is t
       each one actually cuts.
 - [ ] If you still have the old EZCAD PC: copy its `.cor` file and `markcfg*` files. They likely explain the 1.1834
       scale factor.
-- [ ] Build the hardware binaries yourself, in a terminal with no agent running:
+- [ ] **Build the hardware binaries yourself, at home, before you leave** (no laser attached: compiling never touches
+      a device; close agent sessions first). Nobody has compiled the `hw` feature yet — agents and CI are not
+      allowed to — so a compile error must show up here, not at the machine. The first build takes 5–10 minutes and
+      about 5 GB of disk.
 
 ```sh
-cd ~/AI/OpenLaser/openlaser && git pull
-export PATH="$HOME/.cargo/bin:$PATH"
+cd ~/AI/OpenLaser/openlaser && git fetch && git checkout preflight-hil && git pull
+export PATH="$HOME/.cargo/bin:$PATH" CARGO_INCREMENTAL=0
 CARGO_TARGET_DIR=~/AI/OpenLaser/.target/hw cargo build -p openlaser-hw -p openlaser --features hw
 alias olhw=~/AI/OpenLaser/.target/hw/debug/openlaser-hw
 ```
+
+      If it fails, send Claude the error (it can fix the code; it cannot build `hw` itself).
+- [ ] **Use the MacBook.** Every step here is written for macOS, where the board needs no driver. On a Windows PC the
+      board needs the WinUSB driver (Zadig), which replaces EZCAD's driver: EZCAD stops seeing the laser until the
+      old driver is restored in Device Manager. Don't do that on the company's EZCAD PC today.
 
 - [ ] **Rehearse on the simulator first** (no laser, same keys and prompts):
       `olhw run --builtin dot --sim`, then `olhw run --builtin box10 --sim` (practise Enter, the `ARM <code>` prompt,
@@ -99,7 +107,9 @@ olhw bench start
 
 ## 5. HIL-3: the GUI
 
-- [ ] `~/AI/OpenLaser/.target/hw/debug/openlaser`, choose the **JPT M7 · USB** machine, import the business card,
+- [ ] From the same terminal as the bench session (so `OPENLASER_HW_PRESENT=1` is set and Ctrl-C there stops the
+      machine): `~/AI/OpenLaser/.target/hw/debug/openlaser`. The window title must read **"OpenLaser — REAL LASER
+      (USB)"**; plain "OpenLaser" means it is on the simulator. Choose the **JPT M7 · USB** machine, import the business card,
       Frame (human click), Start → ARM dialog (check the power, kHz, ns and actual speed shown) → mark. 20 STOPs from
       the GUI. One MOPA colour test.
 

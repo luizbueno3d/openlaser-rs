@@ -27,6 +27,7 @@ pub mod stop;
 pub mod summary;
 pub mod trace;
 pub mod tty_arm;
+mod usb_trace;
 
 use std::fmt;
 use std::path::PathBuf;

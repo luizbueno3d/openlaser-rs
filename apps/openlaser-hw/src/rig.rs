@@ -7,13 +7,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use openlaser_driver::Single;
 use openlaser_engine::{
     ArmToken, DeviceAccess, DeviceProvider, DriverEvent, EmissionSummary, EngineError, Event, Fingerprint, FrameMode, FrameReceipt, FrameSource, FrameStyle,
     FsAuthority, JobOptions, MachineId, MachineProfile, MonoTime, Origin, Outcome, ProfileStore, Session, SessionConfig, SessionId, StopReport,
 };
 use openlaser_format::machines::DirProfileStore;
 use openlaser_lmc_sim::{SimConfig, SimProvider};
-use openlaser_machine::{FieldRect, GalvoLink, Kinematics};
+use openlaser_machine::{FieldRect, GalvoLink, GalvoMachine, Kinematics};
 use openlaser_types::{Clock, RefusalCode};
 use serde_json::{Value, json};
 
@@ -111,6 +112,22 @@ fn job_refused(j: openlaser_engine::JobRefused) -> HwError {
     if j.refusals.is_empty() { HwError::Failed(j.error.unwrap_or_else(|| "the job could not be built".to_owned())) } else { HwError::Refusals(j.refusals) }
 }
 
+/// `status` (H12): GetSerialNo and GetVersion, each answered within 250 ms or a fault (never retried).
+const PROBE_GET_SERIAL_NO: u16 = 0x0009;
+const PROBE_GET_VERSION: u16 = 0x0007;
+const PROBE_SLICE: Duration = Duration::from_millis(20);
+const PROBE_BUDGET: Duration = Duration::from_millis(250);
+/// GetVersion word 3 (R05 §1.3).
+const STATUS_READY: u16 = 0x0020;
+const STATUS_BUSY: u16 = 0x0004;
+
+fn driver_error(e: openlaser_driver::DriverError) -> HwError {
+    match e {
+        openlaser_driver::DriverError::Refused(r) => HwError::Refused(r),
+        other => HwError::Failed(other.to_string()),
+    }
+}
+
 /// The real device provider: `hw` builds only.
 #[cfg(feature = "hw")]
 fn usb_provider() -> Result<Arc<dyn DeviceProvider>, HwError> {
@@ -173,6 +190,10 @@ pub struct EngineRig {
     provider: Arc<dyn DeviceProvider>,
     sim: Option<Arc<SimProvider>>,
     trace: Option<TraceState>,
+    /// `--trace` on the real USB device: the recording transport's file (see [`crate::usb_trace`]).
+    usb_trace: Option<crate::usb_trace::SharedSink>,
+    /// The machine's galvo settings, for `status` (None for a gantry).
+    galvo: Option<GalvoMachine>,
 }
 
 struct TraceState {
@@ -250,7 +271,11 @@ impl EngineRig {
             widen_for_extent(profile, e)?;
         }
         let link_is_sim = matches!(&profile.kind, Kinematics::Galvo(g) if g.link == GalvoLink::Sim);
-        let (provider, sim): (Arc<dyn DeviceProvider>, Option<Arc<SimProvider>>) = match usb {
+        let galvo = match &profile.kind {
+            Kinematics::Galvo(g) => Some(g.clone()),
+            Kinematics::Gantry(_) => None,
+        };
+        let (mut provider, sim): (Arc<dyn DeviceProvider>, Option<Arc<SimProvider>>) = match usb {
             None => {
                 let s = Arc::new(SimProvider::new(sim_cfg.clone()));
                 (Arc::clone(&s) as Arc<dyn DeviceProvider>, Some(s))
@@ -258,6 +283,7 @@ impl EngineRig {
             Some(_) if link_is_sim => return Err(HwError::Usage(format!("`{}` is a simulator profile: add --sim", machine.0))),
             Some(u) => (u, None),
         };
+        let mut usb_trace = None;
         let trace = match &spec.device.trace {
             None => None,
             Some(path) if sim.is_some() => Some(TraceState {
@@ -269,12 +295,11 @@ impl EngineRig {
                 failed: None,
                 reported: false,
             }),
-            Some(_) => {
-                return Err(HwError::Failed(
-                    "--trace on the real USB device needs openlaser-driver to re-export openlaser_lmc::{Single, Packet} so the transport can be \
-                     wrapped (integrator request); nothing was opened. --trace works with --sim"
-                        .to_owned(),
-                ));
+            Some(path) => {
+                let sink = crate::usb_trace::sink(path, Arc::clone(&clock)).map_err(HwError::Failed)?;
+                usb_trace = Some(Arc::clone(&sink));
+                provider = Arc::new(crate::usb_trace::TracingProvider::new(provider, sink));
+                None
             }
         };
         let profiles: Option<Arc<dyn ProfileStore>> = profiles_dir.map(|d| Arc::new(DirProfileStore::new(d.to_path_buf())) as Arc<dyn ProfileStore>);
@@ -290,7 +315,7 @@ impl EngineRig {
             files: FsAuthority::TrustedLocal,
             clock: Arc::clone(&clock),
         });
-        Ok(EngineRig { session, clock, machine, provider, sim, trace })
+        Ok(EngineRig { session, clock, machine, provider, sim, trace, usb_trace, galvo })
     }
 
     fn exec(&mut self, id: &str, params: Value) -> Result<Value, HwError> {
@@ -341,6 +366,9 @@ impl EngineRig {
 
     /// The first trace failure, once (the flows print it; the machine is not stopped for a record).
     fn trace_failure(&mut self) -> Option<String> {
+        if let Some(sink) = &self.usb_trace {
+            return crate::usb_trace::take_failure(sink);
+        }
         let t = self.trace.as_mut()?;
         if t.reported {
             return None;
@@ -446,13 +474,44 @@ impl Rig for EngineRig {
     }
 
     fn probe(&mut self) -> Result<Vec<String>, HwError> {
-        // GetSerialNo/GetVersion without init needs a transport the CLI can drive directly; LmcTransport takes
-        // `openlaser_lmc::Single`, which no crate this binary may depend on re-exports yet (integrator request).
-        Err(HwError::Failed(
-            "`status` needs openlaser-driver to re-export openlaser_lmc::Single (integrator request); nothing was sent. Use `detect` for the \
-             descriptors"
-                .to_owned(),
-        ))
+        // GetSerialNo + GetVersion on a freshly opened transport: no init, no Reset, nothing that moves or fires (H12).
+        let Some(g) = self.galvo.clone() else {
+            return Err(HwError::refused(RefusalCode::WrongDeviceKind, "`status` reads LMC (galvo) boards; this machine is a gantry"));
+        };
+        let mut t = self.provider.open_lmc(&g).map_err(driver_error)?;
+        let mut lines = Vec::new();
+        for (name, op) in [("GetSerialNo", PROBE_GET_SERIAL_NO), ("GetVersion", PROBE_GET_VERSION)] {
+            t.submit_single(Single([op, 0, 0, 0, 0, 0])).map_err(|e| HwError::Failed(format!("{name}: {e}")))?;
+            let mut polls = 0u32;
+            let reply = loop {
+                match t.poll_single(PROBE_SLICE).map_err(|e| HwError::Failed(format!("{name}: {e}")))? {
+                    Some(r) => break r,
+                    None => {
+                        polls += 1;
+                        if PROBE_SLICE * polls >= PROBE_BUDGET {
+                            return Err(HwError::Failed(format!("{name}: no reply within {} ms (not retried)", PROBE_BUDGET.as_millis())));
+                        }
+                    }
+                }
+            };
+            match reply {
+                Some(w) => {
+                    let mut line = format!("{name}: {:04x} {:04x} {:04x} {:04x}", w[0], w[1], w[2], w[3]);
+                    if op == PROBE_GET_VERSION {
+                        let ready = if w[3] & STATUS_READY != 0 { "READY" } else { "not READY" };
+                        let busy = if w[3] & STATUS_BUSY != 0 { "BUSY" } else { "idle" };
+                        line.push_str(&format!(" (status 0x{:04x}: {ready}, {busy})", w[3]));
+                    }
+                    lines.push(line);
+                }
+                None => lines.push(format!("{name}: no reply")),
+            }
+        }
+        drop(t);
+        if let Some(f) = self.trace_failure() {
+            lines.push(format!("warning: the trace file stopped recording: {f}"));
+        }
+        Ok(lines)
     }
 
     fn disconnect(&mut self) {
@@ -523,6 +582,39 @@ mod tests {
         // The same profiles with nothing skipped open (no device is touched by opening).
         let rig = EngineRig::open_loaded(&spec, None, (vec![jpt_m7_200_sim()], Vec::new()), None, &sim, clock).unwrap();
         assert_eq!(rig.machine(), &MachineId(DEFAULT_SIM_MACHINE.to_owned()));
+    }
+
+    /// The USB path (`status`, `--trace`) with the simulator standing in for the board: the provider is handed in
+    /// as `usb`, so everything after the hardware gate runs exactly as it would on the real device.
+    #[test]
+    fn status_on_the_usb_path_reads_serial_and_version_and_traces_every_wire_event() {
+        let dir = std::env::temp_dir().join(format!("openlaser-hw-usb-trace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("status.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let spec = RigSpec {
+            purpose: Purpose::Status,
+            device: DeviceOpts { machine: Some(MachineId(DEFAULT_USB_MACHINE.to_owned())), sim: false, trace: Some(path.clone()) },
+            extent: None,
+        };
+        let clock: Arc<dyn Clock> = Arc::new(openlaser_types::VirtualClock::new());
+        let sim = crate::default_sim_config();
+        let board: Arc<dyn DeviceProvider> = Arc::new(SimProvider::new(sim.clone()));
+        let mut rig = EngineRig::open_loaded(&spec, Some(board), (vec![jpt_m7_200()], Vec::new()), None, &sim, clock).unwrap();
+        let lines = rig.probe().unwrap();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].starts_with("GetSerialNo: "), "{lines:?}");
+        assert!(lines[1].starts_with("GetVersion: ") && lines[1].contains("READY"), "{lines:?}");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let kinds: Vec<String> = text
+            .lines()
+            .map(|l| {
+                let v: Value = serde_json::from_str(l).unwrap();
+                format!("{} {}", v["kind"].as_str().unwrap(), v["op"].as_str().unwrap_or(""))
+            })
+            .collect();
+        assert_eq!(kinds, ["open ", "single GetSerialNo", "read ", "single GetVersion", "read ", "close "]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
