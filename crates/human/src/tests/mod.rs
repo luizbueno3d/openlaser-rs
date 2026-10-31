@@ -210,12 +210,13 @@ fn human_click_after_300ms_mints_token() {
     assert_eq!(mints(), 1);
     assert_eq!(h.state().armed.len(), 1, "Armed(token) is returned once");
     assert!(!h.state().human.surface_open(), "the dialog closes once armed");
-    // Drawn again for the same PendingArm, it is a fresh dialog: nothing typed, nothing ticked, no second token.
+    // Drawn again in the same session (ARM once per session), it opens filled in with what the person confirmed,
+    // but nothing arms without a new real click: still one token.
     h.state_mut().show = true;
     h.run();
     assert_eq!(h.state().armed.len(), 1);
-    assert_eq!(field_value(&h), "");
-    assert_eq!(ticks(&h), vec![false, false]);
+    assert_eq!(field_value(&h), "ARM");
+    assert_eq!(ticks(&h), vec![true, true]);
 }
 
 #[test]

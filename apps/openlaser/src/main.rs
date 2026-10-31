@@ -1,6 +1,8 @@
 //! Native OpenLaser GUI entry point (SPEC §3.21). Default builds inject the simulator and never link hardware
 //! transport. Everything testable lives in `src/lib.rs`.
 #![forbid(unsafe_code)]
+// Release builds on Windows open no console window behind the app.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -111,7 +113,8 @@ fn main() -> ExitCode {
         viewport: egui::ViewportBuilder::default()
             .with_title(if real_laser { "OpenLaser — REAL LASER (USB)" } else { "OpenLaser" })
             .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([760.0, 480.0]),
+            .with_min_inner_size([760.0, 480.0])
+            .with_icon(app_icon()),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -120,6 +123,8 @@ fn main() -> ExitCode {
         Box::new(move |cc| {
             let settings = PersistentSettings::open();
             let in_window_menus = args.in_window_menus || settings.load().in_window_menus;
+            // Before the native menu is built: its labels are fixed until the next start.
+            openlaser_ui_egui::i18n::set_language(settings.load().language);
             let quit_ctx = cc.egui_ctx.clone();
             let mut automation = openlaser::control_runtime::Automation::new(&args, Arc::clone(&registry_for_app), cc.egui_ctx.clone());
             if args.control.is_some() {
@@ -214,4 +219,9 @@ fn device_provider() -> (Arc<dyn DeviceProvider>, bool) {
         emission_cap_pct: None,
     });
     (Arc::new(sim), false)
+}
+
+/// OpenLaser's own icon (assets/icon.svg); without it eframe shows its default icon in the Dock and taskbar.
+fn app_icon() -> Arc<egui::IconData> {
+    Arc::new(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png")).unwrap_or_default())
 }

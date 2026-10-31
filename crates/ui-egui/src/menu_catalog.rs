@@ -405,7 +405,9 @@ pub fn is_shell_row(row: &Row) -> bool {
         | "view.pan"
         | "view.cameraBackground"
         | "tools.select"
-        | "window.resetLayout" => true,
+        | "window.resetLayout"
+        | "prefs.language.en"
+        | "prefs.language.ptBr" => true,
         _ => false,
     }
 }
