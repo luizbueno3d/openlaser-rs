@@ -14,8 +14,6 @@ use serde::{Deserialize, Serialize};
 pub const BENCH_FILE: &str = "bench-session.json";
 /// S17: a bench session is valid for 2 h.
 pub const BENCH_MAX_AGE_S: u64 = 2 * 3600;
-/// S23: the first emission of a bench session is capped at this power.
-pub const FIRST_EMISSION_CAP_PCT: f64 = 10.0;
 /// A session dated more than this in the future (a clock set back) is not trusted.
 const FUTURE_TOLERANCE_S: u64 = 300;
 /// The file is tiny; anything bigger is not ours.
@@ -94,8 +92,9 @@ impl BenchStore {
 
     /// S23: `Some(10.0)` until one emission has completed in this bench session, then `None`.
     pub fn emission_cap_pct_at(&self, now_unix: u64) -> Result<Option<f64>, Refusal> {
-        let s = self.valid_at(now_unix)?;
-        Ok(if s.emissions == 0 { Some(FIRST_EMISSION_CAP_PCT) } else { None })
+        // No first-emission cap: the job's own power is what burns (Luiz, 2026-10-31).
+        self.valid_at(now_unix)?;
+        Ok(None)
     }
 
     /// After a run finishes (not after a stop or fault).
@@ -157,17 +156,17 @@ mod tests {
     }
 
     #[test]
-    fn bench_first_emission_cap() {
+    fn bench_has_no_first_emission_cap() {
         let dir = tempfile::tempdir().unwrap();
         let store = BenchStore::at(dir.path());
         assert!(store.emission_cap_pct_at(T0).is_err(), "no session: refused, never uncapped");
         store.start_at(T0, 1).unwrap();
-        assert_eq!(store.emission_cap_pct_at(T0 + 10).unwrap(), Some(FIRST_EMISSION_CAP_PCT));
+        assert_eq!(store.emission_cap_pct_at(T0 + 10).unwrap(), None, "the first emission is not capped either");
         assert_eq!(store.record_emission_at(T0 + 20).unwrap().emissions, 1);
         assert_eq!(store.emission_cap_pct_at(T0 + 30).unwrap(), None);
         assert!(store.record_emission_at(T0 + BENCH_MAX_AGE_S + 60).is_err(), "nothing is recorded into an expired session");
         store.start_at(T0 + 10_000, 2).unwrap();
-        assert_eq!(store.emission_cap_pct_at(T0 + 10_001).unwrap(), Some(FIRST_EMISSION_CAP_PCT), "a new session is capped again");
+        assert_eq!(store.emission_cap_pct_at(T0 + 10_001).unwrap(), None);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Starts OpenLaser with the real laser enabled: a 2-hour bench session (the first emission is capped at 10 % power),
+# Starts OpenLaser with the real laser enabled: a 2-hour bench session,
 # then the app. The software is not a safety system: the E-stop and the key switch are.
 APP=/Applications/OpenLaser.app/Contents/MacOS
 [ -x "$APP/openlaser" ] || APP="$(cd "$(dirname "$0")" && pwd)/OpenLaser.app/Contents/MacOS"

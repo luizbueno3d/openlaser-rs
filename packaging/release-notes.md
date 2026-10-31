@@ -14,4 +14,4 @@ not a safety system: wear goggles rated for your laser and keep the E-stop and t
 
 - **OpenLaser**: design, import, preview and the simulator. The real laser stays off.
 - **Start OpenLaser with laser**: starts a 2-hour bench session in a terminal window, then opens OpenLaser with the laser
-  enabled. The first burn of each session is capped at 10 % power.
+  enabled. Start burns at the power you set; it does not need a red-light frame first.
