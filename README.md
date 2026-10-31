@@ -16,6 +16,13 @@ see the log in [HARDWARE.md](HARDWARE.md). The software is **not** a safety syst
 - Galvo output over USB with red-light framing, STOP from the window, and a first-emission power cap per bench session.
 - Rotary (extended axis) strip marking, unverified on hardware (D12).
 
+## Download
+
+macOS (Apple Silicon and Intel) and Windows builds are on the [Releases](https://github.com/luizbueno3d/openlaser-rs/releases)
+page. `README.txt` inside each download covers the first open (the apps are not signed yet) and the one-time WinUSB
+driver on Windows. Start **OpenLaser** to design and simulate; start **Start OpenLaser with laser** to use the real
+machine.
+
 ## Build
 
 ```sh

@@ -1,6 +1,8 @@
 //! Native OpenLaser GUI entry point (SPEC §3.21). Default builds inject the simulator and never link hardware
 //! transport. Everything testable lives in `src/lib.rs`.
 #![forbid(unsafe_code)]
+// Release builds on Windows open no console window behind the app.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::process::ExitCode;
 use std::sync::Arc;
