@@ -1,5 +1,5 @@
 @echo off
-rem Starts OpenLaser with the real laser enabled: a 2-hour bench session (the first emission is capped at 10 % power),
+rem Starts OpenLaser with the real laser enabled: a 2-hour bench session,
 rem then the app. The software is not a safety system: the E-stop and the key switch are.
 cd /d "%~dp0"
 set OPENLASER_HW_PRESENT=1

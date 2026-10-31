@@ -16,9 +16,8 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use openlaser_lmc::LmcTransport;
 use openlaser_machine::{GalvoMachine, GantryMachine};
-// The variant is aliased because xtask rule 13 greps for the engine's dispatch origin `Origin::Human`.
-use openlaser_types::FrameOrigin::{self, Human as HumanFrame};
-use openlaser_types::{ArmToken, Clock, FRAME_RECEIPT_MAX_AGE, FrameMode, FrameReceipt, MachineId, Refusal, RefusalCode, SessionId};
+use openlaser_types::FrameOrigin;
+use openlaser_types::{ArmToken, Clock, FrameMode, FrameReceipt, MachineId, Refusal, RefusalCode, SessionId};
 use serde::Serialize;
 
 use crate::backend::{Backend, Capabilities, DriverError, DriverEvent, EncodedJob, FrameOutcome, MachineState, Outcome};
@@ -589,35 +588,7 @@ impl<B: Backend> Runtime<B> {
         if token.machine() != &self.machine {
             return Err(Refusal::new(RefusalCode::MachineMismatch, format!("the ARM was for {}, this driver drives {}", token.machine().0, self.machine.0)));
         }
-        let receipt = self.receipt.try_borrow().ok().and_then(|r| r.clone());
-        let Some(r) = receipt else {
-            return Err(Refusal::new(RefusalCode::FrameRequired, "frame this job on this machine first: no executed frame pass in this session"));
-        };
-        if r.fingerprint != fp {
-            return Err(Refusal::new(
-                RefusalCode::FrameRequired,
-                format!("the last frame traced another job ({}): frame this one ({})", r.fingerprint.short(), fp.short()),
-            ));
-        }
-        if r.machine != self.machine {
-            return Err(Refusal::new(RefusalCode::MachineMismatch, format!("the last frame ran on {}, not {}", r.machine.0, self.machine.0)));
-        }
-        if r.session != self.session {
-            return Err(Refusal::new(RefusalCode::ArmSessionMismatch, "the frame receipt is from another session: frame again"));
-        }
-        if r.full_passes < 1 {
-            return Err(Refusal::new(RefusalCode::FrameRequired, "no frame pass has executed yet: frame again"));
-        }
-        let age = now.saturating_since(r.at);
-        if age > FRAME_RECEIPT_MAX_AGE {
-            return Err(Refusal::new(RefusalCode::FrameReceiptExpired, format!("the frame is {} s old (limit 600 s): frame again", age.as_secs())));
-        }
-        if r.origin != HumanFrame {
-            return Err(Refusal::new(RefusalCode::FrameNotHuman, "the frame was not started by a person: frame again from the Laser panel"));
-        }
-        if !r.covers_job() {
-            return Err(Refusal::new(RefusalCode::FrameDoesNotCoverJob, "the last frame traced tool layers only: frame the job itself"));
-        }
+        // No frame needed before a run: Start burns the job as it is now (Luiz, 2026-10-31).
         if !self.used_nonces.insert(token.nonce()) {
             return Err(Refusal::new(RefusalCode::ArmNonceUsed, "this ARM was already used: ARM again"));
         }
@@ -667,7 +638,9 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     use openlaser_arm::testing::token_for_tests;
-    use openlaser_types::{Fingerprint, FrameSource, FrameStyle, MonoTime, SystemClock, VirtualClock};
+    // The variant is aliased because xtask rule 13 greps for the engine's dispatch origin `Origin::Human`.
+    use openlaser_types::FrameOrigin::Human as HumanFrame;
+    use openlaser_types::{Fingerprint, FrameSource, FrameStyle, MonoTime, SystemClock};
 
     use super::*;
     use crate::backend::{DeviceInfo, MachineStatus};
@@ -951,19 +924,14 @@ mod tests {
     }
 
     #[test]
-    fn run_refused_without_own_receipt() {
-        assert_eq!(refused_with(&run_after(None, HumanFrame, token(1), job())), RefusalCode::FrameRequired);
-    }
-
-    #[test]
-    fn run_refused_tool_layers_receipt() {
-        let evs = run_after(Some(FrameSource::ToolLayersOnly), HumanFrame, token(1), job());
-        assert_eq!(refused_with(&evs), RefusalCode::FrameDoesNotCoverJob);
-    }
-
-    #[test]
-    fn run_refused_agent_receipt() {
-        assert_eq!(refused_with(&run_after(Some(FrameSource::Job), FrameOrigin::Agent, token(1), job())), RefusalCode::FrameNotHuman);
+    fn run_needs_no_frame_first() {
+        // Start burns the job as it is now, framed or not (Luiz, 2026-10-31).
+        let calls = Arc::new(Calls::default());
+        let h = spawn_mock(Mock::new(&calls), Arc::new(SystemClock::new()));
+        connected(&h);
+        h.run(job(), token(1));
+        until(&h, |e| matches!(e, DriverEvent::Finished(Outcome::Finished { .. })));
+        assert_eq!(calls.run.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -979,20 +947,6 @@ mod tests {
         assert_eq!(refused_with(&run_after(Some(FrameSource::Job), HumanFrame, token(1), other)), RefusalCode::Stale);
         let elsewhere = Job { machine: MachineId("other".into()), ..job() };
         assert_eq!(refused_with(&run_after(Some(FrameSource::Job), HumanFrame, token(1), elsewhere)), RefusalCode::MachineMismatch);
-    }
-
-    #[test]
-    fn run_refused_when_the_receipt_expired() {
-        let calls = Arc::new(Calls::default());
-        let clock = Arc::new(VirtualClock::new());
-        let h = spawn_mock(Mock::new(&calls), clock.clone());
-        connected(&h);
-        h.frame(frame(FrameSource::Job), FrameMode::Once, HumanFrame);
-        until(&h, |e| matches!(e, DriverEvent::FrameCompleted(_)));
-        clock.advance(FRAME_RECEIPT_MAX_AGE + Duration::from_secs(1));
-        h.run(job(), token(1));
-        let evs = until(&h, |e| matches!(e, DriverEvent::Fault(_)));
-        assert_eq!(refused_with(&evs), RefusalCode::FrameReceiptExpired);
     }
 
     #[test]

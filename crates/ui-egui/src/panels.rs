@@ -1573,7 +1573,13 @@ impl OpenLaserApp {
         gate: Result<(), String>,
         action: impl FnOnce(&mut Self) -> Result<(), openlaser_engine::EngineError>,
     ) {
-        let r = ui.add_enabled(gate.is_ok(), egui::Button::new(text).min_size(egui::vec2(56.0, 24.0)));
+        // Start fires the laser: red, so nobody mistakes it for a harmless button (Luiz, 2026-10-31).
+        let button = if label == "Start" {
+            egui::Button::new(egui::RichText::new(text).strong().color(egui::Color32::WHITE)).fill(egui::Color32::from_rgb(200, 0, 0))
+        } else {
+            egui::Button::new(text)
+        };
+        let r = ui.add_enabled(gate.is_ok(), button.min_size(egui::vec2(56.0, 24.0)));
         self.track(&r, "button", label, true);
         // Start keeps its click for the ARM confirmation that follows (ARM once per session, Settings).
         let human = if label == "Start" { self.services.human.start_click(ctx, &r) } else { self.services.human.is_human_click(ctx, &r) };

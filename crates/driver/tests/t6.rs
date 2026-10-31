@@ -804,25 +804,13 @@ mod lmc {
     }
 
     #[test]
-    fn t6_run_refused_without_own_receipt() {
+    fn t6_run_needs_no_frame_first() {
         let r = rig(board(8, Vec::new()), virtual_clock(), None);
         connected(&r);
         let job = mark_job(&box10(), 30.0, 1000.0, 1);
         let t = token(&job, 1, far());
         r.handle.run(job, t);
-        until(&r.handle, |e| matches!(e, DriverEvent::Fault(openlaser_driver::DriverError::Refused(x)) if x.code == RefusalCode::FrameRequired));
-    }
-
-    #[test]
-    fn t6_run_refused_tool_layers_receipt() {
-        let r = rig(board(8, Vec::new()), virtual_clock(), None);
-        connected(&r);
-        r.handle.frame(frame_job(box10(), FrameSource::ToolLayersOnly), FrameMode::Once, BY_HUMAN);
-        until(&r.handle, idle);
-        let job = mark_job(&box10(), 30.0, 1000.0, 1);
-        let t = token(&job, 1, far());
-        r.handle.run(job, t);
-        until(&r.handle, |e| matches!(e, DriverEvent::Fault(openlaser_driver::DriverError::Refused(x)) if x.code == RefusalCode::FrameDoesNotCoverJob));
+        until(&r.handle, finished);
     }
 
     #[test]

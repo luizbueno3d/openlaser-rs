@@ -13,8 +13,8 @@ Two ways to start
 
   OpenLaser                        Design, import, preview and the built-in simulator. The real laser stays off.
   Start OpenLaser with laser       Opens a small terminal window that starts a 2-hour "bench session", then opens
-                                   OpenLaser with the real laser enabled. The first burn of each session is capped
-                                   at 10 % power. After 2 hours, start it again.
+                                   OpenLaser with the real laser enabled. After 2 hours,
+                                   start it again.
 
 
 macOS (Apple Silicon and Intel, macOS 11 or later)
