@@ -73,6 +73,12 @@ impl HumanSurfaces for ObservedHuman {
     fn is_human_click(&mut self, ctx: &egui::Context, r: &egui::Response) -> bool {
         self.human.is_human_click(ctx, r)
     }
+    fn start_click(&mut self, ctx: &egui::Context, r: &egui::Response) -> bool {
+        self.human.start_click(ctx, r)
+    }
+    fn set_skip_arm(&mut self, skip: bool) {
+        self.human.set_skip_arm(skip);
+    }
     fn arm_dialog(&mut self, ctx: &egui::Context, m: &ArmModel) -> ArmOutcome {
         let outcome = self.human.arm_dialog(ctx, m);
         if matches!(outcome, ArmOutcome::Armed(_)) {
@@ -230,6 +236,10 @@ fn start(r: &mut Rig) {
 fn fill_arm(r: &mut Rig) {
     let checklist = r.h.state().session().pending_arm().unwrap().checklist.clone();
     assert!(!checklist.is_empty());
+    // Armed before in this session (ARM once per session): the dialog opens filled in and one click confirms.
+    if r.h.get_by_role(Role::TextInput).value().as_deref() == Some("ARM") {
+        return;
+    }
     for label in checklist {
         let pos = r.h.get_by_role_and_label(Role::CheckBox, &label).rect().center();
         click_at(r, pos);
@@ -305,9 +315,12 @@ fn kittest_business_card_flow() {
 
     settle(&mut r);
     frame(&mut r);
-    start(&mut r);
+    // Armed once in this session: the second Start arms from its own click, with no dialog.
     let before = recording(&r).burned.len();
-    arm(&mut r);
+    let armed = *r.armed.lock().unwrap();
+    click(&mut r, "Start");
+    wait(&mut r, "second run armed without the dialog", |r| *r.armed.lock().unwrap() == armed + 1);
+    assert!(r.h.query_by_label(CONFIRM_LABEL).is_none(), "no ARM dialog after the session's first ARM");
     wait(&mut r, "second run marking", |r| recording(r).burned.len() > before);
     let started = Instant::now();
     r.h.input_mut().events.extend(openlaser_ui_egui::control::input::events_for("ui.key", &json!({"key":"Escape"})).unwrap());

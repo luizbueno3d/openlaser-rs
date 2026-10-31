@@ -177,6 +177,7 @@ fn refused(plan: &JobPlan, out: Out) -> Refused {
 pub fn validate(plan: &JobPlan, machine: &MachineProfile) -> Result<Validated, Refused> {
     let mut out = Out::new();
     check_identity(&mut out, plan, machine);
+    checks::check_rotary(&mut out, plan, machine);
     checks::check_facts(&mut out, &plan.facts);
     checks::check_repeats(&mut out, plan);
     let area = Area::of(machine);
@@ -227,6 +228,7 @@ pub fn validate(plan: &JobPlan, machine: &MachineProfile) -> Result<Validated, R
 pub fn validate_frame(plan: &JobPlan, machine: &MachineProfile, source: FrameSource) -> Result<FramePlan, Refused> {
     let mut out = Out::new();
     check_identity(&mut out, plan, machine);
+    checks::check_rotary(&mut out, plan, machine);
     for (k, why) in &plan.facts.unsupported {
         if why == openlaser_plan::HULL_FRAME_UNSUPPORTED {
             out.refuse(Refusal::new(RefusalCode::UnsupportedMode, why.clone()).layer(*k));

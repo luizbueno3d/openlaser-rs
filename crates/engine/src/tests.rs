@@ -173,7 +173,7 @@ pub(crate) fn plant_pending(s: &mut Session) {
         source: FrameSource::Job,
         origin: FrameOrigin::Human,
     };
-    let job = LmcJob { prelude: Vec::new(), lists: Vec::new(), repeats: 1, postlude: Vec::new(), fingerprint: fp, machine: machine.clone() };
+    let job = LmcJob { return_axis: None, prelude: Vec::new(), lists: Vec::new(), repeats: 1, postlude: Vec::new(), fingerprint: fp, machine: machine.clone() };
     summary.bytes_hash = job.bytes_hash();
     let frame = LmcFrameJob {
         once: Vec::new(),
@@ -1983,3 +1983,15 @@ fn trace_by_id_works_whatever_is_selected() {
 }
 
 mod material_test;
+
+#[test]
+fn agents_cannot_change_rotary_settings() {
+    let (mut s, _) = human();
+    with_doc(&mut s);
+    let before = s.machines().to_vec();
+    for origin in [Origin::Synthetic, Origin::Headless] {
+        let e = s.execute_as(origin, "device.settings.set", json!({"rotary":{"enabled":true,"splitMm":5.0}})).unwrap_err();
+        assert_eq!(e.code(), "human_only");
+    }
+    assert_eq!(s.machines(), before);
+}

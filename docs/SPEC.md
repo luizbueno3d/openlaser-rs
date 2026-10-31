@@ -153,7 +153,7 @@ crates; `cargo xtask deps` fails on any edge not listed (dev-dependencies: §2.3
 | `doc` | The project model: shapes, the 30 colour layers + T1/T2, cut settings (galvo/gantry/fill/image), selection, palette. Pure data | types, geom | kurbo, serde, serde_json, thiserror |
 | `machine` | Machine profiles (`GalvoMachine`, `GantryMachine`), calibration, JPT M7 built-in, OM gantry profiles, EZCAD `markcfg` import, OM `calibration.json` import, the `ProfileStore` trait (S24). No I/O | types, geom, doc | serde, thiserror |
 | `format` | `.olp` read/write (zip + manifest model + migrations), atomic save; `machines` (profile files: `load_all`, `DirProfileStore`); `camera_cal` (`DirCalibrationStore`, the machine-local camera↔bed calibration file) | types, geom, doc, machine, camera | zip, flate2 (backend selection only), serde, serde_json, blake3, craft-atomic, craft-settings (app dirs), thiserror |
-| `import` | SVG (usvg, true scale), DXF (OM parser port, T4), raster images, OM `workspace.json` + `layer_settings.json` | types, geom, doc | usvg, image, serde, serde_json, blake3, thiserror |
+| `import` | SVG (usvg, true scale), DXF (OM parser port, T4), raster images, OM `workspace.json` + `layer_settings.json`, LightBurn `.lbrn2` | types, geom, doc | usvg, roxmltree, base64, image, serde, serde_json, blake3, thiserror |
 | `plan` | Document + machine → `JobPlan`: sections per layer/sub-layer/pass, machine transform, hatch, quantised galvo parameters (`GalvoCutQ`), frame paths, plan facts, galvo time model, fingerprint | types, geom, doc, machine | blake3, serde, thiserror |
 | `safety` | `validate()`: every hard refusal and notice; sole constructor of `EmitPlan`/`FramePlan` | types, geom, doc, machine, plan | serde, thiserror |
 | `text` | System font discovery (`FontLibrary`, bounded directory walk, `OPENLASER_FONT_DIRS`, lazy index) and `layout()`: harfrust shaping (kerning, ligatures) + skrifa glyph outlines into a Y-up `BezPath`; cap-height sizing, line spacing, left/centre/right alignment; missing glyphs are a named error | types, geom | kurbo, skrifa, harfrust, serde, thiserror |
@@ -248,6 +248,7 @@ dependency that is not already in `[workspace.dependencies]` (ask the integrator
 | muda | `=0.21.1` | MIT/Apache | apps/openlaser (macOS) | PhotoCraft's pin |
 | rfd | `=0.17.2` | MIT | apps/openlaser | async dialogs only; disabled while the machine is active |
 | kurbo | `=0.11.3` | MIT/Apache | geom, doc | one kurbo with usvg 0.45 (S7) |
+| roxmltree | `=0.20.0` | MIT/Apache | import | bounded LightBurn XML; DTD disabled |
 | usvg | `=0.45.1`, `default-features = false` | MIT/Apache | import | true-scale SVG; no text in P0 |
 | tiny-skia | `=0.11.4` | BSD-3 | render | deterministic PNG |
 | rstar | `=0.13.0` | MIT/Apache | geom | hit-testing |
@@ -268,7 +269,7 @@ dependency that is not already in `[workspace.dependencies]` (ask the integrator
 | blake3 | `=1.8.7`, `default-features = false`, feature `pure` | CC0/Apache | format, plan, import, lmc, gcode | `bytes_hash` (S22) in lmc and gcode |
 | getrandom | `=0.3.4` | MIT/Apache | arm, control | |
 | crossbeam-channel | `=0.5.17` | MIT/Apache | driver, lmc-sim | |
-| base64 | `=0.22.1` | MIT/Apache | automation | |
+| base64 | `=0.22.1` | MIT/Apache | automation, import | |
 | crossterm | `=0.29.0` | MIT | apps/openlaser-hw | raw-mode key thread (Esc/Space/Ctrl-C) |
 | signal-hook | `=0.4.5` (target `cfg(unix)`) | MIT/Apache | apps/openlaser-hw, apps/openlaser | SIGINT/SIGTERM/SIGHUP set an `AtomicBool` (`signal_hook::flag::register`, async-signal-safe); a watcher thread then trips the latch and waits for the StopReport before exiting (§5.4) |
 | ctrlc | `=3.5.2`, feature `termination` (target `cfg(windows)`) | MIT/Apache | apps/openlaser-hw, apps/openlaser | Ctrl-C/Break/console close trip the latch (§2.6) |

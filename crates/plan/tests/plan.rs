@@ -574,3 +574,33 @@ proptest! {
         prop_assert!(fps.windows(2).all(|w| w[0] == w[1]));
     }
 }
+
+#[test]
+fn rotary_fingerprint_frame_and_scan_angle_notice() {
+    use openlaser_machine::RotaryCfg;
+    let mut m = machine();
+    let Kinematics::Galvo(g) = &mut m.kind else { panic!("galvo") };
+    g.rotary = Some(RotaryCfg { enabled: true, ..Default::default() });
+    let mut p = project(&m, vec![rect(1, C0, 0.0, 0.0, 10.0, 30.0)]);
+    layer_mut(&mut p, 0).ops[0].mode = CutMode::Fill;
+    layer_mut(&mut p, 0).ops[0].fill.angle = Deg::new(90.0).unwrap();
+    let plan = make_plan(&p, &m, &opts(FrameStyle::Contour)).unwrap();
+    assert!(plan.facts.unsupported.is_empty(), "{:?}", plan.facts.unsupported);
+    assert_eq!(plan.facts.rotary_notices.len(), 1);
+    assert_eq!(plan.sections.len(), 3);
+    assert!(plan.frame.iter().all(|p| p.0.first() == p.0.last()), "clipped fill outlines must close along strip edges");
+    let bounds = openlaser_geom::bounds_of(&plan.frame).unwrap();
+    for pt in plan.sections.iter().flat_map(|s| &s.paths).flat_map(|p| &p.0) {
+        assert!(pt[0] >= bounds.min[0] && pt[0] <= bounds.max[0] && pt[1] >= bounds.min[1] && pt[1] <= bounds.max[1]);
+    }
+    assert!(bounds.min[1] >= -5.0 && bounds.max[1] <= 5.0);
+    let fp = plan.fingerprint;
+    let mut altered = plan.sections.clone();
+    altered[0].rotary.as_mut().unwrap().target_pulses += 1;
+    assert_ne!(fp, openlaser_plan::fingerprint_of(&m, plan.device, &altered, 1));
+    let Kinematics::Galvo(g) = &mut m.kind else { panic!("galvo") };
+    g.rotary.as_mut().unwrap().min_speed_pps += 1;
+    assert_ne!(fp, openlaser_plan::fingerprint_of(&m, plan.device, &plan.sections, 1));
+    layer_mut(&mut p, 0).ops[0].fill.angle = Deg::new(180.0).unwrap();
+    assert!(make_plan(&p, &m, &opts(FrameStyle::Contour)).unwrap().facts.rotary_notices.is_empty());
+}

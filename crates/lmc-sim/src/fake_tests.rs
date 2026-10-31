@@ -298,8 +298,10 @@ fn offline_simulation_executes_lists_and_repeats_and_reports_malformed_jobs() {
         return;
     };
     let mut job = LmcJob {
+        return_axis: None,
         prelude: vec![Single([op::RESET_LIST, 0, 0, 0, 0, 0]), Single([op::FIBER_SET_MO, 1, 0, 0, 0, 0])],
         lists: vec![openlaser_lmc::LmcList {
+            axis_move: None,
             layer: openlaser_types::LayerKey::Color(0),
             pass: 1,
             packets: golden("mark_box10"),

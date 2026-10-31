@@ -482,9 +482,12 @@ impl OpenLaserApp {
         Self::with_context(&cc.egui_ctx, session, services)
     }
 
-    pub(crate) fn with_context(ctx: &egui::Context, session: Session, services: Services) -> Self {
+    pub(crate) fn with_context(ctx: &egui::Context, mut session: Session, mut services: Services) -> Self {
         egui_extras::install_image_loaders(ctx);
         let saved = services.settings.load();
+        session.set_frame_required(saved.require_frame);
+        crate::i18n::set_language(saved.language);
+        services.human.set_skip_arm(saved.skip_arm);
         let ui = UiState { camera_background: saved.camera_background, ..UiState::default() };
         Self {
             session,
@@ -541,7 +544,7 @@ impl OpenLaserApp {
         if self.session.active().is_none()
             && let Err(e) = self.session.execute_as(Origin::Human, "file.new", serde_json::json!({}))
         {
-            self.set_status(format!("New document: {e}"));
+            self.set_status(crate::tf!("New document: {e}", "Novo documento: {e}"));
         }
     }
 
@@ -555,6 +558,20 @@ impl OpenLaserApp {
 
     pub fn ui_state(&self) -> &UiState {
         &self.ui
+    }
+
+    /// Language menu and Settings ▸ Language: switches the interface now and saves the choice.
+    pub(crate) fn set_language(&mut self, language: crate::i18n::Language) {
+        crate::i18n::set_language(language);
+        let mut settings = self.services.settings.load();
+        if settings.language != language {
+            settings.language = language;
+            self.services.settings.save(&settings);
+        }
+        self.set_status(crate::i18n::t(
+            "Language: English. The macOS menu bar changes the next time OpenLaser opens.",
+            "Idioma: Português (Brasil). A barra de menus do macOS muda na próxima vez que o OpenLaser abrir.",
+        ));
     }
 
     pub(crate) fn set_status(&mut self, message: impl Into<String>) {
@@ -635,7 +652,7 @@ impl OpenLaserApp {
             wait.seam_waiting = self.seam.machine_state.as_ref().is_some_and(state_requires_stop);
         }
         self.stop_wait = Some(wait);
-        self.set_status(format!("Stop: {} machine(s) latched", acks.len()));
+        self.set_status(crate::tf!("Stop: {} machine(s) latched", "Parada: {} máquina(s) travada(s)", acks.len()));
         acks
     }
 
@@ -692,15 +709,21 @@ impl OpenLaserApp {
                 Some(true) => {
                     self.close.after_stop = false;
                     self.close.authorized = true;
-                    self.set_status("Stop confirmed; closing");
+                    self.set_status(crate::i18n::t("Stop confirmed; closing", "Parada confirmada; fechando"));
                     (self.services.quit)();
                 }
                 Some(false) => {
                     self.close.after_stop = false;
-                    self.set_status("STOP NOT CONFIRMED: the window stays open. Use the E-stop or the key switch.");
+                    self.set_status(crate::i18n::t(
+                        "STOP NOT CONFIRMED: the window stays open. Use the E-stop or the key switch.",
+                        "PARADA NÃO CONFIRMADA: a janela continua aberta. Use o botão de emergência ou a chave.",
+                    ));
                 }
                 None => {
-                    self.set_status("Stopping before closing: waiting for the stop report…");
+                    self.set_status(crate::i18n::t(
+                        "Stopping before closing: waiting for the stop report…",
+                        "Parando antes de fechar: aguardando o relatório de parada…",
+                    ));
                     ctx.request_repaint_after(std::time::Duration::from_millis(50));
                 }
             }
@@ -723,7 +746,7 @@ impl OpenLaserApp {
         self.seam.dispatched.push((origin, id.to_owned(), params.clone()));
         let message = match self.session.execute_as(origin, id, params) {
             Ok(_) => {
-                self.set_status(format!("{}: done", crate::menu_catalog::find(id).map(|r| r.label).unwrap_or(id)));
+                self.set_status(crate::tf!("{}: done", "{}: concluído", crate::menu_catalog::find(id).map(|r| crate::i18n::menu(r.label)).unwrap_or(id)));
                 return true;
             }
             Err(e) => e.to_string(),
@@ -740,7 +763,10 @@ impl OpenLaserApp {
 
     pub(crate) fn invoke_ui_action(&mut self, id: &str) {
         if self.safety_active() && opens_files(id) {
-            self.set_status("Stop the active frame or job before opening, importing or saving files.");
+            self.set_status(crate::i18n::t(
+                "Stop the active frame or job before opening, importing or saving files.",
+                "Pare o enquadramento ou o trabalho ativo antes de abrir, importar ou salvar arquivos.",
+            ));
             return;
         }
         if let Some(panel) = id.strip_prefix("window.show:") {
@@ -751,6 +777,8 @@ impl OpenLaserApp {
         }
         match id {
             "edit.settings" => self.ui.settings_open = true,
+            "prefs.language.en" => self.set_language(crate::i18n::Language::English),
+            "prefs.language.ptBr" => self.set_language(crate::i18n::Language::Portuguese),
             "edit.deviceSettings" | "device.settings" | "device.manage" => self.ui.device_settings_open = true,
             "laser.liveFraming" => self.ui.live_framing_open = true,
             "preview.open" => self.ui.preview_open = true,
@@ -770,9 +798,12 @@ impl OpenLaserApp {
             "view.cameraBackground" => {
                 self.ui.camera_background = !self.ui.camera_background;
                 self.set_status(if self.ui.camera_background {
-                    "Camera background on — the calibrated live feed draws under the design"
+                    crate::i18n::t(
+                        "Camera background on — the calibrated live feed draws under the design",
+                        "Fundo da câmera ligado — a imagem ao vivo calibrada aparece sob o desenho",
+                    )
                 } else {
-                    "Camera background off"
+                    crate::i18n::t("Camera background off", "Fundo da câmera desligado")
                 });
             }
             "view.zoomPage" => self.view.fit(),
@@ -808,7 +839,7 @@ impl OpenLaserApp {
                         t.dirty = false;
                         self.ui.trace = Some(t);
                     }
-                    None => self.set_status("Select one image to trace."),
+                    None => self.set_status(crate::i18n::t("Select one image to trace.", "Selecione uma imagem para vetorizar.")),
                 }
             }
             "tools.text" => {
@@ -1050,7 +1081,7 @@ impl OpenLaserApp {
         for event in self.session.poll() {
             match event {
                 openlaser_engine::Event::Status(message) => self.set_status(message),
-                openlaser_engine::Event::ArmVoided { reason } => self.set_status(format!("ARM dialog closed: {reason}")),
+                openlaser_engine::Event::ArmVoided { reason } => self.set_status(crate::tf!("ARM dialog closed: {reason}", "Janela de ARM fechada: {reason}")),
                 _ => {}
             }
         }
@@ -1061,16 +1092,19 @@ impl OpenLaserApp {
         for (ticket, kind, origin) in std::mem::take(&mut self.pending_dialogs) {
             match self.services.files.poll(ticket) {
                 None => pending.push((ticket, kind, origin)),
-                Some(None) => self.set_status("File selection cancelled"),
+                Some(None) => self.set_status(crate::i18n::t("File selection cancelled", "Seleção de arquivo cancelada")),
                 Some(Some((path, _bytes))) => {
                     if self.safety_active() {
-                        self.set_status("A file was chosen while a machine is active; it was not opened. Stop first.");
+                        self.set_status(crate::i18n::t(
+                            "A file was chosen while a machine is active; it was not opened. Stop first.",
+                            "Um arquivo foi escolhido com uma máquina ativa; ele não foi aberto. Pare primeiro.",
+                        ));
                         continue;
                     }
                     let id = if kind == DialogKind::Import { "file.import" } else { "file.open" };
                     let name = std::path::Path::new(&path).file_name().and_then(|n| n.to_str()).unwrap_or("file").to_owned();
                     let message = match self.session.execute_as(origin, id, serde_json::json!({ "path": path })) {
-                        Ok(_) => format!("Opened {name}"),
+                        Ok(_) => crate::tf!("Opened {name}", "Aberto: {name}"),
                         Err(e) => e.to_string(),
                     };
                     self.set_status(message);
@@ -1085,7 +1119,10 @@ impl OpenLaserApp {
             ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
         for path in dropped {
             if self.safety_active() {
-                self.set_status("Stop the active frame or job before importing files.");
+                self.set_status(crate::i18n::t(
+                    "Stop the active frame or job before importing files.",
+                    "Pare o enquadramento ou o trabalho ativo antes de importar arquivos.",
+                ));
                 return;
             }
             let id = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("olp")) { "file.open" } else { "file.import" };

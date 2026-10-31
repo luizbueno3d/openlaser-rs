@@ -14,6 +14,11 @@ Rust crate dependencies are not listed here: `Cargo.lock` pins them and `deny.to
 | Python-oracle golden fixtures | MIT © 2026 Luiz Bueno (generated from the two sources above) | `tests/golden/` | `tests/golden/README.md`, `manifest.json` | in repo |
 | PhotoCraft, craft-libs (storytold) | MIT OR Apache-2.0 | engine, automation, control, UI patterns (ported with a notice) | `crates/engine`, `crates/automation`, `crates/control`, `crates/ui-egui`, `xtask` | WP6–WP8 |
 
+Rotary extended-axis encoding and sequencing are independently implemented from the supplied protocol facts
+attributed to MeerK40t `balormk/controller.py` and `galvo_commands.py` @ `d511944` (MIT © 2021
+meerk40t), and galvoplotter `galvo/controller.py` @ `fc35136` (MIT © 2023 MeerK40t). See
+`crates/lmc/src/axis.rs` and D12. No USB implementation or GPL source was copied.
+
 ## Assets
 
 | Asset | Licence | Where | Status |

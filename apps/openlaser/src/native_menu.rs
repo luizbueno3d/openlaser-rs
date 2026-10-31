@@ -7,7 +7,7 @@ pub fn install(ctx: &egui::Context, fallback: bool) -> Result<(Menu, mpsc::Recei
     let app = Submenu::new("OpenLaser", true);
     let quit = MenuItem::with_id(
         craft_quit::QUIT_MENU_ID,
-        "Quit OpenLaser",
+        openlaser_ui_egui::i18n::t("Quit OpenLaser", "Sair do OpenLaser"),
         true,
         Some(muda::accelerator::Accelerator::new(muda::accelerator::Modifiers::META, muda::accelerator::Code::KeyQ)),
     );
@@ -15,7 +15,7 @@ pub fn install(ctx: &egui::Context, fallback: bool) -> Result<(Menu, mpsc::Recei
     menu.append(&app)?;
     if !fallback {
         for name in openlaser_ui_egui::menu_catalog::MENUS {
-            let sub = Submenu::new(*name, true);
+            let sub = Submenu::new(openlaser_ui_egui::i18n::menu(name), true);
             append_rows(&sub, &[*name])?;
             menu.append(&sub)?;
         }
@@ -34,7 +34,7 @@ fn append_rows(menu: &Submenu, path: &[&str]) -> muda::Result<()> {
     for row in openlaser_ui_egui::menu_catalog::CATALOG.iter().filter(|r| r.path.starts_with(path)) {
         if let Some(next) = row.path.get(path.len()) {
             if seen.insert(*next) {
-                let sub = Submenu::new(*next, true);
+                let sub = Submenu::new(openlaser_ui_egui::i18n::menu(next), true);
                 let mut nested = path.to_vec();
                 nested.push(next);
                 append_rows(&sub, &nested)?;
@@ -43,7 +43,12 @@ fn append_rows(menu: &Submenu, path: &[&str]) -> muda::Result<()> {
         } else if openlaser_ui_egui::menu_catalog::is_separator(row) {
             menu.append(&PredefinedMenuItem::separator())?;
         } else {
-            menu.append(&MenuItem::with_id(openlaser_ui_egui::menu_catalog::native_id(row), row.label, openlaser_ui_egui::menu_catalog::is_live(row), None))?;
+            menu.append(&MenuItem::with_id(
+                openlaser_ui_egui::menu_catalog::native_id(row),
+                openlaser_ui_egui::i18n::menu(row.label),
+                openlaser_ui_egui::menu_catalog::is_live(row),
+                None,
+            ))?;
         }
     }
     Ok(())

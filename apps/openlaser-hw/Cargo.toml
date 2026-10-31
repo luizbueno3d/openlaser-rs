@@ -11,7 +11,7 @@ publish.workspace = true
 workspace = true
 
 [features]
-# Real USB (SPEC S4). Agents, tests and CI never enable it (AGENTS.md §1); only Luiz builds with it.
+# Real USB (SPEC S4). Agents, tests and CI never enable it (AGENTS.md §1); only Luiz and the release workflow (downloads) build with it.
 hw = ["dep:openlaser-transport"]
 
 [dependencies]

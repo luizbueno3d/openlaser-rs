@@ -23,6 +23,7 @@ mod frame;
 mod image;
 mod planner;
 pub mod quantise;
+mod rotary;
 mod transform;
 
 pub use openlaser_doc::{DeviceKind, Project, WorkspaceOrigin};
@@ -76,6 +77,7 @@ pub struct JobPlan {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Section {
+    pub rotary: Option<RotaryStep>,
     pub layer: LayerKey,
     pub layer_name: String,
     pub sub: u8,
@@ -87,6 +89,12 @@ pub struct Section {
     pub paths: Vec<Polyline>,
     pub objects: Vec<ObjectId>,
     pub estimate: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RotaryStep {
+    pub strip: u32,
+    pub target_pulses: i32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +143,8 @@ pub struct GantryCutQ {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PlanFacts {
+    /// Advisory scan-angle sanity checks for rotary Fill/Image sections.
+    pub rotary_notices: Vec<(LayerKey, String)>,
     /// Layer not in the table (import of a forged/foreign file).
     pub orphan_objects: Vec<ObjectId>,
     /// show == false && output == true (B6).

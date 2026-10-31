@@ -89,3 +89,54 @@ pub(crate) fn runs(bitmap: &BitmapData, cut: &ImageCut) -> Result<Vec<Polyline>,
     }
     Ok(paths)
 }
+
+/// Rotary-only angled scanning of the same box-filtered/dithered image cells.
+/// Re-hatch the dark cell bands in image-local space: changing scan angle never rotates artwork.
+pub(crate) fn rotary_runs(bitmap: &BitmapData, cut: &ImageCut) -> Result<Vec<Polyline>, String> {
+    if cut.angle.get() == 0.0 {
+        return runs(bitmap, cut);
+    }
+    let horizontal = runs(bitmap, cut)?;
+    let height = bitmap.size_mm[1].abs();
+    let interval = cut.interval.get();
+    let mut cells = Vec::with_capacity(horizontal.len());
+    for path in horizontal {
+        let [a, b] = path.0.as_slice() else {
+            return Err("image run is not a segment".into());
+        };
+        let row = ((height / 2.0 - a[1]) / interval).floor();
+        let top = height / 2.0 - row * interval;
+        let bottom = (top - interval).max(-height / 2.0);
+        let x0 = a[0].min(b[0]);
+        let x1 = a[0].max(b[0]);
+        cells.push(Polyline(vec![[x0, bottom], [x1, bottom], [x1, top], [x0, top], [x0, bottom]]));
+    }
+    // Bound the hatch intersection work as well as its resulting points.
+    let span = bitmap.size_mm[0].abs().hypot(height);
+    if (span / interval + 2.0) * cells.len() as f64 > (MAX_SECTION_POINTS as f64) * 4.0 {
+        return Err("angled rotary image exceeds the hatch work budget; increase line interval".into());
+    }
+    let result = openlaser_geom::hatch(
+        &cells,
+        &openlaser_geom::HatchParams {
+            interval_mm: interval,
+            angle_deg: cut.angle.get(),
+            passes: 1,
+            angle_increment_deg: 0.0,
+            bidirectional: cut.bidirectional,
+            cross_hatch: false,
+            closure_tol_mm: openlaser_geom::CLOSURE_TOL_MM,
+            max_lines: crate::MAX_HATCH_LINES,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    let segments = result.passes.into_iter().flatten();
+    let mut out = Vec::new();
+    for [a, b] in segments {
+        if out.len() >= MAX_SECTION_POINTS / 2 {
+            return Err("angled rotary image exceeds section point budget".into());
+        }
+        out.push(Polyline(vec![a, b]));
+    }
+    Ok(out)
+}

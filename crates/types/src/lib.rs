@@ -20,7 +20,7 @@ pub mod time;
 pub mod units;
 
 pub use arm::{ARM_TOKEN_TTL, ArmToken};
-pub use emission::{Bounds, EmissionSummary, EmittedSegment, GalvoWords, PassRow, SectionMode};
+pub use emission::{Bounds, EmissionSummary, EmittedSegment, GalvoWords, PassRow, RotarySummary, SectionMode};
 pub use frame::{FRAME_RECEIPT_MAX_AGE, FrameMode, FrameOrigin, FrameReceipt, FrameSource, FrameStyle};
 pub use ids::{DeviceKind, Fingerprint, LayerKey, MachineId, ObjectId, SessionId, TextAlign};
 pub use refusal::{Notice, NoticeCode, Refusal, RefusalCode};

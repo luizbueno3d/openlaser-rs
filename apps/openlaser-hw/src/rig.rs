@@ -72,6 +72,12 @@ pub struct RigSpec {
 
 /// One machine session. Every method runs on the main thread; only [`Rig::stopper`] crosses threads.
 pub trait Rig {
+    fn prepare_rotary(&mut self) -> Result<(), HwError> {
+        Err(HwError::Failed("rotary control is unavailable on this rig".into()))
+    }
+    fn rotary(&mut self, _degrees: Option<f64>) -> Result<i32, HwError> {
+        Err(HwError::Failed("rotary control is unavailable on this rig".into()))
+    }
     fn machine(&self) -> &MachineId;
     fn session(&self) -> SessionId;
     fn now(&self) -> MonoTime;
@@ -184,6 +190,7 @@ impl RigFactory for EngineRigs {
 
 /// The engine-backed rig.
 pub struct EngineRig {
+    rotary: Option<openlaser_driver::RotarySession<Box<dyn openlaser_driver::LmcTransport>>>,
     session: Session,
     clock: Arc<dyn Clock>,
     machine: MachineId,
@@ -315,7 +322,7 @@ impl EngineRig {
             files: FsAuthority::TrustedLocal,
             clock: Arc::clone(&clock),
         });
-        Ok(EngineRig { session, clock, machine, provider, sim, trace, usb_trace, galvo })
+        Ok(EngineRig { rotary: None, session, clock, machine, provider, sim, trace, usb_trace, galvo })
     }
 
     fn exec(&mut self, id: &str, params: Value) -> Result<Value, HwError> {
@@ -379,7 +386,32 @@ impl EngineRig {
     }
 }
 
+struct RotaryStop(openlaser_driver::Stopper, MachineId);
+impl StopTarget for RotaryStop {
+    fn stop_now(&self) {
+        self.0.stop();
+    }
+    fn stop_and_wait(&self, max: Duration) -> Vec<(MachineId, openlaser_driver::StopAck)> {
+        vec![(self.1.clone(), self.0.stop_and_wait(max))]
+    }
+}
+
 impl Rig for EngineRig {
+    fn prepare_rotary(&mut self) -> Result<(), HwError> {
+        let g = self.galvo.as_ref().ok_or_else(|| HwError::refused(RefusalCode::WrongDeviceKind, "rotary requires an LMC galvo"))?;
+        let r =
+            g.rotary.as_ref().filter(|r| r.enabled).ok_or_else(|| {
+                HwError::refused(RefusalCode::UnsupportedMode, "rotary.enabled is required; enable rotary in the human-only profile settings")
+            })?;
+        r.validate(g.work_area).map_err(HwError::Failed)?;
+        let transport = self.provider.open_lmc(g).map_err(driver_error)?;
+        self.rotary = Some(openlaser_driver::RotarySession::new(transport, g.clone(), self.clock.clone()).map_err(driver_error)?);
+        Ok(())
+    }
+    fn rotary(&mut self, degrees: Option<f64>) -> Result<i32, HwError> {
+        self.rotary.as_mut().ok_or_else(|| HwError::Failed("rotary session is not prepared".into()))?.execute(degrees).map_err(driver_error)
+    }
+
     fn machine(&self) -> &MachineId {
         &self.machine
     }
@@ -457,6 +489,9 @@ impl Rig for EngineRig {
     }
 
     fn stopper(&self) -> Arc<dyn StopTarget> {
+        if let Some(r) = &self.rotary {
+            return Arc::new(RotaryStop(r.stopper(), self.machine.clone()));
+        }
         self.session.stop_registry()
     }
 

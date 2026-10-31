@@ -1,0 +1,16 @@
+<LightBurnProject>
+  <CutSetting type="Scan+Cut">
+    <index Value="2"/><name Value="C02"/><subname Value="Synthetic"/>
+    <minPower Value="12"/><maxPower Value="65"/><speed Value="550"/>
+    <frequency Value="25000"/><QPulseWidth Value="60"/>
+    <interval Value="0.15"/><angle Value="135"/><crossHatch Value="1"/><bidir Value="0"/>
+    <numPasses Value="3"/><globalRepeat Value="4"/><priority Value="2"/>
+    <tabsEnabled Value="1"/><maxPower2 Value="20"/><tabCount Value="1"/>
+  </CutSetting>
+  <CutSetting type="Offset"><index Value="6"/><priority Value="0"/></CutSetting>
+  <CutSetting_Img type="Image"><index Value="2"/><speed Value="100"/><maxPower Value="20"/><frequency Value="50000"/><QPulseWidth Value="80"/><minPower Value="5"/><interval Value="0.05"/><angle Value="45"/><bidir Value="1"/><numPasses Value="2"/><globalRepeat Value="4"/><ditherMode Value="stucki"/></CutSetting_Img>
+  <CutSetting_Img type="Image"><index Value="7"/><ditherMode Value="grayscale"/></CutSetting_Img>
+  <CutSetting type="Unknown"><index Value="8"/></CutSetting>
+  <CutSetting type="Cut"><index Value="9"/><speed Value="0"/><maxPower Value="101"/></CutSetting>
+  <Shape Type="Rect" CutIndex="2" W="1" H="1"/><Shape Type="Rect" CutIndex="6" W="1" H="1"/><Shape Type="Rect" CutIndex="9" W="1" H="1"/>
+</LightBurnProject>

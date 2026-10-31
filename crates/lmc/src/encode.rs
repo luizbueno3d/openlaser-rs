@@ -122,6 +122,8 @@ fn packetize(words: &[Word]) -> Result<Vec<Packet>, Error> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LmcJob {
+    /// After the final postlude of the job, with MO closed.
+    pub return_axis: Option<crate::AxisMove>,
     /// Sent before EACH list: ResetList, WritePort(laser bit), Fiber_SetMo(1), GetVersion.
     pub prelude: Vec<Single>,
     /// Per layer-pass, in burn order (one repeat).
@@ -136,7 +138,8 @@ pub struct LmcJob {
 
 impl LmcJob {
     /// S22: blake3 over, in send order, every single command (12 bytes) and packet (3072 bytes, padding included) of
-    /// one repeat (per list: prelude, packets, postlude), then the repeat count as u16 LE.
+    /// one repeat (per list: optional axis singles, prelude, packets, postlude), optional final return singles,
+    /// then the repeat count as u16 LE. The final return executes once after all repeats.
     ///
     /// Not hashed: the session's own singles (status polls, SetEndOfList, ExecuteList, whose position depends on the
     /// board), `packet_est`, each list's `layer`/`pass` labels, `fingerprint` and `machine`. Those are checked
@@ -144,6 +147,11 @@ impl LmcJob {
     pub fn bytes_hash(&self) -> Fingerprint {
         let mut hash = Hasher::new();
         for list in &self.lists {
+            if let Some(m) = list.axis_move {
+                for cmd in crate::axis_singles(&m) {
+                    hash.update(&cmd.bytes());
+                }
+            }
             for cmd in &self.prelude {
                 hash.update(&cmd.bytes());
             }
@@ -154,6 +162,11 @@ impl LmcJob {
                 hash.update(&cmd.bytes());
             }
         }
+        if let Some(m) = self.return_axis {
+            for cmd in crate::axis_singles(&m) {
+                hash.update(&cmd.bytes());
+            }
+        }
         hash.update(&self.repeats.to_le_bytes());
         Fingerprint(*hash.finalize().as_bytes())
     }
@@ -161,6 +174,7 @@ impl LmcJob {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LmcList {
+    pub axis_move: Option<crate::AxisMove>,
     pub layer: LayerKey,
     pub pass: u16,
     pub packets: Vec<Packet>,
@@ -209,10 +223,11 @@ pub fn encode_job(emit: &EmitPlan, m: &GalvoMachine) -> Result<LmcJob, Error> {
     for section in emit.sections() {
         let packets = encode_section(section, m, laser)?;
         let packet_est = packet_estimates(section.estimate, &packets);
-        lists.push(LmcList { layer: section.layer, pass: section.pass, packets, packet_est });
+        lists.push(LmcList { axis_move: section_axis(section, m)?, layer: section.layer, pass: section.pass, packets, packet_est });
     }
 
     Ok(LmcJob {
+        return_axis: return_axis(emit.sections(), m)?,
         prelude: job_prelude(laser),
         lists,
         repeats: emit.repeats(),
@@ -447,6 +462,29 @@ fn ceil_u32(v: f64) -> Result<u32, Error> {
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     Ok(v.ceil() as u32)
+}
+
+pub(crate) fn section_axis(s: &Section, m: &GalvoMachine) -> Result<Option<crate::AxisMove>, Error> {
+    match s.rotary {
+        None => Ok(None),
+        Some(step) => {
+            let r = m.rotary.as_ref().filter(|r| r.enabled).ok_or(Error::SummaryMismatch)?;
+            r.validate(m.work_area).map_err(|_| Error::SummaryMismatch)?;
+            let mv = crate::AxisMove { target_pulses: step.target_pulses, min_speed: r.min_speed_pps, max_speed: r.max_speed_pps, accel_ms: r.accel_ms };
+            if !mv.valid() {
+                return Err(Error::SummaryMismatch);
+            }
+            Ok(Some(mv))
+        }
+    }
+}
+pub(crate) fn return_axis(sections: &[Section], m: &GalvoMachine) -> Result<Option<crate::AxisMove>, Error> {
+    if m.rotary.as_ref().is_some_and(|r| r.enabled && r.return_to_start)
+        && let Some(s) = sections.iter().find(|s| s.rotary.is_some())
+    {
+        return Ok(section_axis(s, m)?.map(|mv| crate::AxisMove { target_pulses: 0, ..mv }));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

@@ -125,8 +125,9 @@ fn mark_job(polys: &[Vec<[f64; 2]>], power: f64, speed: f64, repeats: u16) -> Lm
         .collect();
     let packet_est = packet_ests(&packets);
     LmcJob {
+        return_axis: None,
         prelude: vec![single(RESET_LIST, 0), single(WRITE_PORT, 1), single(FIBER_SET_MO, 1), single(GET_VERSION, 0)],
-        lists: vec![LmcList { layer: LayerKey::color(0).unwrap(), pass: 1, packets, packet_est }],
+        lists: vec![LmcList { axis_move: None, layer: LayerKey::color(0).unwrap(), pass: 1, packets, packet_est }],
         repeats,
         postlude: vec![single(FIBER_SET_MO, 0), single(WRITE_PORT, 0), single(GET_MARK_TIME, 3)],
         fingerprint: FP,
@@ -1163,4 +1164,199 @@ mod grbl {
         let out = b.run(&program(50), &mut cx).unwrap();
         assert!(matches!(out, Outcome::Finished { .. }));
     }
+}
+
+// Extended-axis tests use the production backend directly on FakeLmc, without hardware or ARM witnesses.
+fn rotary_backend_run(
+    stop_event: Option<usize>,
+    never_stops: bool,
+) -> (openlaser_lmc_sim::Recording, Result<Outcome, openlaser_driver::DriverError>, Option<StopReport>, Option<MonoTime>) {
+    use openlaser_driver::{Backend, Cx, StopLatch};
+    use openlaser_lmc::AxisMove;
+    let clock = Arc::new(VirtualClock::new());
+    let (wake, _) = crossbeam_channel::unbounded();
+    let latch = Arc::new(StopLatch::with_clock(wake, clock.clone()));
+    let (events, _) = crossbeam_channel::unbounded();
+    let cx = &mut Cx::new(&latch, &events, clock.as_ref());
+    let fake = FakeLmc::new(board(3, if never_stops { vec![Fault::AxisNeverStops] } else { vec![] }), clock.clone());
+    let recorder = fake.recorder();
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (flag, stop) = (armed.clone(), latch.clone());
+    let mut event = 0usize;
+    fake.set_hook(Box::new(move |_, _| {
+        if flag.load(Ordering::SeqCst) {
+            if stop_event == Some(event) {
+                stop.trip();
+            }
+            event += 1;
+        }
+    }));
+    let mut m = galvo();
+    m.rotary = Some(openlaser_machine::RotaryCfg { enabled: true, ..Default::default() });
+    let mut backend = LmcBackend::new(fake, m);
+    backend.connect(cx).unwrap();
+    let mut job = mark_job(&box10(), 1.0, 1000.0, 1);
+    let mv = AxisMove { target_pulses: -10, min_speed: 100, max_speed: 1000, accel_ms: 100 };
+    job.lists[0].axis_move = Some(mv);
+    let mut second = job.lists[0].clone();
+    second.axis_move = Some(AxisMove { target_pulses: 10, ..mv });
+    job.lists.push(second);
+    job.return_axis = Some(AxisMove { target_pulses: 0, ..mv });
+    let before = recorder.snapshot().wire.len();
+    armed.store(true, Ordering::SeqCst);
+    let result = backend.run(&job, cx);
+    let report = match &result {
+        Ok(Outcome::Stopped(r)) => Some(r.clone()),
+        Err(_) => Some(backend.emergency_stop(cx)),
+        _ => None,
+    };
+    let mut record = recorder.snapshot();
+    record.wire.drain(..before);
+    (record, result, report, latch.tripped_at())
+}
+
+#[test]
+fn rotary_wire_order_and_no_motion_with_mo_or_list_active() {
+    let (record, result, report, _) = rotary_backend_run(None, false);
+    assert!(matches!(result, Ok(Outcome::Finished { .. })), "{result:?}");
+    assert!(report.is_none());
+    let mut mo = false;
+    let mut ports = 0u16;
+    let mut executing = false;
+    let mut moving = false;
+    let mut previous = [0u16; 2];
+    let mut targets = Vec::new();
+    let mut saw_moving = false;
+    for event in &record.wire {
+        match event {
+            SimWire::Single { words, .. } => {
+                let [op, p1, p2, ..] = *words;
+                if op == 0x29 {
+                    assert!(!mo && ports == 0 && !executing && !moving, "unsafe MoveAxisTo");
+                    assert_eq!(previous, [0x26, 0x27]);
+                    targets.push(openlaser_lmc::axis_position([0, p1, p2, 0]));
+                    moving = true;
+                }
+                if op == FIBER_SET_MO {
+                    if p1 != 0 {
+                        assert!(!moving, "MO while axis moving");
+                    }
+                    mo = p1 != 0;
+                }
+                if op == WRITE_PORT {
+                    ports = p1;
+                }
+                if op == EXECUTE_LIST {
+                    assert!(!moving);
+                    executing = true;
+                }
+                previous = [previous[1], op];
+            }
+            SimWire::Read { status, .. } => {
+                if status & 0x40 != 0 {
+                    saw_moving = true;
+                } else {
+                    moving = false;
+                }
+                if status & 0x04 == 0 {
+                    executing = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(targets, vec![-10, 10, 0]);
+    assert!(saw_moving);
+    assert!(!record.mo && record.port == 0);
+    assert_eq!(record.axis_position, 0);
+    assert!(!record.axis_moving);
+}
+
+#[test]
+fn rotary_stop_at_every_wire_event_preserves_d7_and_dark_outputs() {
+    let total = rotary_backend_run(None, false).0.wire.len();
+    let mut motion_stops = 0;
+    for event in 0..total {
+        let (record, result, report, tripped) = rotary_backend_run(Some(event), false);
+        assert!(result.is_ok(), "event {event}: {result:?}");
+        // A stop on the last completed reply may race with successful return; explicitly stop in that case is unnecessary: outputs are already dark.
+        if let Some(report) = report {
+            assert!(report.mo_closed && report.ports_zero, "event {event}: {report:?}");
+            if report.notes.iter().any(|s| s.contains("rotary axis may finish")) {
+                motion_stops += 1;
+            }
+            let stop = record
+                .wire
+                .iter()
+                .find_map(|e| match e {
+                    SimWire::Single { at, words } if words[0] == STOP_EXECUTE => Some(*at),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(stop.saturating_since(tripped.unwrap()) <= Duration::from_millis(40), "event {event}");
+        }
+        assert!(!record.mo && record.port == 0, "event {event}");
+    }
+    assert!(motion_stops > 0);
+}
+
+#[test]
+fn rotary_axis_never_stops_faults_at_distance_based_deadline() {
+    let (record, result, report, _) = rotary_backend_run(None, true);
+    assert!(result.unwrap_err().to_string().contains("rotary axis did not stop"));
+    let start = record
+        .wire
+        .iter()
+        .find_map(|e| match e {
+            SimWire::Single { at, words } if words[0] == 0x29 => Some(*at),
+            _ => None,
+        })
+        .unwrap();
+    let stop = record
+        .wire
+        .iter()
+        .find_map(|e| match e {
+            SimWire::Single { at, words } if words[0] == STOP_EXECUTE => Some(*at),
+            _ => None,
+        })
+        .unwrap();
+    assert!(stop.saturating_since(start) <= Duration::from_millis(2160));
+    let report = report.unwrap();
+    assert!(report.mo_closed && report.ports_zero);
+    assert!(report.notes.iter().any(|n| n.contains("no stop-axis command")));
+}
+
+#[test]
+fn rotary_bench_motion_is_relative_dark_and_refuses_active_board() {
+    use openlaser_driver::RotarySession;
+    use openlaser_lmc::LmcTransport;
+    use openlaser_lmc::{AxisMove, axis_singles};
+    let clock = Arc::new(VirtualClock::new());
+    let mut m = galvo();
+    m.rotary = Some(openlaser_machine::RotaryCfg { enabled: true, ..Default::default() });
+    let fake = FakeLmc::new(board(3, vec![]), clock.clone());
+    let recorder = fake.recorder();
+    let mut session = RotarySession::new(fake, m.clone(), clock.clone()).unwrap();
+    assert_eq!(session.execute(Some(90.0)).unwrap(), 3200);
+    assert_eq!(session.execute(None).unwrap(), 3200);
+    assert_eq!(session.execute(Some(-90.0)).unwrap(), 0);
+    let record = recorder.snapshot();
+    assert!(record.burned.is_empty() && record.mo_open.is_empty() && !record.mo && record.port == 0);
+    assert!(record.wire.iter().all(|w| !matches!(w, SimWire::Packet { .. })));
+    assert!(singles(&record.wire).iter().all(|w| w[0] != FIBER_SET_MO || w[1] == 0));
+    let mut fake = FakeLmc::new(board(3, vec![]), clock.clone());
+    let recorder = fake.recorder();
+    for cmd in axis_singles(&AxisMove { target_pulses: 1000, min_speed: 100, max_speed: 1000, accel_ms: 100 }) {
+        fake.submit_single(cmd).unwrap();
+        fake.poll_single(Duration::ZERO).unwrap();
+    }
+    let before = recorder.snapshot().wire.len();
+    let mut session = RotarySession::new(fake, m, clock).unwrap();
+    assert!(session.execute(Some(90.0)).unwrap_err().to_string().contains("active"));
+    let record = recorder.snapshot();
+    assert_eq!(
+        singles(&record.wire[before..]).iter().map(|w| w[0]).collect::<Vec<_>>(),
+        vec![GET_VERSION],
+        "busy refusal must not interrupt the active machine"
+    );
 }

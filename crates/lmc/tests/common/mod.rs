@@ -55,6 +55,7 @@ pub fn galvo_q() -> GalvoCutQ {
 
 pub fn section_with(q: GalvoCutQ, paths: Vec<Polyline>) -> Section {
     Section {
+        rotary: None,
         layer: LayerKey::Color(0),
         layer_name: "C00".into(),
         sub: 0,

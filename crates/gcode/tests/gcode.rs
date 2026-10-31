@@ -75,6 +75,7 @@ fn mopa_cut() -> CutQ {
 
 fn section(name: &str, cut: CutQ, paths: Vec<Polyline>) -> Section {
     Section {
+        rotary: None,
         layer: LayerKey::Color(0),
         layer_name: name.to_owned(),
         sub: 0,
