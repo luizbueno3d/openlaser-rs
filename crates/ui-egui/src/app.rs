@@ -486,6 +486,7 @@ impl OpenLaserApp {
         egui_extras::install_image_loaders(ctx);
         let saved = services.settings.load();
         session.set_frame_required(saved.require_frame);
+        crate::i18n::set_language(saved.language);
         services.human.set_skip_arm(saved.skip_arm);
         let ui = UiState { camera_background: saved.camera_background, ..UiState::default() };
         Self {
@@ -557,6 +558,20 @@ impl OpenLaserApp {
 
     pub fn ui_state(&self) -> &UiState {
         &self.ui
+    }
+
+    /// Language menu and Settings ▸ Language: switches the interface now and saves the choice.
+    pub(crate) fn set_language(&mut self, language: crate::i18n::Language) {
+        crate::i18n::set_language(language);
+        let mut settings = self.services.settings.load();
+        if settings.language != language {
+            settings.language = language;
+            self.services.settings.save(&settings);
+        }
+        self.set_status(crate::i18n::t(
+            "Language: English. The macOS menu bar changes the next time OpenLaser opens.",
+            "Idioma: Português (Brasil). A barra de menus do macOS muda na próxima vez que o OpenLaser abrir.",
+        ));
     }
 
     pub(crate) fn set_status(&mut self, message: impl Into<String>) {
@@ -753,6 +768,8 @@ impl OpenLaserApp {
         }
         match id {
             "edit.settings" => self.ui.settings_open = true,
+            "prefs.language.en" => self.set_language(crate::i18n::Language::English),
+            "prefs.language.ptBr" => self.set_language(crate::i18n::Language::Portuguese),
             "edit.deviceSettings" | "device.settings" | "device.manage" => self.ui.device_settings_open = true,
             "laser.liveFraming" => self.ui.live_framing_open = true,
             "preview.open" => self.ui.preview_open = true,

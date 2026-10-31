@@ -141,7 +141,7 @@ impl OpenLaserApp {
             }
             let refusals: Vec<String> = self
                 .plan()
-                .map(|p| p.refusals().iter().filter(|r| r.layer == Some(self.ui.active_layer)).map(|r| format!("{}: {}", r.code.as_str(), r.message)).collect())
+                .map(|p| p.refusals().iter().filter(|r| r.layer == Some(self.ui.active_layer)).map(crate::i18n::refusal).collect())
                 .unwrap_or_default();
             if refusals.is_empty() {
                 ui.weak("refusals: none");
@@ -200,65 +200,81 @@ impl OpenLaserApp {
 
     fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = true;
-        egui::Window::new("Settings").open(&mut open).collapsible(false).show(ctx, |ui| {
-            ui.heading("Automation");
-            let mut on = self.services.automation.info().is_some();
-            let r = ui.checkbox(&mut on, "Allow agent connections");
-            self.track(&r, "checkBox", "Allow agent connections", true);
-            // Human-only (§4.6): only a real click in an untainted frame changes automation access.
-            let human = self.services.human.is_human_click(ctx, &r);
-            if human && !self.frame_synthetic && !self.services.human.frame_is_synthetic(ctx) {
-                match self.services.automation.set(on) {
-                    Ok(Some(info)) => self.set_status(format!("Agents may connect on 127.0.0.1:{}", info.port)),
-                    Ok(None) => self.set_status("Agent connections are off"),
-                    Err(e) => self.set_status(format!("Automation: {e}")),
+        egui::Window::new(crate::i18n::t("Settings", "Configurações")).id(egui::Id::new("settings_window")).open(&mut open).collapsible(false).show(
+            ctx,
+            |ui| {
+                // Bilingual heading so either reader finds it.
+                ui.heading("Language / Idioma");
+                let current = crate::i18n::language();
+                let mut picked = current;
+                egui::ComboBox::from_id_salt("language").selected_text(current.native_name()).show_ui(ui, |ui| {
+                    for language in crate::i18n::Language::ALL {
+                        ui.selectable_value(&mut picked, language, language.native_name());
+                    }
+                });
+                if picked != current {
+                    self.set_language(picked);
                 }
-            } else if r.clicked() {
-                self.set_status("Allow agent connections needs a person's click in this window.");
-            }
-            match self.services.automation.info() {
-                Some(info) => ui.label(format!("Listening on 127.0.0.1:{} · {} client(s)", info.port, info.clients.len())),
-                None => ui.weak("Agents cannot connect. Turn this on to let openlaser-cli mcp --bridge auto drive this window."),
-            };
-            ui.separator();
-            ui.heading("Laser");
-            // Human-only like the automation switch: only a person's real click changes how Start arms.
-            let mut settings = self.services.settings.load();
-            let mut require_frame = settings.require_frame;
-            let r = ui.checkbox(&mut require_frame, "Require framing before Start");
-            self.track(&r, "checkBox", "Require framing before Start", true);
-            let human = self.services.human.is_human_click(ctx, &r);
-            if human && !self.frame_synthetic && !self.services.human.frame_is_synthetic(ctx) {
-                settings.require_frame = require_frame;
-                self.session.set_frame_required(require_frame);
-                self.services.settings.save(&settings);
-            }
-            let mut skip_arm = settings.skip_arm;
-            let r = ui.checkbox(&mut skip_arm, "Skip the ARM confirmation (Start fires at once)");
-            self.track(&r, "checkBox", "Skip the ARM confirmation", true);
-            let human = self.services.human.is_human_click(ctx, &r);
-            if human && !self.frame_synthetic && !self.services.human.frame_is_synthetic(ctx) {
-                settings.skip_arm = skip_arm;
-                self.services.human.set_skip_arm(skip_arm);
-                self.services.settings.save(&settings);
-            }
-            ui.weak(if settings.skip_arm {
-                "Start fires the laser straight away. STOP and the E-stop still stop it."
-            } else {
-                "You type ARM and tick the checklist once each time OpenLaser opens; after that, Start fires at once."
-            });
-            ui.separator();
-            ui.heading("Window");
-            let mut menus = self.in_window_menus;
-            let r = ui.checkbox(&mut menus, "Menus inside the window");
-            self.track(&r, "checkBox", "Menus inside the window", false);
-            if r.changed() {
-                self.in_window_menus = menus;
+                ui.separator();
+                ui.heading("Automation");
+                let mut on = self.services.automation.info().is_some();
+                let r = ui.checkbox(&mut on, "Allow agent connections");
+                self.track(&r, "checkBox", "Allow agent connections", true);
+                // Human-only (§4.6): only a real click in an untainted frame changes automation access.
+                let human = self.services.human.is_human_click(ctx, &r);
+                if human && !self.frame_synthetic && !self.services.human.frame_is_synthetic(ctx) {
+                    match self.services.automation.set(on) {
+                        Ok(Some(info)) => self.set_status(format!("Agents may connect on 127.0.0.1:{}", info.port)),
+                        Ok(None) => self.set_status("Agent connections are off"),
+                        Err(e) => self.set_status(format!("Automation: {e}")),
+                    }
+                } else if r.clicked() {
+                    self.set_status("Allow agent connections needs a person's click in this window.");
+                }
+                match self.services.automation.info() {
+                    Some(info) => ui.label(format!("Listening on 127.0.0.1:{} · {} client(s)", info.port, info.clients.len())),
+                    None => ui.weak("Agents cannot connect. Turn this on to let openlaser-cli mcp --bridge auto drive this window."),
+                };
+                ui.separator();
+                ui.heading("Laser");
+                // Human-only like the automation switch: only a person's real click changes how Start arms.
                 let mut settings = self.services.settings.load();
-                settings.in_window_menus = menus;
-                self.services.settings.save(&settings);
-            }
-        });
+                let mut require_frame = settings.require_frame;
+                let r = ui.checkbox(&mut require_frame, "Require framing before Start");
+                self.track(&r, "checkBox", "Require framing before Start", true);
+                let human = self.services.human.is_human_click(ctx, &r);
+                if human && !self.frame_synthetic && !self.services.human.frame_is_synthetic(ctx) {
+                    settings.require_frame = require_frame;
+                    self.session.set_frame_required(require_frame);
+                    self.services.settings.save(&settings);
+                }
+                let mut skip_arm = settings.skip_arm;
+                let r = ui.checkbox(&mut skip_arm, "Skip the ARM confirmation (Start fires at once)");
+                self.track(&r, "checkBox", "Skip the ARM confirmation", true);
+                let human = self.services.human.is_human_click(ctx, &r);
+                if human && !self.frame_synthetic && !self.services.human.frame_is_synthetic(ctx) {
+                    settings.skip_arm = skip_arm;
+                    self.services.human.set_skip_arm(skip_arm);
+                    self.services.settings.save(&settings);
+                }
+                ui.weak(if settings.skip_arm {
+                    "Start fires the laser straight away. STOP and the E-stop still stop it."
+                } else {
+                    "You type ARM and tick the checklist once each time OpenLaser opens; after that, Start fires at once."
+                });
+                ui.separator();
+                ui.heading("Window");
+                let mut menus = self.in_window_menus;
+                let r = ui.checkbox(&mut menus, "Menus inside the window");
+                self.track(&r, "checkBox", "Menus inside the window", false);
+                if r.changed() {
+                    self.in_window_menus = menus;
+                    let mut settings = self.services.settings.load();
+                    settings.in_window_menus = menus;
+                    self.services.settings.save(&settings);
+                }
+            },
+        );
         self.ui.settings_open = open;
     }
 
@@ -501,7 +517,7 @@ impl OpenLaserApp {
             }
             Some(PlanView::Refused(refused)) => {
                 for r in &refused.refusals {
-                    ui.label(format!("{}: {}", r.code.as_str(), r.message));
+                    ui.label(crate::i18n::refusal(r));
                 }
             }
             None => {

@@ -266,7 +266,7 @@ fn latest(a: MonoTime, b: MonoTime) -> MonoTime {
 }
 
 fn refusal_text(r: &Refusal) -> String {
-    format!("Refused ({}): {}", r.code.as_str(), r.message)
+    openlaser_ui_egui::tf!("Refused: {}", "Recusado: {}", openlaser_ui_egui::i18n::refusal(r))
 }
 
 fn draw_summary(ui: &mut egui::Ui, model: &ArmModel) {

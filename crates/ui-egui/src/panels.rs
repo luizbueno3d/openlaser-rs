@@ -223,7 +223,7 @@ impl OpenLaserApp {
     pub(crate) fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             for menu in MENUS {
-                let response = ui.menu_button(*menu, |ui| self.menu_branch(ui, &[*menu])).response;
+                let response = ui.menu_button(crate::i18n::menu(menu), |ui| self.menu_branch(ui, &[*menu])).response;
                 self.track(&response, "menu", *menu, false);
             }
         });
@@ -238,7 +238,7 @@ impl OpenLaserApp {
                     seen.push(next);
                     let mut nested = path.to_vec();
                     nested.push(next);
-                    ui.menu_button(*next, |ui| self.menu_branch(ui, &nested));
+                    ui.menu_button(crate::i18n::menu(next), |ui| self.menu_branch(ui, &nested));
                 }
             } else if menu_catalog::is_separator(row) {
                 ui.separator();
@@ -246,8 +246,11 @@ impl OpenLaserApp {
                 let live = menu_catalog::is_live(row);
                 let blocked = self.ui.machine_active && crate::app::opens_files(row.id);
                 let no_image = row.id == "tools.traceImage" && !self.trace_target();
-                let checked = row.id == "view.cameraBackground" && self.ui.camera_background;
-                let mut button = egui::Button::new(if checked { format!("✓ {}", row.label) } else { row.label.to_owned() });
+                let checked = (row.id == "view.cameraBackground" && self.ui.camera_background)
+                    || (row.id == "prefs.language.en" && crate::i18n::language() == crate::i18n::Language::English)
+                    || (row.id == "prefs.language.ptBr" && crate::i18n::language() == crate::i18n::Language::Portuguese);
+                let label = crate::i18n::menu(row.label);
+                let mut button = egui::Button::new(if checked { format!("✓ {label}") } else { label.to_owned() });
                 if let Some(shortcut) = row.shortcut {
                     button = button.shortcut_text(crate::shortcuts::pretty(shortcut));
                 }
@@ -1005,10 +1008,8 @@ impl OpenLaserApp {
                 .selected(self.ui.active_layer == key),
         );
         self.labeled(&number, egui::WidgetType::Button, &format!("Cut layer {name}"), false);
-        let refusals: Vec<String> = self
-            .plan()
-            .map(|p| p.refusals().iter().filter(|r| r.layer == Some(key)).map(|r| format!("{}: {}", r.code.as_str(), r.message)).collect())
-            .unwrap_or_default();
+        let refusals: Vec<String> =
+            self.plan().map(|p| p.refusals().iter().filter(|r| r.layer == Some(key)).map(crate::i18n::refusal).collect()).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.label(&name);
             if !refusals.is_empty() {
@@ -1301,7 +1302,7 @@ impl OpenLaserApp {
             Some(PlanView::Refused(refused)) => {
                 ui.colored_label(STOP_RED, format!("{} refusal(s): this job will not run", refused.refusals.len()));
                 for r in &refused.refusals {
-                    ui.label(format!("• {}: {}", r.code.as_str(), r.message));
+                    ui.label(format!("• {}", crate::i18n::refusal(r)));
                 }
                 if let Some(error) = &refused.error {
                     ui.label(error);
