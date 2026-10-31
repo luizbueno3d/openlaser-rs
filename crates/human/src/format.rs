@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use openlaser_types::{Bounds, PassRow, SectionMode};
+use openlaser_ui_egui::tf;
 
 /// Agent notes are plain text, at most this many characters (SPEC §4.4).
 pub const NOTE_MAX_CHARS: usize = 280;
@@ -15,11 +16,7 @@ pub const MESSAGE_MAX_CHARS: usize = 300;
 pub const CLIENT_MAX_CHARS: usize = 64;
 
 pub fn mode(m: SectionMode) -> &'static str {
-    match m {
-        SectionMode::Line => "Line",
-        SectionMode::Fill => "Fill",
-        SectionMode::Image => "Image",
-    }
+    openlaser_ui_egui::i18n::section_mode(m)
 }
 
 /// The layer key, then its (plain, bounded) name when it has one of its own.
@@ -56,7 +53,7 @@ pub fn speed(mm_s: f64) -> String {
 }
 
 pub fn bounds(b: &Bounds) -> String {
-    format!("({:.2}, {:.2}) to ({:.2}, {:.2}) mm", b.min[0], b.min[1], b.max[0], b.max[1])
+    tf!("({:.2}, {:.2}) to ({:.2}, {:.2}) mm", "({:.2}, {:.2}) a ({:.2}, {:.2}) mm", b.min[0], b.min[1], b.max[0], b.max[1])
 }
 
 pub fn seconds(d: Duration) -> String {
@@ -113,7 +110,15 @@ pub fn cap_violations(rows: &[PassRow], cap_pct: Option<f64>) -> Vec<String> {
     let Some(cap) = cap_pct else { return Vec::new() };
     rows.iter()
         .filter(|r| !within_cap(r.power_pct, cap))
-        .map(|r| format!("{} pass {} at {} is above the {cap} % cap of this bench session's first emission", layer(r), pass(r), power(r.power_pct)))
+        .map(|r| {
+            tf!(
+                "{} pass {} at {} is above the {cap} % cap of this bench session's first emission",
+                "{} passada {} com {} está acima do limite de {cap} % da primeira emissão desta sessão de bancada",
+                layer(r),
+                pass(r),
+                power(r.power_pct)
+            )
+        })
         .collect()
 }
 

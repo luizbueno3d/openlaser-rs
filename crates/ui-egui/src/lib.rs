@@ -15,6 +15,7 @@ pub mod control;
 mod cut_editor;
 mod dialogs;
 mod dock;
+pub mod i18n;
 mod icon_data;
 mod material_test;
 pub mod menu_catalog;
