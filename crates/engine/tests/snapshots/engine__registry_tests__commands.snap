@@ -3840,6 +3840,9 @@ expression: rows
       "additionalProperties": false,
       "description": "`device.settings.set`: Device Settings (CAT §7) for a galvo profile. Every key optional.",
       "properties": {
+        "cal": {
+          "default": null
+        },
         "checklist": {
           "default": null,
           "description": "The job checklist ticked at ARM (≥ 1 item).",
@@ -4066,6 +4069,9 @@ expression: rows
             "null"
           ]
         },
+        "redDot": {
+          "default": null
+        },
         "redDotOffsetXMm": {
           "default": null,
           "description": "Red dot offset X, mm.",
@@ -4102,6 +4108,9 @@ expression: rows
             "null"
           ]
         },
+        "rotary": {
+          "default": null
+        },
         "scaleXPct": {
           "default": null,
           "description": "Axis 1 scale, percent (50..=200).",
@@ -4119,6 +4128,9 @@ expression: rows
             "number",
             "null"
           ]
+        },
+        "workArea": {
+          "default": null
         }
       },
       "title": "SettingsParams",

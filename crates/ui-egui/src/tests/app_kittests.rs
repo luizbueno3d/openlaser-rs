@@ -259,6 +259,7 @@ fn used_project() -> Arc<openlaser_doc::Project> {
 
 fn summary(rows: Vec<openlaser_types::PassRow>) -> openlaser_engine::EmissionSummary {
     openlaser_engine::EmissionSummary {
+        rotary: None,
         fingerprint: openlaser_types::Fingerprint([7; 32]),
         bytes_hash: openlaser_types::Fingerprint([8; 32]),
         machine: openlaser_machine::jpt_m7_200_sim().id,
@@ -692,6 +693,8 @@ fn kittest_laser_panel_galvo_disabled_reasons() {
 #[test]
 fn kittest_start_without_receipt_says_frame_first() {
     let mut h = harness();
+    // Settings ▸ Laser ▸ Require framing before Start (off by default).
+    h.state_mut().session.set_frame_required(true);
     h.state_mut().seam.project = Some(used_project());
     let s = ready_plan(&mut h);
     h.run();
@@ -2781,4 +2784,39 @@ fn material_test_menu_creates_three_by_three_in_a_new_document() {
     assert_eq!(p.layers.order.len(), 10);
     assert_eq!(p.shapes.iter().filter(|s| matches!(s.geom, openlaser_doc::Geom::Rect { .. })).count(), 9);
     assert_eq!(p.layers.order.last(), Some(&LayerKey::Color(9)));
+}
+
+/// Puts the test thread back to English even if the test fails.
+struct EnglishAfter;
+
+impl Drop for EnglishAfter {
+    fn drop(&mut self) {
+        crate::i18n::set_language(crate::i18n::Language::English);
+    }
+}
+
+#[test]
+fn kittest_language_menu_switches_the_window_and_saves() {
+    let _english = EnglishAfter;
+    let mut h = harness();
+    h.run();
+    assert!(has_text(&h, "Start") && has_text(&h, "File"));
+    h.state_mut().invoke_ui_action("prefs.language.ptBr");
+    h.run();
+    assert!(has_text(&h, "Iniciar"), "the Laser panel is in Portuguese");
+    assert!(has_text(&h, "Arquivo"), "the in-window menu bar is in Portuguese");
+    assert_eq!(h.state().services.settings.load().language, crate::i18n::Language::Portuguese, "the choice is saved");
+    h.state_mut().invoke_ui_action("prefs.language.en");
+    h.run();
+    assert!(has_text(&h, "Start") && !has_text(&h, "Iniciar"));
+    assert_eq!(h.state().services.settings.load().language, crate::i18n::Language::English);
+}
+
+#[test]
+fn kittest_saved_language_applies_at_start() {
+    let _english = EnglishAfter;
+    let settings = UiSettings { in_window_menus: true, language: crate::i18n::Language::Portuguese, ..UiSettings::default() };
+    let mut h = harness_with(Options { settings, ..Options::default() });
+    h.run();
+    assert!(has_text(&h, "Iniciar") && has_text(&h, "Arquivo"));
 }

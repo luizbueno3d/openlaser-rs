@@ -12,6 +12,7 @@ pub const USAGE: &str = "\
 usage:
   openlaser-hw detect                                       read-only enumeration (needs a `hw` build)
   openlaser-hw status  [--machine <id>] [--sim] [--trace <f>]
+  openlaser-hw rotary  move --deg <d> | pos [--machine <id>] [--sim] [--trace <f>]
   openlaser-hw bench   start|status|end
   openlaser-hw profile show|set <key> <value>|import-om <calibration.json>|import-ezcad <markcfg> [--machine <id>]
   openlaser-hw frame   (<project> | --builtin <pattern>) [--loop] [--style bounds|contour] [--source job|tools|both]
@@ -87,6 +88,7 @@ pub struct ProfileOpts {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cmd {
+    Rotary { degrees: Option<f64>, device: DeviceOpts },
     Help,
     Detect,
     Status(StatusOpts),
@@ -209,6 +211,15 @@ pub fn parse(args: &[String]) -> Result<Cmd, HwError> {
             [s] if s == "end" => Ok(Cmd::Bench(BenchCmd::End)),
             _ => Err(usage("`bench` takes exactly one of start, status, end")),
         },
+        "rotary" => {
+            let f = Flags::parse("rotary", rest, &["--deg", "--machine", "--trace"], &["--sim"])?;
+            let degrees = match f.positional.as_slice() {
+                ["move"] => Some(finite("rotary", "--deg", f.value("--deg").ok_or_else(|| usage("rotary move requires --deg"))?)?),
+                ["pos"] if f.value("--deg").is_none() => None,
+                _ => return Err(usage("rotary move --deg <d> | rotary pos")),
+            };
+            Ok(Cmd::Rotary { degrees, device: f.device() })
+        }
         "profile" => parse_profile(rest),
         "frame" => parse_frame(rest),
         "run" => parse_run(rest),

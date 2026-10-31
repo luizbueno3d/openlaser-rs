@@ -17,7 +17,7 @@ use crate::args::{ProfileAction, ProfileOpts};
 use crate::rig::DEFAULT_USB_MACHINE;
 use crate::{Env, HwError, Terminal, require_tty};
 
-pub const KEYS: [&str; 15] = [
+pub const KEYS: [&str; 29] = [
     "cal.negate.x",
     "cal.negate.y",
     "cal.swapXy",
@@ -33,6 +33,20 @@ pub const KEYS: [&str; 15] = [
     "redDot.scale",
     "workArea",
     "h27Cleared",
+    "rotary.enabled",
+    "rotary.kind",
+    "rotary.pulses_per_rev",
+    "rotary.drive_diameter_mm",
+    "rotary.object_diameter_mm",
+    "rotary.axis",
+    "rotary.split_mm",
+    "rotary.overlap_mm",
+    "rotary.reverse",
+    "rotary.min_speed_pps",
+    "rotary.max_speed_pps",
+    "rotary.accel_ms",
+    "rotary.return_to_start",
+    "rotary.max_turns_per_job",
 ];
 
 fn bad(key: &str, value: &str, want: &str) -> HwError {
@@ -89,6 +103,40 @@ pub fn apply(p: &mut MachineProfile, key: &str, value: &str) -> Result<(), HwErr
 }
 
 fn apply_galvo(g: &mut GalvoMachine, key: &str, v: &str) -> Result<(), HwError> {
+    if let Some(field) = key.strip_prefix("rotary.") {
+        let mut r = g.rotary.clone().unwrap_or_default();
+        match field {
+            "enabled" => r.enabled = parse_bool(key, v)?,
+            "kind" => {
+                r.kind = match v.to_ascii_lowercase().as_str() {
+                    "chuck" => openlaser_machine::RotaryKind::Chuck,
+                    "roller" => openlaser_machine::RotaryKind::Roller,
+                    _ => return Err(bad(key, v, "chuck or roller")),
+                }
+            }
+            "pulses_per_rev" => r.pulses_per_rev = v.parse::<u32>().map_err(|_| bad(key, v, "an unsigned integer"))?,
+            "drive_diameter_mm" => r.drive_diameter_mm = parse_f64(key, v)?,
+            "object_diameter_mm" => r.object_diameter_mm = parse_f64(key, v)?,
+            "axis" => {
+                r.axis = match v.to_ascii_lowercase().as_str() {
+                    "x" => openlaser_machine::RotaryAxis::X,
+                    "y" => openlaser_machine::RotaryAxis::Y,
+                    _ => return Err(bad(key, v, "X or Y")),
+                }
+            }
+            "split_mm" => r.split_mm = parse_f64(key, v)?,
+            "overlap_mm" => r.overlap_mm = parse_f64(key, v)?,
+            "reverse" => r.reverse = parse_bool(key, v)?,
+            "min_speed_pps" => r.min_speed_pps = v.parse::<u16>().map_err(|_| bad(key, v, "an unsigned 16-bit integer"))?,
+            "max_speed_pps" => r.max_speed_pps = v.parse::<u16>().map_err(|_| bad(key, v, "an unsigned 16-bit integer"))?,
+            "accel_ms" => r.accel_ms = v.parse::<u16>().map_err(|_| bad(key, v, "an unsigned 16-bit integer"))?,
+            "return_to_start" => r.return_to_start = parse_bool(key, v)?,
+            "max_turns_per_job" => r.max_turns_per_job = parse_f64(key, v)?,
+            _ => return Err(bad(key, v, "a supported rotary field")),
+        }
+        g.rotary = Some(r);
+        return Ok(());
+    }
     match key {
         "cal.negate.x" => g.cal.negate[0] = parse_bool(key, v)?,
         "cal.negate.y" => g.cal.negate[1] = parse_bool(key, v)?,
@@ -314,5 +362,35 @@ mod tests {
         apply(&mut p, "transferTimeoutMs", "300").unwrap();
         let d = diff(&base, &p);
         assert_eq!(d, vec!["cal.negate: [false,false] → [true,false]".to_owned(), "transferTimeoutMs: 250 → 300".to_owned()]);
+    }
+    #[test]
+    fn every_rotary_field_applies_without_bypassing_profile_validation() {
+        let mut p = jpt_m7_200();
+        for (key, value) in [
+            ("enabled", "true"),
+            ("kind", "roller"),
+            ("pulses_per_rev", "6400"),
+            ("drive_diameter_mm", "20"),
+            ("object_diameter_mm", "35"),
+            ("axis", "x"),
+            ("split_mm", "8"),
+            ("overlap_mm", "1"),
+            ("reverse", "true"),
+            ("min_speed_pps", "200"),
+            ("max_speed_pps", "1200"),
+            ("accel_ms", "150"),
+            ("return_to_start", "false"),
+            ("max_turns_per_job", "3"),
+        ] {
+            apply(&mut p, &format!("rotary.{key}"), value).unwrap();
+            assert!(validate_profile(&p).is_ok(), "{key}");
+        }
+        let r = galvo(&p).rotary.as_ref().unwrap();
+        assert!(r.enabled && r.reverse);
+        assert!(!r.return_to_start);
+        assert_eq!(r.axis, openlaser_machine::RotaryAxis::X);
+        apply(&mut p, "rotary.pulses_per_rev", "0").unwrap();
+        assert!(validate_profile(&p).is_err());
+        assert!(apply(&mut p, "rotary.kind", "belt").is_err());
     }
 }

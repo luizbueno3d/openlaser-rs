@@ -27,6 +27,7 @@ pub mod stop;
 pub mod summary;
 pub mod trace;
 pub mod tty_arm;
+mod usb_trace;
 
 use std::fmt;
 use std::path::PathBuf;
@@ -235,6 +236,7 @@ fn execute(cmd: Cmd, term: &mut dyn Terminal, env: &mut Env) -> Result<(), HwErr
             Ok(())
         }
         Cmd::Detect => rig::detect(term),
+        Cmd::Rotary { degrees, device } => flow::rotary(degrees, &device, term, env),
         Cmd::Status(o) => flow::status(&o, term, env),
         Cmd::Bench(b) => bench::run(b, term),
         Cmd::Profile(p) => profile::run(&p, term, env),

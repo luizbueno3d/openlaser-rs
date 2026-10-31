@@ -168,6 +168,14 @@ fn galvo_mut<'a>(id: &str, m: &'a mut MachineProfile) -> Result<&'a mut GalvoMac
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SettingsParams {
+    #[serde(default)]
+    pub work_area: Option<serde_json::Value>,
+    #[serde(default)]
+    pub cal: Option<serde_json::Value>,
+    #[serde(default)]
+    pub red_dot: Option<serde_json::Value>,
+    #[serde(default)]
+    pub rotary: Option<serde_json::Value>,
     /// Profile id. Default: the active document's machine.
     #[serde(default)]
     pub device: Option<String>,
@@ -282,7 +290,11 @@ fn apply_settings(id: &str, p: SettingsParams, m: &mut MachineProfile) -> Result
         }
         m.checklist = list.iter().enumerate().map(|(i, t)| name(id, &format!("/checklist/{i}"), t.trim(), 200)).collect::<Result<_, _>>()?;
     }
-    let galvo_keys = p.field_width_mm.is_some()
+    let galvo_keys = p.work_area.is_some()
+        || p.cal.is_some()
+        || p.red_dot.is_some()
+        || p.rotary.is_some()
+        || p.field_width_mm.is_some()
         || p.field_height_mm.is_some()
         || p.field_offset_x_mm.is_some()
         || p.field_offset_y_mm.is_some()
@@ -314,6 +326,18 @@ fn apply_settings(id: &str, p: SettingsParams, m: &mut MachineProfile) -> Result
         return Ok(());
     }
     let g = galvo_mut(id, m)?;
+    if let Some(v) = p.work_area {
+        g.work_area = serde_json::from_value(v).map_err(|e| EngineError::bad(id, "/workArea", e.to_string()))?;
+    }
+    if let Some(v) = p.cal {
+        g.cal = serde_json::from_value(v).map_err(|e| EngineError::bad(id, "/cal", e.to_string()))?;
+    }
+    if let Some(v) = p.red_dot {
+        g.red_dot = serde_json::from_value(v).map_err(|e| EngineError::bad(id, "/redDot", e.to_string()))?;
+    }
+    if let Some(v) = p.rotary {
+        g.rotary = Some(serde_json::from_value(v).map_err(|e| EngineError::bad(id, "/rotary", e.to_string()))?);
+    }
     if p.field_width_mm.is_some() || p.field_height_mm.is_some() {
         let cur_w = g.work_area.max[0] - g.work_area.min[0];
         let cur_h = g.work_area.max[1] - g.work_area.min[1];

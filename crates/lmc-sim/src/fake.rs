@@ -31,6 +31,7 @@ pub enum Fault {
         after_execute: bool,
     },
     BusyStuck,
+    AxisNeverStops,
     DisconnectMidPacket {
         packet: u32,
     },
@@ -72,6 +73,13 @@ pub struct FakeLmc {
     laser_off: u16,
     polygon: u16,
     field_mm: [f64; 2],
+    axis_position: i32,
+    axis_start: i32,
+    axis_started: MonoTime,
+    axis_target: i32,
+    axis_until: Option<MonoTime>,
+    axis_max_speed: u16,
+    single_opcode: u16,
 }
 
 struct Active {
@@ -118,6 +126,13 @@ impl FakeLmc {
             laser_off: 0,
             polygon: 0,
             field_mm: [236.68; 2],
+            axis_position: 0,
+            axis_start: 0,
+            axis_started: cursor,
+            axis_target: 0,
+            axis_until: None,
+            axis_max_speed: 1,
+            single_opcode: 0,
         }
     }
     pub fn recorder(&self) -> Arc<Recorder> {
@@ -150,9 +165,13 @@ impl FakeLmc {
     /// `status_extra_bits` adds unknown bits (an idle 0x0220 board); it can never claim READY or BUSY, which come only
     /// from the board model.
     fn status(&self) -> u16 {
-        self.cfg.status_extra_bits & !(openlaser_lmc::StatusWord::READY | openlaser_lmc::StatusWord::BUSY)
+        self.cfg.status_extra_bits & !(openlaser_lmc::StatusWord::READY | openlaser_lmc::StatusWord::BUSY | openlaser_lmc::StatusWord::AXIS)
             | if self.ready() { openlaser_lmc::StatusWord::READY } else { 0 }
             | if self.executing { openlaser_lmc::StatusWord::BUSY } else { 0 }
+            | if self.axis_moving() { openlaser_lmc::StatusWord::AXIS } else { 0 }
+    }
+    fn axis_moving(&self) -> bool {
+        self.axis_until.is_some_and(|until| self.clock.now() < until || self.cfg.faults.contains(&Fault::AxisNeverStops))
     }
     fn notify(&self, event: SimWire) {
         if let Some(h) = self.hook.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
@@ -226,6 +245,22 @@ impl FakeLmc {
         Duration::try_from_secs_f64(seconds).map_err(|_| XferError::Io("invalid simulated command duration".into()))
     }
     fn pump(&mut self) -> Result<(), XferError> {
+        if let Some(until) = self.axis_until {
+            let total = until.saturating_since(self.axis_started).as_secs_f64();
+            let fraction = if total == 0.0 { 1.0 } else { (self.clock.now().saturating_since(self.axis_started).as_secs_f64() / total).min(1.0) };
+            self.axis_position = (f64::from(self.axis_start) + (f64::from(self.axis_target) - f64::from(self.axis_start)) * fraction).round() as i32;
+        }
+        if self.axis_until.is_some() && !self.axis_moving() {
+            self.axis_position = self.axis_target;
+            self.axis_until = None;
+        }
+        {
+            let mut r = self.recorder.recording.lock().unwrap_or_else(|e| e.into_inner());
+            r.axis_position = self.axis_position;
+            r.axis_target = self.axis_target;
+            r.axis_moving = self.axis_moving();
+        }
+
         if !self.executing {
             return Ok(());
         }
@@ -345,8 +380,32 @@ impl LmcTransport for FakeLmc {
         }
         let at = self.clock.now();
         self.notify(SimWire::Single { at, words: cmd.0 });
+        self.single_opcode = cmd.0[0];
         match cmd.0[0] {
-            op::FIBER_SET_MO => self.set_mo(cmd.0[1] != 0, at),
+            op::SET_AXIS_MOTION_PARAM => {
+                if cmd.0[1] == 0 || cmd.0[2] < cmd.0[1] {
+                    return Err(XferError::Io("invalid rotary speed parameters".into()));
+                }
+                self.axis_max_speed = cmd.0[2];
+            }
+            op::SET_AXIS_ORIGIN_PARAM if !(1..=10000).contains(&cmd.0[1]) => return Err(XferError::Io("invalid rotary acceleration parameter".into())),
+            op::MOVE_AXIS_TO => {
+                if self.executing || self.mo || self.port != 0 || self.axis_moving() {
+                    return Err(XferError::Io("unsafe rotary move while list, MO, ports or axis active".into()));
+                }
+                self.axis_start = self.axis_position;
+                self.axis_started = at;
+                self.axis_target = openlaser_lmc::axis_position([0, cmd.0[1], cmd.0[2], 0]);
+                let delta = (i64::from(self.axis_target) - i64::from(self.axis_position)).unsigned_abs();
+                let duration = Duration::try_from_secs_f64(delta as f64 / f64::from(self.axis_max_speed)).map_err(|e| XferError::Io(e.to_string()))?;
+                self.axis_until = Some(at.plus(duration));
+            }
+            op::FIBER_SET_MO => {
+                if cmd.0[1] != 0 && self.axis_moving() {
+                    return Err(XferError::Io("MO opened during rotary motion".into()));
+                }
+                self.set_mo(cmd.0[1] != 0, at);
+            }
             op::WRITE_PORT => self.set_port(cmd.0[1]),
             op::EXECUTE_LIST => {
                 self.executing = true;
@@ -395,7 +454,14 @@ impl LmcTransport for FakeLmc {
         }
         let status = self.status();
         self.notify(SimWire::Read { at: self.clock.now(), status });
-        Ok(Some(Some([0, 0, 0, status])))
+        let reply = if self.single_opcode == op::GET_AXIS_POS {
+            let word = self.axis_position.unsigned_abs() | if self.axis_position < 0 { 0x8000_0000 } else { 0 };
+            let [a, b, c, d] = word.to_le_bytes();
+            [0, u16::from_le_bytes([a, b]), u16::from_le_bytes([c, d]), status]
+        } else {
+            [0, 0, 0, status]
+        };
+        Ok(Some(Some(reply)))
     }
     fn submit_packet(&mut self, pkt: &Packet) -> Result<(), XferError> {
         self.check()?;
@@ -463,6 +529,9 @@ pub enum SimWire {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Recording {
+    pub axis_position: i32,
+    pub axis_target: i32,
+    pub axis_moving: bool,
     /// Offline simulation refuses malformed jobs explicitly; a partial trace is never presented as success.
     pub error: Option<XferError>,
     /// single/packet/read with virtual timestamps (for T6 ordering asserts).
@@ -497,6 +566,26 @@ impl Recorder {
 }
 
 /// Offline run of an encoded job (no driver thread): what `job_simulate` and `openlaser-cli simulate` show.
+fn replay_axis(board: &mut FakeLmc, mv: &openlaser_lmc::AxisMove, clock: &Arc<openlaser_types::VirtualClock>) -> Result<(), XferError> {
+    if !mv.valid() {
+        return Err(XferError::Io("invalid simulation axis move".into()));
+    }
+    for cmd in openlaser_lmc::axis_singles(mv) {
+        board.submit_single(cmd)?;
+        board.poll_single(Duration::ZERO)?;
+    }
+    loop {
+        board.submit_single(Single([op::GET_VERSION, 0, 0, 0, 0, 0]))?;
+        board.poll_single(Duration::ZERO)?;
+        if !board.axis_moving() {
+            break;
+        }
+        clock.advance(Duration::from_millis(10));
+        board.pump()?;
+    }
+    Ok(())
+}
+
 /// Replays the supplied prelude, packets and postlude against an isolated in-memory board.
 pub fn simulate_job(job: &LmcJob, m: &GalvoMachine) -> Recording {
     let clock = Arc::new(openlaser_types::VirtualClock::new());
@@ -519,6 +608,9 @@ pub fn simulate_job(job: &LmcJob, m: &GalvoMachine) -> Recording {
         }
         for _ in 0..job.repeats {
             for list in &job.lists {
+                if let Some(mv) = list.axis_move {
+                    replay_axis(board, &mv, &clock)?;
+                }
                 for cmd in &job.prelude {
                     board.submit_single(*cmd)?;
                     board.poll_single(Duration::ZERO)?;
@@ -548,6 +640,9 @@ pub fn simulate_job(job: &LmcJob, m: &GalvoMachine) -> Recording {
                     board.poll_single(Duration::ZERO)?;
                 }
             }
+        }
+        if let Some(mv) = job.return_axis {
+            replay_axis(board, &mv, &clock)?;
         }
         Ok(())
     };

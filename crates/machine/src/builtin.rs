@@ -114,6 +114,7 @@ fn gantry(
 
 fn jpt_m7(id: MachineId, name: &str, link: GalvoLink) -> MachineProfile {
     let galvo = GalvoMachine {
+        rotary: None,
         board: LmcBoardFilter { vid: 0x9588, pid: 0x9899, serial: None },
         link,
         encoding_field: lit!(Mm, 200.0),

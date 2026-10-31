@@ -106,7 +106,14 @@ fn is_om_workspace(name: &str, bytes: &[u8]) -> bool {
 
 /// Reads a design file into `Imported` (shapes with id 0). An OpenMopa workspace takes `layer_settings.json` from
 /// its folder, else OM's four built-in layers with a notice (Appendix B).
-pub(crate) fn import_bytes(s: &Session, path: &str, bytes: &[u8], args: &ImportArgs, current_layer: LayerKey) -> Result<Imported, EngineError> {
+pub(crate) fn import_bytes(
+    s: &Session,
+    path: &str,
+    bytes: &[u8],
+    args: &ImportArgs,
+    current_layer: LayerKey,
+    defaults: Option<&openlaser_doc::LayerDefaults>,
+) -> Result<Imported, EngineError> {
     let fname = file_name(path);
     let mut imported = if is_om_workspace(&fname, bytes) {
         let ws = openlaser_import::om::parse_workspace(bytes).map_err(import_error)?;
@@ -128,6 +135,7 @@ pub(crate) fn import_bytes(s: &Session, path: &str, bytes: &[u8], args: &ImportA
         imp
     } else {
         let opts = ImportOptions {
+            layer_defaults: defaults.cloned(),
             layer: args.layer,
             current_layer,
             center_at: args.center,
@@ -193,7 +201,18 @@ fn import(s: &mut Session, p: ImportParams) -> Result<Value, EngineError> {
     let args = import_args(ID, p.center_mm, p.scale, p.svg_units, p.layer)?;
     let bytes = s.read_file(&p.path)?;
     let current = s.doc()?.current_layer;
-    let imported = import_bytes(s, &p.path, &bytes, &args, current)?;
+    let mut imported = import_bytes(s, &p.path, &bytes, &args, current, s.machine_for(None).map(|m| &m.layer_defaults))?;
+    if openlaser_import::sniff(&p.path, &bytes) == Some(Format::Lbrn2) {
+        imported.layers.clear();
+        // Layer-related parser notices describe the source file, not this document.
+        imported.notices.push(Notice {
+            n: u32::try_from(imported.notices.len() + 1).unwrap_or(u32::MAX),
+            code: NoticeCode::ImportEntitySkipped,
+            message: "LightBurn layer settings were not applied by file.import; imported shapes use the current document's settings (including Output)".into(),
+            object: None,
+            layer: None,
+        });
+    }
     let notices = imported.notices.clone();
     let bounds = imported.bounds;
     let ids = s.edit(Label::with("Import {name}", file_name(&p.path)), None, move |project, sel| {
@@ -219,8 +238,11 @@ fn open(s: &mut Session, p: PathParams) -> Result<Value, EngineError> {
         let stem = std::path::Path::new(&p.path).file_stem().map_or_else(|| "Untitled".to_owned(), |n| n.to_string_lossy().into_owned());
         let mut project = Session::new_project(&profile, &stem);
         let args = import_args(ID, None, None, None, None)?;
-        let imported = import_bytes(s, &p.path, &bytes, &args, LayerKey::Color(0))?;
+        let imported = import_bytes(s, &p.path, &bytes, &args, LayerKey::Color(0), Some(&profile.layer_defaults))?;
         let notices = imported.notices.clone();
+        if openlaser_import::sniff(&p.path, &bytes) == Some(Format::Lbrn2) {
+            project.layers.order = imported.layers.iter().map(|(key, _)| *key).collect();
+        }
         let ids = apply_import(&mut project, imported)?;
         project.normalize();
         (project, ids.len(), notices)

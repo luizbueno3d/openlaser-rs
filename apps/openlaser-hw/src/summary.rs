@@ -41,6 +41,9 @@ fn yes_no(b: bool) -> &'static str {
 /// The decoded summary as a table, plus repeats, notices, totals, the post-crash bound, machine and fingerprint.
 pub fn text(s: &EmissionSummary) -> String {
     let mut out = String::new();
+    if let Some(r) = &s.rotary {
+        let _ = writeln!(out, "{r}");
+    }
     let _ = writeln!(
         out,
         "Job {} on {} — every number below is decoded from the bytes that will be sent",
@@ -157,6 +160,7 @@ pub(crate) mod tests {
 
     pub(crate) fn summary(power_pct: f64) -> EmissionSummary {
         EmissionSummary {
+            rotary: None,
             fingerprint: Fingerprint([1; 32]),
             bytes_hash: Fingerprint([2; 32]),
             machine: MachineId("jpt-m7-200-sim".into()),
