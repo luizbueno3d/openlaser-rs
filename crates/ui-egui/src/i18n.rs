@@ -12,7 +12,7 @@
 
 use std::cell::Cell;
 
-use openlaser_types::Refusal;
+use openlaser_types::{Refusal, SectionMode};
 use serde::{Deserialize, Serialize};
 
 mod menu_pt;
@@ -71,6 +71,31 @@ macro_rules! tf {
 /// A menu title or menu-catalogue label in the current language. Unknown labels stay English.
 pub fn menu(en: &'static str) -> &'static str {
     if is_pt() { menu_pt::get(en).unwrap_or(en) } else { en }
+}
+
+/// A section's cut mode (Line, Fill, Image) as a word.
+pub fn section_mode(mode: SectionMode) -> &'static str {
+    match mode {
+        SectionMode::Line => t("Line", "Linha"),
+        SectionMode::Fill => t("Fill", "Preenchimento"),
+        SectionMode::Image => t("Image", "Imagem"),
+    }
+}
+
+/// A machine checklist item for display. The built-in profiles' items have Portuguese; items a user wrote are shown
+/// as written. The stored item never changes: it is part of what the ARM confirmation covers.
+pub fn checklist(item: &str) -> &str {
+    if !is_pt() {
+        return item;
+    }
+    match item {
+        "Machine area clear and material secured" => "Área da máquina livre e material preso",
+        "Key switch and E-stop within reach" => "Chave e botão de emergência ao alcance",
+        "Laser safety glasses on for everyone in the room" => "Óculos de proteção laser em todos na sala",
+        "Material in place and focus checked" => "Material posicionado e foco conferido",
+        "Fume extraction on" => "Exaustão de fumaça ligada",
+        other => other,
+    }
 }
 
 /// A refusal as one line, `code: message`. In Portuguese the sentence for its code comes first and the engine's

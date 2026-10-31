@@ -10,19 +10,26 @@
 use std::time::Duration;
 
 use openlaser_types::{ArmToken, Fingerprint, FrameReceipt, MachineId, MonoTime, Refusal, RefusalCode, SessionId};
-use openlaser_ui_egui::{ArmModel, ArmOutcome};
+use openlaser_ui_egui::i18n::t;
+use openlaser_ui_egui::{ArmModel, ArmOutcome, tf};
 
 use crate::Human;
 use crate::format;
 
 pub const TITLE: &str = "Confirm laser emission";
+const TITLE_PT: &str = "Confirmar emissão do laser";
 pub const CONFIRM_LABEL: &str = "ARM and start";
+const CONFIRM_LABEL_PT: &str = "ARM e iniciar";
 pub const CANCEL_LABEL: &str = "Cancel";
+const CANCEL_LABEL_PT: &str = "Cancelar";
 /// SPEC §3.20 wording.
 pub const AUTOMATION_IGNORED: &str = "Automation input reached this dialog and was ignored.";
+const AUTOMATION_IGNORED_PT: &str = "Uma entrada de automação chegou a esta janela e foi ignorada.";
 const FIELD_HINT: &str = "Type ARM";
+const FIELD_HINT_PT: &str = "Digite ARM";
 /// An empty checklist can never be confirmed (`mint` refuses it too, SPEC §3.9).
 pub const NO_CHECKLIST: &str = "This machine profile has no checklist, so nothing can be armed. Add one in Device Settings.";
+const NO_CHECKLIST_PT: &str = "Este perfil de máquina não tem lista de verificação, então nada pode ser armado. Adicione uma em Configurações do dispositivo.";
 const THUMB_SIDE: f32 = 160.0;
 /// How long a Start click stays good for the ARM that follows it (the dialog is built in the next frames).
 const START_CLICK_WINDOW: Duration = Duration::from_secs(2);
@@ -186,7 +193,7 @@ impl Human {
         let summary_max = (ctx.content_rect().height() - CONTROLS_RESERVE - checklist_height).max(SUMMARY_MIN_HEIGHT);
         egui::Modal::new(egui::Id::new("openlaser-human::arm-dialog")).show(ctx, |ui| {
             ui.set_max_width(980.0);
-            ui.heading(TITLE);
+            ui.heading(t(TITLE, TITLE_PT));
             egui::ScrollArea::vertical()
                 .id_salt("openlaser-human::arm-summary")
                 .max_height(summary_max)
@@ -195,18 +202,18 @@ impl Human {
             // The bench power cap and its violations stay outside the scroll: they must always be visible.
             draw_cap(ui, model.emission_cap_pct, &violations);
             ui.separator();
-            ui.label("Before you arm:");
+            ui.label(t("Before you arm:", "Antes de armar:"));
             if model.checklist.is_empty() {
-                ui.colored_label(ui.visuals().error_fg_color, NO_CHECKLIST);
+                ui.colored_label(ui.visuals().error_fg_color, t(NO_CHECKLIST, NO_CHECKLIST_PT));
             }
             for (i, item) in model.checklist.iter().enumerate() {
                 if let Some(t) = state.ticked.get_mut(i) {
-                    ui.checkbox(t, format::plain(item, format::MESSAGE_MAX_CHARS));
+                    ui.checkbox(t, format::plain(openlaser_ui_egui::i18n::checklist(item), format::MESSAGE_MAX_CHARS));
                 }
             }
-            ui.add(egui::TextEdit::singleline(&mut state.typed).hint_text(FIELD_HINT).desired_width(120.0));
+            ui.add(egui::TextEdit::singleline(&mut state.typed).hint_text(t(FIELD_HINT, FIELD_HINT_PT)).desired_width(120.0));
             if state.automation_seen {
-                ui.colored_label(ui.visuals().warn_fg_color, AUTOMATION_IGNORED);
+                ui.colored_label(ui.visuals().warn_fg_color, t(AUTOMATION_IGNORED, AUTOMATION_IGNORED_PT));
             }
             if let Some(r) = &state.refusal {
                 ui.colored_label(ui.visuals().error_fg_color, r.as_str());
@@ -214,8 +221,8 @@ impl Human {
             ui.horizontal(|ui| {
                 // After the field and the ticks were drawn, so Confirm follows this pass's typing and ticking.
                 let ready = !tainted && state.typed_ok() && state.all_ticked() && violations.is_empty();
-                confirm = Some(ui.add_enabled(ready, egui::Button::new(CONFIRM_LABEL)));
-                if ui.button(CANCEL_LABEL).clicked() {
+                confirm = Some(ui.add_enabled(ready, egui::Button::new(t(CONFIRM_LABEL, CONFIRM_LABEL_PT))));
+                if ui.button(t(CANCEL_LABEL, CANCEL_LABEL_PT)).clicked() {
                     clicked = Clicked::Cancel;
                 }
             });
@@ -266,7 +273,7 @@ fn latest(a: MonoTime, b: MonoTime) -> MonoTime {
 }
 
 fn refusal_text(r: &Refusal) -> String {
-    openlaser_ui_egui::tf!("Refused: {}", "Recusado: {}", openlaser_ui_egui::i18n::refusal(r))
+    tf!("Refused: {}", "Recusado: {}", openlaser_ui_egui::i18n::refusal(r))
 }
 
 fn draw_summary(ui: &mut egui::Ui, model: &ArmModel) {
@@ -274,15 +281,26 @@ fn draw_summary(ui: &mut egui::Ui, model: &ArmModel) {
     if let Some(r) = &s.rotary {
         ui.strong(r.to_string());
     }
-    ui.label(format!("Machine: {}", format::plain(&s.machine.0, format::MESSAGE_MAX_CHARS)));
-    ui.label(format!("Job {}", s.fingerprint.short()));
+    ui.label(tf!("Machine: {}", "Máquina: {}", format::plain(&s.machine.0, format::MESSAGE_MAX_CHARS)));
+    ui.label(tf!("Job {}", "Trabalho {}", s.fingerprint.short()));
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(THUMB_SIDE, THUMB_SIDE), egui::Sense::hover());
         ui.painter().rect_stroke(rect, 2.0, ui.visuals().widgets.noninteractive.bg_stroke, egui::StrokeKind::Inside);
         openlaser_ui_egui::canvas::paint_fit(ui.painter(), &model.thumbnail, rect.shrink(4.0));
         ui.vertical(|ui| {
             egui::Grid::new("openlaser-human::arm-rows").striped(true).show(ui, |ui| {
-                for h in ["Layer", "Mode", "Pass", "Power", "Frequency", "Pulse", "Speed (actual)", "Paths", "Bounds", "Time"] {
+                for h in [
+                    t("Layer", "Camada"),
+                    t("Mode", "Modo"),
+                    t("Pass", "Passada"),
+                    t("Power", "Potência"),
+                    t("Frequency", "Frequência"),
+                    t("Pulse", "Pulso"),
+                    t("Speed (actual)", "Velocidade (real)"),
+                    t("Paths", "Caminhos"),
+                    t("Bounds", "Limites"),
+                    t("Time", "Tempo"),
+                ] {
                     ui.strong(h);
                 }
                 ui.end_row();
@@ -302,21 +320,28 @@ fn draw_summary(ui: &mut egui::Ui, model: &ArmModel) {
             });
         });
     });
-    ui.label(format!("Repeats: {}", s.repeats));
+    ui.label(tf!("Repeats: {}", "Repetições: {}", s.repeats));
     for n in &s.notices {
-        ui.label(format!("Notice {}: {}", n.n, format::plain(&n.message, format::MESSAGE_MAX_CHARS)));
+        ui.label(tf!("Notice {}: {}", "Aviso {}: {}", n.n, format::plain(&n.message, format::MESSAGE_MAX_CHARS)));
     }
-    ui.label(format!("Total time: {}", format::seconds(s.estimate)));
-    ui.label(format!("Emission still possible after a host crash: up to {}", format::seconds(s.crash_bound)));
+    ui.label(tf!("Total time: {}", "Tempo total: {}", format::seconds(s.estimate)));
+    ui.label(tf!(
+        "Emission still possible after a host crash: up to {}",
+        "Emissão ainda possível após uma falha do computador: até {}",
+        format::seconds(s.crash_bound)
+    ));
     if s.crash_bound > Duration::ZERO {
-        ui.small("The E-stop and the key switch stop everything else.");
+        ui.small(t("The E-stop and the key switch stop everything else.", "O botão de emergência e a chave param todo o resto."));
     }
 }
 
 fn draw_cap(ui: &mut egui::Ui, cap: Option<f64>, violations: &[String]) {
     let Some(cap) = cap else { return };
     ui.separator();
-    ui.colored_label(ui.visuals().warn_fg_color, format!("First emission of this bench session: power is capped at {cap} %."));
+    ui.colored_label(
+        ui.visuals().warn_fg_color,
+        tf!("First emission of this bench session: power is capped at {cap} %.", "Primeira emissão desta sessão de bancada: potência limitada a {cap} %."),
+    );
     for v in violations {
         ui.colored_label(ui.visuals().error_fg_color, v.as_str());
     }
