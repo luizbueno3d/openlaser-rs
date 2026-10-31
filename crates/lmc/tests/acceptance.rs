@@ -781,3 +781,42 @@ proptest! {
         prop_assert_eq!(first_jump, Some(Decoded::JumpTo { x: start.0, y: start.1, dist: distance_word((CENTER, CENTER), start) }));
     }
 }
+
+#[test]
+fn rotary_lists_and_return_are_bound_to_summary_and_wire_hash() {
+    use openlaser_machine::RotaryCfg;
+    use openlaser_plan::RotaryStep;
+    let mut m = machine();
+    m.rotary = Some(RotaryCfg { enabled: true, ..Default::default() });
+    let mut a = section(vec![box10()]);
+    a.rotary = Some(RotaryStep { strip: 0, target_pulses: -1019 });
+    let mut b = a.clone();
+    b.rotary = Some(RotaryStep { strip: 1, target_pulses: 1019 });
+    let (emit, plan) = plans(vec![a, b], 1);
+    let job = encode_job(&emit, &m).unwrap();
+    assert_eq!(job.lists.iter().map(|l| l.axis_move.unwrap().target_pulses).collect::<Vec<_>>(), vec![-1019, 1019]);
+    assert_eq!(job.return_axis.unwrap().target_pulses, 0);
+    let summary = emission_summary(&job, &m, &plan, &[]).unwrap();
+    let rotary = summary.rotary.unwrap();
+    assert_eq!((rotary.strips, rotary.total_pulses), (2, 4076));
+    assert_eq!(rotary.split_mm, 10.0);
+    assert!(rotary.return_to_start);
+    for change in 0..5 {
+        let mut edited = job.clone();
+        match change {
+            0 => edited.lists[0].axis_move.as_mut().unwrap().target_pulses += 1,
+            1 => edited.lists[0].axis_move.as_mut().unwrap().min_speed += 1,
+            2 => edited.lists[0].axis_move.as_mut().unwrap().max_speed += 1,
+            3 => edited.lists[0].axis_move.as_mut().unwrap().accel_ms += 1,
+            _ => edited.return_axis = None,
+        }
+        assert_ne!(edited.bytes_hash(), job.bytes_hash());
+        assert!(mismatch(emission_summary(&edited, &m, &plan, &[])));
+    }
+    m.rotary.as_mut().unwrap().return_to_start = false;
+    let no_return = encode_job(&emit, &m).unwrap();
+    assert!(no_return.return_axis.is_none());
+    let summary = emission_summary(&no_return, &m, &plan, &[]).unwrap().rotary.unwrap();
+    assert_eq!(summary.total_pulses, 3057);
+    assert!(!summary.return_to_start);
+}

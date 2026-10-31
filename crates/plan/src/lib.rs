@@ -16,11 +16,14 @@
 
 use std::time::Duration;
 
+mod dither;
 mod estimate;
 mod fingerprint;
 mod frame;
+mod image;
 mod planner;
 pub mod quantise;
+mod rotary;
 mod transform;
 
 pub use openlaser_doc::{DeviceKind, Project, WorkspaceOrigin};
@@ -31,6 +34,7 @@ pub use openlaser_types::{Fingerprint, FrameSource, FrameStyle, Hz, LayerKey, Ma
 
 pub use fingerprint::fingerprint_of;
 pub use frame::{HULL_FRAME_UNSUPPORTED, bounds_rect, frame_style_of};
+pub use image::{MAX_IMAGE_CELLS, MAX_IMAGE_INTERVAL_MM, MIN_IMAGE_INTERVAL_MM};
 pub use planner::{
     MAX_COORD_MM, MAX_DESIGN_POINTS, MAX_FLATTEN_TOL_MM, MAX_HATCH_LINES, MAX_PASSES_PER_LAYER, MAX_SECTION_POINTS, MAX_SECTIONS, MAX_SUB_LAYERS,
     MIN_FLATTEN_TOL_MM,
@@ -73,6 +77,7 @@ pub struct JobPlan {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Section {
+    pub rotary: Option<RotaryStep>,
     pub layer: LayerKey,
     pub layer_name: String,
     pub sub: u8,
@@ -84,6 +89,12 @@ pub struct Section {
     pub paths: Vec<Polyline>,
     pub objects: Vec<ObjectId>,
     pub estimate: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RotaryStep {
+    pub strip: u32,
+    pub target_pulses: i32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -132,6 +143,8 @@ pub struct GantryCutQ {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PlanFacts {
+    /// Advisory scan-angle sanity checks for rotary Fill/Image sections.
+    pub rotary_notices: Vec<(LayerKey, String)>,
     /// Layer not in the table (import of a forged/foreign file).
     pub orphan_objects: Vec<ObjectId>,
     /// show == false && output == true (B6).

@@ -474,6 +474,11 @@ impl From<CutModeP> for openlaser_doc::CutMode {
 pub enum ImageModeP {
     Threshold,
     Jarvis,
+    #[serde(rename = "floyd_steinberg", alias = "floydSteinberg")]
+    FloydSteinberg,
+    Stucki,
+    Atkinson,
+    Ordered,
 }
 
 impl From<ImageModeP> for openlaser_doc::ImageMode {
@@ -481,6 +486,10 @@ impl From<ImageModeP> for openlaser_doc::ImageMode {
         match v {
             ImageModeP::Threshold => openlaser_doc::ImageMode::Threshold,
             ImageModeP::Jarvis => openlaser_doc::ImageMode::Jarvis,
+            ImageModeP::FloydSteinberg => openlaser_doc::ImageMode::FloydSteinberg,
+            ImageModeP::Stucki => openlaser_doc::ImageMode::Stucki,
+            ImageModeP::Atkinson => openlaser_doc::ImageMode::Atkinson,
+            ImageModeP::Ordered => openlaser_doc::ImageMode::Ordered,
         }
     }
 }

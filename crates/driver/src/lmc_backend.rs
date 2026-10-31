@@ -165,6 +165,25 @@ impl<T: LmcTransport + 'static> Backend for LmcBackend<T> {
         if job.repeats == 0 || job.lists.is_empty() {
             return Err(DriverError::refused(RefusalCode::NothingToMark, "the job holds no list to mark"));
         }
+        if job.lists.iter().any(|l| l.axis_move.is_some()) || job.return_axis.is_some() {
+            let r = self
+                .machine
+                .rotary
+                .as_ref()
+                .filter(|r| r.enabled)
+                .ok_or_else(|| DriverError::refused(RefusalCode::UnsupportedMode, "rotary.enabled is required for rotary jobs"))?;
+            r.validate(self.machine.work_area).map_err(|e| DriverError::refused(RefusalCode::UnsupportedMode, e))?;
+            for mv in job.lists.iter().filter_map(|l| l.axis_move).chain(job.return_axis) {
+                if !mv.valid()
+                    || mv.min_speed != r.min_speed_pps
+                    || mv.max_speed != r.max_speed_pps
+                    || mv.accel_ms != r.accel_ms
+                    || f64::from(mv.target_pulses).abs() > r.max_turns_per_job * f64::from(r.pulses_per_rev)
+                {
+                    return Err(DriverError::refused(RefusalCode::UnsupportedMode, "encoded rotary move does not match the profile or its limits"));
+                }
+            }
+        }
         let mut packets: u32 = 0;
         let mut one_repeat = Duration::ZERO;
         for (i, l) in job.lists.iter().enumerate() {
@@ -181,9 +200,9 @@ impl<T: LmcTransport + 'static> Backend for LmcBackend<T> {
             .lists
             .iter()
             .enumerate()
-            .map(|(i, l)| (format!("list {}/{n} {} pass {}", i + 1, l.layer, l.pass), l.packets.as_slice(), l.packet_est.as_slice()))
+            .map(|(i, l)| (format!("list {}/{n} {} pass {}", i + 1, l.layer, l.pass), l.packets.as_slice(), l.packet_est.as_slice(), l.axis_move))
             .collect();
-        let spec = JobSpec { prelude: &job.prelude, lists, postlude: &job.postlude, repeats: job.repeats };
+        let spec = JobSpec { return_axis: job.return_axis, prelude: &job.prelude, lists, postlude: &job.postlude, repeats: job.repeats };
         let mut progress = Progress { acked: 0, total, unsent: one_repeat.saturating_mul(u32::from(job.repeats)) };
         cx.emit(DriverEvent::State(MachineState::Running { packets_acked: 0, total }));
         let started = cx.now();
@@ -312,6 +331,7 @@ mod tests {
         let mut cx = Cx::new(&latch, &tx, &*clock);
         let mut b = LmcBackend::new(Refusing, galvo());
         let job = LmcJob {
+            return_axis: None,
             prelude: Vec::new(),
             lists: Vec::new(),
             repeats: 1,

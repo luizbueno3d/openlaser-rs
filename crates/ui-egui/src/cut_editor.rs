@@ -3,8 +3,10 @@
 //! Values are never clamped: a value the machine cannot run is a refusal from the planner (live in the Laser panel),
 //! and a value that is not a number at all keeps OK disabled with the reason.
 
-use openlaser_doc::{ColorLayer, CutMode};
+use openlaser_doc::{ColorLayer, CutMode, ImageMode};
 use openlaser_types::LayerKey;
+
+use crate::i18n::t;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Draft {
@@ -29,6 +31,7 @@ pub struct Draft {
     pub angle_increment: f64,
     pub bidirectional: bool,
     pub cross_hatch: bool,
+    pub image_mode: ImageMode,
 }
 
 /// What the editor needs from the machine profile.
@@ -60,6 +63,7 @@ impl Draft {
             angle_increment: op.fill.angle_increment.get(),
             bidirectional: op.fill.bidirectional,
             cross_hatch: op.fill.cross_hatch,
+            image_mode: layer.image.mode,
         })
     }
 
@@ -107,6 +111,7 @@ impl Draft {
             "mode": match self.mode { CutMode::Line => "line", CutMode::Fill => "fill", CutMode::OffsetFill => "offset_fill" },
             "passes": self.passes,
             "galvo": { "speedMmS": self.speed, "powerPct": self.power, "frequencyKhz": self.frequency_khz, "qPulseNs": self.q_pulse_ns },
+            "image": { "mode": self.image_mode },
             "fill": {
                 "intervalMm": self.interval,
                 "angleDeg": self.angle,
@@ -130,6 +135,7 @@ impl Draft {
                     _ => return Err("mode must be line or fill (Offset Fill is P1)".into()),
                 }
             }
+            "imageMode" => self.image_mode = serde_json::from_value(value.clone()).map_err(|e| format!("invalid image mode: {e}"))?,
             "speedMmS" => self.speed = number()?,
             "powerPct" => self.power = number()?,
             "frequencyKhz" => self.frequency_khz = number()?,
@@ -161,28 +167,28 @@ impl Draft {
             out.push((response, label.to_owned()));
         };
         egui::Grid::new("cut-settings-fields").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
-            crate::panels::caption(ui, "Layer");
+            crate::panels::caption(ui, t("Layer", "Camada"));
             ui.label(format!("{} ({})", self.name, self.layer));
             ui.end_row();
 
-            crate::panels::caption(ui, "Output");
+            crate::panels::caption(ui, t("Output", "Saída"));
             let r = ui.add_enabled(enabled, egui::Checkbox::without_text(&mut self.output));
             add(ui, "Output", r, None);
             ui.end_row();
 
-            crate::panels::caption(ui, "Mode");
+            crate::panels::caption(ui, t("Mode", "Modo"));
             let mode_text = match self.mode {
-                CutMode::Line => "Line",
-                CutMode::Fill => "Fill",
-                CutMode::OffsetFill => "Offset Fill",
+                CutMode::Line => t("Line", "Linha"),
+                CutMode::Fill => t("Fill", "Preenchimento"),
+                CutMode::OffsetFill => t("Offset Fill", "Preenchimento deslocado"),
             };
             let r = ui
                 .add_enabled_ui(enabled, |ui| {
                     egui::ComboBox::from_id_salt("cut-mode")
                         .selected_text(mode_text)
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.mode, CutMode::Line, "Line");
-                            ui.selectable_value(&mut self.mode, CutMode::Fill, "Fill");
+                            ui.selectable_value(&mut self.mode, CutMode::Line, t("Line", "Linha"));
+                            ui.selectable_value(&mut self.mode, CutMode::Fill, t("Fill", "Preenchimento"));
                         })
                         .response
                 })
@@ -190,39 +196,64 @@ impl Draft {
             add(ui, "Mode", r, None);
             ui.end_row();
 
-            crate::panels::caption(ui, "Speed (mm/s)");
+            crate::panels::caption(ui, t("Image Mode", "Modo de imagem"));
+            let r = ui
+                .add_enabled_ui(enabled, |ui| {
+                    let modes = [
+                        (ImageMode::Threshold, t("Threshold", "Limiar")),
+                        (ImageMode::Jarvis, "Jarvis"),
+                        (ImageMode::FloydSteinberg, "Floyd–Steinberg"),
+                        (ImageMode::Stucki, "Stucki"),
+                        (ImageMode::Atkinson, "Atkinson"),
+                        (ImageMode::Ordered, t("Ordered (8×8 Bayer)", "Ordenado (Bayer 8×8)")),
+                    ];
+                    let selected = modes.iter().find(|(m, _)| *m == self.image_mode).map_or_else(|| format!("{:?}", self.image_mode), |(_, l)| (*l).to_owned());
+                    egui::ComboBox::from_id_salt("image-mode")
+                        .selected_text(selected)
+                        .show_ui(ui, |ui| {
+                            for (mode, label) in modes {
+                                ui.selectable_value(&mut self.image_mode, mode, label);
+                            }
+                        })
+                        .response
+                })
+                .inner;
+            add(ui, "Image Mode", r, None);
+            ui.end_row();
+
+            crate::panels::caption(ui, t("Speed (mm/s)", "Velocidade (mm/s)"));
             let r = ui.add_enabled(enabled, egui::DragValue::new(&mut self.speed).speed(1.0).max_decimals(2));
             add(ui, "Speed (mm/s)", r, None);
             match limits.actual_speed {
-                Some(actual) => ui.label(format!("actual {actual:.2} mm/s")),
-                None => ui.weak("actual speed shows once the job plans"),
+                Some(actual) => ui.label(crate::tf!("actual {actual:.2} mm/s", "real {actual:.2} mm/s")),
+                None => ui.weak(t("actual speed shows once the job plans", "a velocidade real aparece quando o trabalho é planejado")),
             };
             ui.end_row();
 
-            crate::panels::caption(ui, "Max Power (%)");
+            crate::panels::caption(ui, t("Max Power (%)", "Potência máx. (%)"));
             let r = ui.add_enabled(enabled, egui::DragValue::new(&mut self.power).speed(0.5).max_decimals(1));
             add(ui, "Max Power (%)", r, None);
-            ui.weak(format!("source max {} %", limits.max_power_pct));
+            ui.weak(crate::tf!("source max {} %", "máx. da fonte {} %", limits.max_power_pct));
             ui.end_row();
 
-            crate::panels::caption(ui, "Frequency (kHz)");
+            crate::panels::caption(ui, t("Frequency (kHz)", "Frequência (kHz)"));
             let r = ui.add_enabled(enabled, egui::DragValue::new(&mut self.frequency_khz).speed(0.5).max_decimals(3));
             add(ui, "Frequency (kHz)", r, None);
-            ui.weak(format!("allowed {} – {} kHz", limits.freq_khz[0], limits.freq_khz[1]));
+            ui.weak(crate::tf!("allowed {} – {} kHz", "permitido {} – {} kHz", limits.freq_khz[0], limits.freq_khz[1]));
             ui.end_row();
 
-            crate::panels::caption(ui, "Q-Pulse Width (ns)");
+            crate::panels::caption(ui, t("Q-Pulse Width (ns)", "Largura de pulso Q (ns)"));
             let current = match self.q_pulse_ns {
-                None => "Default".to_owned(),
+                None => t("Default", "Padrão").to_owned(),
                 Some(ns) if limits.pulse_table_ns.iter().any(|t| (f64::from(*t) - ns).abs() < 1e-9) => format!("{ns}"),
-                Some(ns) => format!("{ns} (not in the pulse table)"),
+                Some(ns) => crate::tf!("{ns} (not in the pulse table)", "{ns} (fora da tabela de pulsos)"),
             };
             let r = ui
                 .add_enabled_ui(enabled, |ui| {
                     egui::ComboBox::from_id_salt("cut-q-pulse")
                         .selected_text(current)
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.q_pulse_ns, None, "Default");
+                            ui.selectable_value(&mut self.q_pulse_ns, None, t("Default", "Padrão"));
                             for ns in limits.pulse_table_ns {
                                 ui.selectable_value(&mut self.q_pulse_ns, Some(f64::from(*ns)), format!("{ns} ns"));
                             }
@@ -230,17 +261,22 @@ impl Draft {
                         .response
                 })
                 .inner;
-            add(ui, "Q-Pulse Width (ns)", r, Some("The source's pulse table (EZCAD: Q pulse width)".into()));
-            ui.weak("MOPA pulse table");
+            add(
+                ui,
+                "Q-Pulse Width (ns)",
+                r,
+                Some(t("The source's pulse table (EZCAD: Q pulse width)", "A tabela de pulsos da fonte (EZCAD: Q pulse width)").into()),
+            );
+            ui.weak(t("MOPA pulse table", "Tabela de pulsos MOPA"));
             ui.end_row();
 
-            crate::panels::caption(ui, "Passes");
+            crate::panels::caption(ui, t("Passes", "Passadas"));
             let r = ui.add_enabled(enabled, egui::DragValue::new(&mut self.passes).speed(0.1));
             add(ui, "Passes", r, None);
             ui.end_row();
 
             if self.mode != CutMode::Line {
-                crate::panels::caption(ui, "Line Interval (mm)");
+                crate::panels::caption(ui, t("Line Interval (mm)", "Intervalo de linha (mm)"));
                 let r = ui.add_enabled(enabled, egui::DragValue::new(&mut self.interval).speed(0.001).max_decimals(4));
                 add(ui, "Line Interval (mm)", r, None);
                 if self.interval > 0.0 {
@@ -250,24 +286,29 @@ impl Draft {
                 }
                 ui.end_row();
 
-                crate::panels::caption(ui, "Scan Angle (°)");
+                crate::panels::caption(ui, t("Scan Angle (°)", "Ângulo de varredura (°)"));
                 let r = ui.add_enabled(enabled, egui::DragValue::new(&mut self.angle).speed(1.0));
                 add(ui, "Scan Angle (°)", r, None);
                 ui.end_row();
 
-                crate::panels::caption(ui, "Angle Increment (°)");
+                crate::panels::caption(ui, t("Angle Increment (°)", "Incremento de ângulo (°)"));
                 let r = ui.add_enabled(enabled, egui::DragValue::new(&mut self.angle_increment).speed(1.0));
-                add(ui, "Angle Increment (°)", r, Some("Added to the scan angle on each pass".into()));
+                add(ui, "Angle Increment (°)", r, Some(t("Added to the scan angle on each pass", "Somado ao ângulo de varredura a cada passada").into()));
                 ui.end_row();
 
-                crate::panels::caption(ui, "Bi-directional Fill");
+                crate::panels::caption(ui, t("Bi-directional Fill", "Preenchimento bidirecional"));
                 let r = ui.add_enabled(enabled, egui::Checkbox::without_text(&mut self.bidirectional));
                 add(ui, "Bi-directional Fill", r, None);
                 ui.end_row();
 
-                crate::panels::caption(ui, "Cross-Hatch");
+                crate::panels::caption(ui, t("Cross-Hatch", "Hachura cruzada"));
                 let r = ui.add_enabled(enabled, egui::Checkbox::without_text(&mut self.cross_hatch));
-                add(ui, "Cross-Hatch", r, Some("A second hatch at +90° (EZCAD: hatch 2 at +90°)".into()));
+                add(
+                    ui,
+                    "Cross-Hatch",
+                    r,
+                    Some(t("A second hatch at +90° (EZCAD: hatch 2 at +90°)", "Uma segunda hachura a +90° (EZCAD: hatch 2 a +90°)").into()),
+                );
                 ui.end_row();
             }
         });
@@ -340,6 +381,17 @@ mod tests {
         );
         assert!(draft.set_field("mode", &serde_json::json!("offset_fill")).is_err(), "Offset Fill is P1");
         assert!(draft.set_field("force", &serde_json::json!(true)).is_err());
+    }
+
+    #[test]
+    fn image_modes_reach_the_command() {
+        let mut draft = Draft::from_layer(&layer()).unwrap();
+        for name in ["threshold", "jarvis", "floyd_steinberg", "stucki", "atkinson", "ordered"] {
+            draft.set_field("imageMode", &serde_json::json!(name)).unwrap();
+            let params = draft.params();
+            assert_eq!(params["image"]["mode"], name);
+            let _: ImageMode = serde_json::from_value(params["image"]["mode"].clone()).unwrap();
+        }
     }
 
     #[test]

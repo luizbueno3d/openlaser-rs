@@ -60,6 +60,115 @@ pub struct GalvoMachine {
     /// false until H12: if the device is unconfigured, refuse (UsbNotConfigured) instead of calling
     /// set_configuration(1); Luiz flips it at a TTY if H12 says so.
     pub usb_set_configuration: bool,
+    #[serde(default)]
+    pub rotary: Option<RotaryCfg>,
+}
+
+/// Extended-axis settings. Protocol units remain unverified until the rotary bench session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RotaryCfg {
+    pub enabled: bool,
+    pub kind: RotaryKind,
+    pub pulses_per_rev: u32,
+    pub drive_diameter_mm: f64,
+    pub object_diameter_mm: f64,
+    pub axis: RotaryAxis,
+    pub split_mm: f64,
+    pub overlap_mm: f64,
+    pub reverse: bool,
+    pub min_speed_pps: u16,
+    pub max_speed_pps: u16,
+    pub accel_ms: u16,
+    pub return_to_start: bool,
+    pub max_turns_per_job: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RotaryKind {
+    #[default]
+    Chuck,
+    Roller,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RotaryAxis {
+    X,
+    #[default]
+    Y,
+}
+
+impl RotaryAxis {
+    pub fn coordinate(self, point: [f64; 2]) -> f64 {
+        match self {
+            Self::X => point[0],
+            Self::Y => point[1],
+        }
+    }
+    pub fn translate(self, point: &mut [f64; 2], delta: f64) {
+        match self {
+            Self::X => point[0] += delta,
+            Self::Y => point[1] += delta,
+        }
+    }
+    pub fn index(self) -> usize {
+        match self {
+            Self::X => 0,
+            Self::Y => 1,
+        }
+    }
+}
+
+impl Default for RotaryCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            kind: RotaryKind::Chuck,
+            pulses_per_rev: 12800,
+            drive_diameter_mm: 40.0,
+            object_diameter_mm: 40.0,
+            axis: RotaryAxis::Y,
+            split_mm: 10.0,
+            overlap_mm: 0.0,
+            reverse: false,
+            min_speed_pps: 100,
+            max_speed_pps: 1000,
+            accel_ms: 100,
+            return_to_start: true,
+            max_turns_per_job: 2.0,
+        }
+    }
+}
+
+impl RotaryCfg {
+    pub fn circumference(&self) -> f64 {
+        std::f64::consts::PI * self.drive_diameter_mm
+    }
+
+    pub fn validate(&self, work: FieldRect) -> Result<(), String> {
+        let diameter = |d: f64| d.is_finite() && d > 0.0 && d <= 500.0;
+        if !(1..=1_000_000).contains(&self.pulses_per_rev)
+            || !diameter(self.drive_diameter_mm)
+            || !diameter(self.object_diameter_mm)
+            || !self.split_mm.is_finite()
+            || self.split_mm < self.circumference() / f64::from(self.pulses_per_rev)
+            || self.split_mm > self.axis.coordinate(work.max) - self.axis.coordinate(work.min)
+            || !self.overlap_mm.is_finite()
+            || self.overlap_mm < 0.0
+            || self.overlap_mm >= self.split_mm / 2.0
+            || self.min_speed_pps == 0
+            || self.max_speed_pps < self.min_speed_pps
+            || !(1..=10000).contains(&self.accel_ms)
+            || !self.max_turns_per_job.is_finite()
+            || self.max_turns_per_job <= 0.0
+            || self.max_turns_per_job > 20.0
+        {
+            return Err("invalid rotary configuration: check pulses/rev (1..=1000000), diameters (0..=500 mm), split (one pulse..field extent), overlap (0..split/2), ordered positive speeds, acceleration (1..=10000 ms), and max turns (0..=20)".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -263,6 +372,11 @@ fn rect_inside(inner: FieldRect, outer: FieldRect) -> bool {
 }
 
 fn validate_galvo(g: &GalvoMachine, problems: &mut Vec<String>) {
+    if let Some(r) = &g.rotary
+        && let Err(e) = r.validate(g.work_area)
+    {
+        problems.push(e);
+    }
     if !g.cal.scale.iter().all(|v| v.is_finite() && (0.5..=2.0).contains(v)) {
         problems.push("galvo calibration scale must be finite and within 0.5..=2.0 on both axes".to_owned());
     }

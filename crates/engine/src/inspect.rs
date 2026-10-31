@@ -26,6 +26,10 @@ fn image_mode_str(m: ImageMode) -> &'static str {
     match m {
         ImageMode::Threshold => "threshold",
         ImageMode::Jarvis => "jarvis",
+        ImageMode::FloydSteinberg => "floyd_steinberg",
+        ImageMode::Stucki => "stucki",
+        ImageMode::Atkinson => "atkinson",
+        ImageMode::Ordered => "ordered",
     }
 }
 

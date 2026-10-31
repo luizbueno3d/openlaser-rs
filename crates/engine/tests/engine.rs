@@ -421,8 +421,8 @@ mod undo {
         "tools.traceImage",
     ];
 
-    /// `edit.copy` only writes the session clipboard: it changes no document and records no history step.
-    const NOT_UNDOABLE: [&str; 4] = ["file.new", "edit.undo", "edit.redo", "edit.copy"];
+    /// `file.new` and Material Test open new tabs; `edit.copy` changes only the session clipboard.
+    const NOT_UNDOABLE: [&str; 5] = ["file.new", "laserTools.materialTest", "edit.undo", "edit.redo", "edit.copy"];
 
     #[test]
     fn undo_roundtrip_every_edit_command() {
@@ -1304,5 +1304,44 @@ mod camera {
         // clear removes the file too.
         s2.execute_as(Origin::Human, "camera.calibrate.clear", json!({})).unwrap();
         assert!(store().load().is_none());
+    }
+}
+
+#[test]
+fn image_modes_command_and_project_serde_roundtrip() {
+    let mut s = headless();
+    with_doc(&mut s);
+    for name in ["threshold", "jarvis", "floyd_steinberg", "stucki", "atkinson", "ordered"] {
+        s.execute("layer.cutSettings.set", json!({"layer":0,"image":{"mode":name}})).unwrap();
+        let project = &s.active().unwrap().project;
+        let bytes = openlaser_format::save(project).unwrap();
+        let decoded = openlaser_format::load(&bytes).unwrap();
+        assert_eq!(&decoded, project.as_ref());
+        assert_eq!(serde_json::to_value(decoded.layers.colors[0].image.mode).unwrap(), name);
+    }
+}
+
+mod lbrn2 {
+    use super::*;
+    #[test]
+    fn open_loads_layers_but_import_keeps_current_settings() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/lbrn2/shapes.lbrn2");
+        let mut s = headless();
+        let value = s.execute("file.open", json!({"path":path})).unwrap();
+        assert_eq!(value["objects"], 7);
+        assert!(!value["notices"].as_array().unwrap().is_empty());
+        s.execute("layer.cutSettings.set", json!({"layer":"C02","galvo":{"speedMmS":321.0}})).unwrap();
+        let before = s.docs()[0].project.layers.clone();
+        let value = s.execute("file.import", json!({"path":path})).unwrap();
+        assert_eq!(value["objects"].as_array().unwrap().len(), 7);
+        assert_eq!(s.docs()[0].project.layers.colors, before.colors);
+        let settings = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/lbrn2/settings.lbrn2");
+        s.execute("file.open", json!({"path":settings})).unwrap();
+        let p = &s.docs().last().unwrap().project;
+        let l = p.color_layer(2).unwrap();
+        assert_eq!(l.ops[0].galvo.speed.get(), 550.);
+        assert_eq!(l.ops.len(), 2);
+        assert_eq!(p.color_layer(6).unwrap().ops[0].mode, CutMode::OffsetFill);
+        assert_eq!(p.layers.order, vec![openlaser_types::LayerKey::Color(6), openlaser_types::LayerKey::Color(2), openlaser_types::LayerKey::Color(9)]);
     }
 }

@@ -145,7 +145,7 @@ Every scenario ends with the abort, whose 3072-byte dummy end-of-list packet is 
    divergences below. The comparator decodes both list-command streams and allows only the listed differences
    (`v0_vs_v1.json` shows the style).
 3. The shipping sequence (one session, explicit first jump with settle, no per-job abort) is reviewed once and
-   frozen separately as `rust-v1` goldens. They are not in this directory yet.
+   frozen separately as `rust-v1` goldens in `rust-v1/` (signed 2026-10-26 for controlled hardware validation, D13).
 
 ### T2: G-code (`t2_gcode/`), byte-exact after masking
 
@@ -258,7 +258,7 @@ PLAN §3.3, §3.6, §6.1 and §11; each change gets a line in `DIVERGENCES.md` w
 | B10 | Work area = min(effective F, rated FIELDSIZE) = ±100 mm, not the galvo reach ±118.34 mm | refusal (T5) |
 | B4, B5, B6, B8, B9, B12 | Confirmation shows each layer's values; single-use ARM nonce; hidden + Output refused; orphan objects refused; points that are not (x, y) refused; board lock | planner/UI, no byte change in these scenarios |
 
-**Rust only** (the `rust-v1` goldens, still to be frozen):
+**Rust only** (the `rust-v1` goldens, frozen 2026-10-26 in `rust-v1/`):
 1. **First jump:** an explicit `JumpTo` with the **long** jump delay (200, GP's `delay_jump_long`), then
    `DelayTime(100)` (1 ms settle) before the first `MarkTo` or light-on. v1 uses the short delay 8 and no settle.
    The `dist` word is computed as GP does.

@@ -7,7 +7,9 @@
 #[cfg(all(feature = "py-compat", not(debug_assertions)))]
 compile_error!("openlaser-lmc: the `py-compat` feature is test-only (dev-dependencies) and needs debug assertions");
 
+mod axis;
 mod decode;
+pub use axis::{AxisMove, axis_position, axis_singles};
 mod encode;
 pub mod op;
 mod packet;

@@ -107,6 +107,29 @@ fn machine(c: &mut Canon, m: &MachineProfile) {
             c.f64(g.mo_settle.get());
             c.u8(g.ports.laser_bit);
             c.u8(g.ports.red_bit);
+            // Append only for enabled rotary: legacy canonical bytes stay exactly unchanged.
+            if let Some(r) = g.rotary.as_ref().filter(|r| r.enabled) {
+                c.str("rotary/v1");
+                c.u32(r.pulses_per_rev);
+                c.f64(r.drive_diameter_mm);
+                c.f64(r.object_diameter_mm);
+                c.u8(match r.kind {
+                    openlaser_machine::RotaryKind::Chuck => 0,
+                    openlaser_machine::RotaryKind::Roller => 1,
+                });
+                c.u8(match r.axis {
+                    openlaser_machine::RotaryAxis::X => 0,
+                    openlaser_machine::RotaryAxis::Y => 1,
+                });
+                c.f64(r.split_mm);
+                c.f64(r.overlap_mm);
+                c.bool(r.reverse);
+                c.u16(r.min_speed_pps);
+                c.u16(r.max_speed_pps);
+                c.u16(r.accel_ms);
+                c.bool(r.return_to_start);
+                c.f64(r.max_turns_per_job);
+            }
         }
         Kinematics::Gantry(g) => {
             c.u8(2);
@@ -191,6 +214,11 @@ fn gantry_cut(c: &mut Canon, q: &GantryCutQ) {
 }
 
 fn section(c: &mut Canon, s: &Section) {
+    if let Some(r) = s.rotary {
+        c.str("rotary-step/v1");
+        c.u32(r.strip);
+        c.0.update(&r.target_pulses.to_le_bytes());
+    }
     layer(c, s.layer);
     c.u8(s.sub);
     c.u16(s.pass);
@@ -267,6 +295,7 @@ mod tests {
 
     fn section(power: f64, x: f64) -> Section {
         Section {
+            rotary: None,
             layer: LayerKey::Color(0),
             layer_name: "C00".into(),
             sub: 0,

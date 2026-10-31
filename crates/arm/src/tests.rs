@@ -29,6 +29,7 @@ fn machine() -> MachineId {
 
 fn summary() -> EmissionSummary {
     EmissionSummary {
+        rotary: None,
         fingerprint: FP,
         bytes_hash: BYTES,
         machine: machine(),

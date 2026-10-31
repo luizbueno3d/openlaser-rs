@@ -13,7 +13,9 @@ mod grbl;
 mod lmc_backend;
 mod lmc_ops;
 mod lmc_session;
+mod rotary;
 mod runtime;
+pub use rotary::RotarySession;
 mod stop;
 
 pub use backend::{Backend, Capabilities, DeviceInfo, DriverError, DriverEvent, EncodedJob, FrameOutcome, MachineState, MachineStatus, Outcome, TraceLine};
@@ -25,7 +27,7 @@ pub use stop::{Cx, MAX_SLICE, StopAck, StopLatch, StopReport, Stopped, Stopper, 
 // Re-exports for callers that name these through the driver (SPEC §3.0).
 pub use crossbeam_channel::{Receiver, Sender};
 pub use openlaser_gcode::{GcodeFrame, GcodeProgram};
-pub use openlaser_lmc::{LmcFrameJob, LmcJob, LmcTransport, XferError};
+pub use openlaser_lmc::{LmcFrameJob, LmcJob, LmcTransport, Packet, Single, XferError};
 pub use openlaser_machine::{GalvoMachine, GantryMachine};
 pub use openlaser_types::{ArmToken, Clock, DeviceKind, Fingerprint, FrameMode, FrameOrigin, FrameReceipt, MachineId, MonoTime, Refusal, SessionId};
 

@@ -201,6 +201,7 @@ fn job() -> JobPlan {
     let cut =
         CutQ::Gantry(GantryCutQ { speed: MmPerS::new(10.0).unwrap(), power: Percent::new(10.0).unwrap(), s_value: 100, air_assist: false, dynamic: true });
     let section = |layer: u8, mode: SectionMode, paths: Vec<Polyline>| Section {
+        rotary: None,
         layer: LayerKey::Color(layer),
         layer_name: format!("C{layer:02}"),
         sub: 0,

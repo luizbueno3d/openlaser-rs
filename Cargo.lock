@@ -3631,6 +3631,7 @@ dependencies = [
 name = "openlaser-import"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "blake3",
  "image",
  "openlaser-doc",
@@ -3638,6 +3639,7 @@ dependencies = [
  "openlaser-testkit",
  "openlaser-types",
  "proptest",
+ "roxmltree",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

@@ -291,6 +291,7 @@ fn gantry_summary(plan: &JobPlan, prog: &GcodeProgram, profile: &MachineProfile,
         })
         .collect();
     EmissionSummary {
+        rotary: None,
         fingerprint: plan.fingerprint,
         bytes_hash: prog.bytes_hash(),
         machine: profile.id.clone(),
@@ -515,6 +516,7 @@ mod tests {
 
     fn gantry_summary_with(rows: Vec<PassRow>) -> EmissionSummary {
         EmissionSummary {
+            rotary: None,
             fingerprint: Fingerprint([1; 32]),
             bytes_hash: Fingerprint([2; 32]),
             machine: MachineId("diode".into()),

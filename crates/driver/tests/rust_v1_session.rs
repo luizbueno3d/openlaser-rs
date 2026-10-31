@@ -1,6 +1,7 @@
-//! rust-v1 session goldens (SPEC §6.2): the wire event stream of the shipping session on a READY FakeLmc, written to
-//! `tests/golden/rust-v1-candidate/session/` with `UPDATE_RUST_V1=1` and compared byte for byte otherwise. They stay
-//! candidates until Luiz signs `docs/DIVERGENCES.md` (D13), then move to `tests/golden/rust-v1/`.
+//! rust-v1 session goldens (SPEC §6.2): the wire event stream of the shipping session on a READY FakeLmc, compared
+//! byte for byte with the frozen `tests/golden/rust-v1/session/` (signed by Luiz 2026-10-26, D13, for controlled
+//! hardware validation). A change needs a new review: `UPDATE_RUST_V1=1` writes the new stream to
+//! `tests/golden/rust-v1-candidate/session/` and the comparison still fails.
 
 // Test code: clippy.toml allows these inside #[test] fns; the shared helpers of this file need it spelled out.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
@@ -74,6 +75,7 @@ fn mark_box10_job() -> LmcJob {
         },
     };
     let section = Section {
+        rotary: None,
         layer: LayerKey::color(0).unwrap(),
         layer_name: "C00".to_owned(),
         sub: 0,
@@ -125,28 +127,32 @@ fn events(recorder: &Recorder) -> Vec<Value> {
         .collect()
 }
 
-fn candidate(name: &str) -> PathBuf {
-    openlaser_testkit::golden_dir().join("rust-v1-candidate").join("session").join(format!("{name}.json"))
+fn golden(tier: &str, name: &str) -> PathBuf {
+    openlaser_testkit::golden_dir().join(tier).join("session").join(format!("{name}.json"))
 }
 
-/// Writes the candidate with `UPDATE_RUST_V1=1`, else compares with it.
-fn check(name: &str, description: &str, events: Vec<Value>) {
+fn render(tier: &str, name: &str, description: &str, events: &[Value]) -> String {
     let doc = json!({
-        "meta": {"schema": "openlaser-golden/1", "tier": "rust-v1-candidate", "generator": "crates/driver/tests/rust_v1_session.rs"},
+        "meta": {"schema": "openlaser-golden/1", "tier": tier, "generator": "crates/driver/tests/rust_v1_session.rs"},
         "scenario": name,
         "description": description,
         "board": "FakeLmc, buffer depth 8, no latency, no faults (READY board)",
         "events": events,
     });
-    let path = candidate(name);
-    let text = format!("{}\n", serde_json::to_string_pretty(&doc).expect("json"));
+    format!("{}\n", serde_json::to_string_pretty(&doc).expect("json"))
+}
+
+/// Compares with the frozen golden; with `UPDATE_RUST_V1=1` also writes a candidate for a new review.
+fn check(name: &str, description: &str, events: Vec<Value>) {
     if std::env::var("UPDATE_RUST_V1").as_deref() == Ok("1") {
+        let path = golden("rust-v1-candidate", name);
         std::fs::create_dir_all(path.parent().expect("a parent folder")).expect("create the candidate folder");
-        std::fs::write(&path, text).expect("write the candidate");
-        return;
+        std::fs::write(&path, render("rust-v1-candidate", name, description, &events)).expect("write the candidate");
     }
-    let want = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}; run with UPDATE_RUST_V1=1 to write the candidate", path.display()));
-    assert_eq!(text, want, "{} differs from the candidate (UPDATE_RUST_V1=1 rewrites it after review)", path.display());
+    let path = golden("rust-v1", name);
+    let want = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let text = render("rust-v1", name, description, &events);
+    assert_eq!(text, want, "{} differs from the signed rust-v1 golden (a change needs a new D13 review)", path.display());
 }
 
 fn spawn_ready() -> (DriverHandle<LmcBackend<FakeLmc>>, Arc<Recorder>) {

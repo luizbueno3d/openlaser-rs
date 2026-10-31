@@ -139,9 +139,12 @@ pub(crate) struct ListSpec<'a, P> {
 }
 
 /// A whole burn (`LmcJob`) as the session sends it.
+type JobList<'a, P> = (String, &'a [P], &'a [Duration], Option<openlaser_lmc::AxisMove>);
+
 pub(crate) struct JobSpec<'a, P> {
     pub(crate) prelude: &'a [Single],
-    pub(crate) lists: Vec<(String, &'a [P], &'a [Duration])>,
+    pub(crate) lists: Vec<JobList<'a, P>>,
+    pub(crate) return_axis: Option<openlaser_lmc::AxisMove>,
     pub(crate) postlude: &'a [Single],
     pub(crate) repeats: u16,
 }
@@ -322,15 +325,34 @@ pub(crate) struct Session<W: Wire> {
     list_executing: bool,
     /// `Fiber_SetMo(1)` was sent and no `Fiber_SetMo(0)` acknowledged since.
     mo_open: bool,
+    axis_in_progress: bool,
+    axis_deadline: Option<MonoTime>,
+    axis_position: i32,
+    port_word: u16,
 }
 
 impl<W: Wire> Session<W> {
     pub(crate) fn new(wire: W, cfg: SessionCfg, abort_packet: W::Pkt) -> Self {
-        Session { wire, cfg, abort_packet, packet_in_flight: false, read_abandoned: false, list_executing: false, mo_open: false }
+        Session {
+            wire,
+            cfg,
+            abort_packet,
+            axis_in_progress: false,
+            axis_deadline: None,
+            axis_position: 0,
+            port_word: 0,
+            packet_in_flight: false,
+            read_abandoned: false,
+            list_executing: false,
+            mo_open: false,
+        }
     }
 
     fn budget(&self, mode: Mode, now: MonoTime) -> Duration {
         match mode {
+            Mode::Live if self.axis_in_progress => {
+                self.axis_deadline.map_or(self.cfg.transfer_timeout, |deadline| self.cfg.transfer_timeout.min(deadline.saturating_since(now)))
+            }
             Mode::Live | Mode::Plain => self.cfg.transfer_timeout,
             Mode::Abort { deadline } => self.cfg.transfer_timeout.min(ABORT_TRANSFER_CAP).min(deadline.saturating_since(now).max(MAX_SLICE)),
         }
@@ -349,15 +371,23 @@ impl<W: Wire> Session<W> {
             // Conservative: once ExecuteList may have reached the board, the abort must not send another.
             self.list_executing = true;
         }
+        if matches!(mode, Mode::Live) && self.axis_in_progress && (op == EXECUTE_LIST || (op == FIBER_SET_MO && p1 != 0)) {
+            return Err(Halt::Fault(DriverError::Protocol("cannot execute a list or open MO during rotary motion".into())));
+        }
         if op == FIBER_SET_MO && p1 != 0 {
             self.mo_open = true;
         }
-        self.wire.submit_single(cmd).map_err(|e| xfer_fault(name, &e))?;
         let budget = self.budget(mode, cx.now());
+        if budget.is_zero() {
+            return Err(Halt::Fault(DriverError::Protocol("rotary axis did not stop within its motion timeout".into())));
+        }
+        self.wire.submit_single(cmd).map_err(|e| xfer_fault(name, &e))?;
         let start = cx.now();
         let mut polls: u32 = 0;
         loop {
-            match self.wire.poll_single(MAX_SLICE) {
+            let remaining = budget.saturating_sub(cx.now().saturating_since(start));
+            let slice = if matches!(mode, Mode::Live) && self.axis_in_progress { MAX_SLICE.min(remaining) } else { MAX_SLICE };
+            match self.wire.poll_single(slice) {
                 Err(e) => {
                     self.read_abandoned = true;
                     return Err(xfer_fault(name, &e));
@@ -371,6 +401,9 @@ impl<W: Wire> Session<W> {
                     }
                     if op == FIBER_SET_MO && p1 == 0 {
                         self.mo_open = false;
+                    }
+                    if op == WRITE_PORT {
+                        self.port_word = p1;
                     }
                     return Ok(reply);
                 }
@@ -556,15 +589,78 @@ impl<W: Wire> Session<W> {
 
     /// A whole burn: every list of every repeat, the stop checked between lists (§5.3).
     pub(crate) fn run_job(&mut self, job: &JobSpec<'_, W::Pkt>, cx: &Cx, progress: &mut Progress) -> Result<(), Halt> {
+        if job.lists.iter().any(|(_, _, _, mv)| mv.is_some()) && self.read_axis(cx)? != 0 {
+            return Err(Halt::Fault(DriverError::Protocol("rotary jobs require controller position 0 at start, so the absolute bytes match the ARM summary; position the axis with the human bench command first".into())));
+        }
         for repeat in 0..job.repeats {
-            for (label, packets, est) in &job.lists {
+            for (label, packets, est, axis_move) in &job.lists {
+                if let Some(mv) = axis_move {
+                    self.move_axis(mv, cx)?;
+                }
                 cx.check()?;
                 let label = if job.repeats > 1 { format!("repeat {}/{} {label}", repeat + 1, job.repeats) } else { label.clone() };
                 let spec = ListSpec { prelude: job.prelude, packets, est, postlude: job.postlude, label };
                 self.run_list(&spec, cx, Some(progress))?;
             }
         }
+        if let Some(mv) = job.return_axis {
+            self.move_axis(&mv, cx)?;
+        }
         Ok(())
+    }
+
+    pub(crate) fn darken(&mut self, cx: &Cx) -> Result<(), Halt> {
+        self.single(lmc_ops::single(FIBER_SET_MO, 0), cx, Mode::Live)?;
+        self.single(lmc_ops::single(WRITE_PORT, 0), cx, Mode::Live)?;
+        Ok(())
+    }
+
+    pub(crate) fn axis_status(&mut self, cx: &Cx) -> Result<StatusWord, Halt> {
+        self.status_word(cx, Mode::Live)
+    }
+
+    pub(crate) fn read_axis(&mut self, cx: &Cx) -> Result<i32, Halt> {
+        let reply = self
+            .single(lmc_ops::single(openlaser_lmc::op::GET_AXIS_POS, 0), cx, Mode::Live)?
+            .ok_or_else(|| Halt::Fault(DriverError::Protocol("GetAxisPos returned no reply".into())))?;
+        Ok(openlaser_lmc::axis_position(reply))
+    }
+
+    pub(crate) fn move_axis(&mut self, mv: &openlaser_lmc::AxisMove, cx: &Cx) -> Result<(), Halt> {
+        cx.check()?;
+        if !mv.valid() || self.list_executing || self.mo_open || self.port_word != 0 || self.packet_in_flight || self.axis_in_progress {
+            return Err(Halt::Fault(DriverError::Protocol("rotary move requires valid parameters, idle list and closed MO".into())));
+        }
+        let status = self.status_word(cx, Mode::Live)?;
+        if status.busy() || status.0 & StatusWord::AXIS != 0 {
+            return Err(Halt::Fault(DriverError::Protocol("rotary move refused: board or axis is active".into())));
+        }
+        self.axis_position = self.read_axis(cx)?;
+        let delta = (i64::from(mv.target_pulses) - i64::from(self.axis_position)).unsigned_abs();
+        let budget = Duration::try_from_secs_f64(delta as f64 / f64::from(mv.min_speed) * 1.5 + 2.0)
+            .map_err(|e| Halt::Fault(DriverError::Protocol(format!("rotary timeout: {e}"))))?;
+        for cmd in openlaser_lmc::axis_singles(mv) {
+            if lmc_ops::opcode(&cmd) == openlaser_lmc::op::MOVE_AXIS_TO {
+                self.axis_in_progress = true;
+                self.axis_deadline = Some(cx.now().plus(budget));
+            }
+            self.single(cmd, cx, Mode::Live)?;
+        }
+        let deadline = self.axis_deadline.unwrap_or_else(|| cx.now().plus(budget));
+        loop {
+            cx.check()?;
+            let s = self.status_word(cx, Mode::Live)?;
+            if s.0 & StatusWord::AXIS == 0 {
+                self.axis_in_progress = false;
+                self.axis_deadline = None;
+                self.axis_position = mv.target_pulses;
+                return Ok(());
+            }
+            if cx.now() >= deadline {
+                return Err(Halt::Fault(DriverError::Protocol(format!("rotary axis did not stop within {} ms", budget.as_millis()))));
+            }
+            cx.slice(POLL_INTERVAL.min(deadline.saturating_since(cx.now())))?;
+        }
     }
 
     /// A lighting list: ResetList · GetVersion · packets (same flow control) · executed (§5.3 frame).
@@ -666,6 +762,9 @@ impl<W: Wire> Session<W> {
         let deadline = cx.now().plus(EMERGENCY_BUDGET);
         let mode = Mode::Abort { deadline };
         let mut notes = Vec::new();
+        if self.axis_in_progress {
+            notes.push("the rotary axis may finish its move; no stop-axis command is known".into());
+        }
         let mut possible_desync = false;
 
         if self.packet_in_flight {
@@ -1392,6 +1491,119 @@ mod tests {
             assert_eq!((st.mo, st.port), (false, 0), "event {k}");
             assert!(report.confirmed, "event {k}: {report:?}");
             assert!(report.elapsed < Duration::from_millis(100), "event {k}: {:?}", report.elapsed);
+            // D7: wherever the stop lands, StopExecute leaves within one slice to see it + the in-flight grace.
+            let tripped = rig.latch.tripped_at().expect("the hook tripped the latch");
+            let stop_at = st.log.iter().find_map(|e| match e {
+                Ev::Single { at, words } if words[0] == STOP_EXECUTE => Some(*at),
+                _ => None,
+            });
+            let lag = stop_at.expect("StopExecute sent").saturating_since(tripped);
+            assert!(lag <= MAX_SLICE + IN_FLIGHT_GRACE, "event {k}: StopExecute {lag:?} after the stop");
+        }
+    }
+
+    #[test]
+    fn stop_execute_and_mo_close_are_bounded_on_the_worst_path() {
+        // D7, worst case: the stop lands while packet #2 is in flight, that packet never completes and the board
+        // stops answering at the same moment. Trip → StopExecute ≤ one slice to see the stop + the 20 ms in-flight
+        // grace (the real USB wire adds ≤ 2 × 20 ms CANCEL_COLLECT for cancel_all and drain_replies);
+        // StopExecute → MO(0) ≤ the 50 ms abort transfer cap, checked in 20 ms slices (so ≤ 60 ms); the whole sequence
+        // ≤ grace + slice + its 400 ms budget.
+        let rig = Rig::new();
+        let latch = Arc::clone(&rig.latch);
+        let board = Board::new(rig.clock.clone(), Faults { buffer_depth: 8, packet_stalls_from: Some(2), ..Faults::default() });
+        let state = Arc::clone(&board.state);
+        let board = board.with_hook(Box::new(move |ev| {
+            if matches!(ev, Ev::Packet { id: 2, .. }) {
+                state.lock().unwrap().faults.mute = true;
+                latch.trip();
+            }
+        }));
+        let mut s = Session::new(board, SessionCfg::from_machine(&machine()).unwrap(), Pkt { id: 9999, exec: Duration::ZERO });
+        let (pk, est) = packets(3, Duration::from_millis(100));
+        assert_eq!(run_one_list(&rig, &mut s, &pk, &est), Err(Halt::Stopped));
+        let report = s.emergency(&rig.cx());
+        let tripped = rig.latch.tripped_at().unwrap();
+        let st = s.wire.state.lock().unwrap();
+        let at = |i: usize| match &st.log[i] {
+            Ev::Single { at, .. } => *at,
+            other => panic!("{other:?}"),
+        };
+        let stop = st.log.iter().position(|e| e.op() == Some(STOP_EXECUTE)).unwrap();
+        let mo0 = stop + st.log[stop..].iter().position(|e| matches!(e, Ev::Single { words, .. } if words[0] == FIBER_SET_MO && words[1] == 0)).unwrap();
+        assert_eq!(mo0, stop + 1, "MO(0) is the very next write");
+        let to_stop = at(stop).saturating_since(tripped);
+        let to_mo = at(mo0).saturating_since(tripped);
+        assert!(to_stop <= MAX_SLICE + IN_FLIGHT_GRACE, "StopExecute {to_stop:?} after the stop");
+        assert!(to_mo <= MAX_SLICE + IN_FLIGHT_GRACE + ABORT_TRANSFER_CAP + MAX_SLICE, "MO(0) {to_mo:?} after the stop");
+        assert!(report.elapsed <= MAX_SLICE + IN_FLIGHT_GRACE + EMERGENCY_BUDGET, "{:?}", report.elapsed);
+        assert!(report.possible_desync && !report.confirmed, "{report:?}");
+        assert!(!st.log[stop..].iter().any(|e| matches!(e, Ev::Packet { .. })), "a mute board is never READY: no dummy packet");
+    }
+
+    #[test]
+    fn execute_list_only_follows_a_completed_and_terminated_packet() {
+        // D9 cannot execute early: whichever trigger sends it (the 3rd packet, a full window, READY dropping, the
+        // last packet), ExecuteList comes once per list, after the prelude's Fiber_SetMo(1), after every packet sent
+        // so far has completed its transfer, and right after a SetEndOfList with no other write in between.
+        let cases: [(usize, u32, u64); 7] = [(1, 6, 100), (2, 6, 100), (3, 6, 100), (8, 6, 100), (8, 9, 7200), (8, 1, 50), (8, 2, 50)];
+        for (depth, n, ms) in cases {
+            let case = format!("depth {depth}, {n} × {ms} ms");
+            let rig = Rig::new();
+            let mut s = rig.session(Faults { buffer_depth: depth, packet_latency: Duration::from_millis(3), ..Faults::default() });
+            let (pk, est) = packets(n, Duration::from_millis(ms));
+            run_one_list(&rig, &mut s, &pk, &est).unwrap();
+            let st = s.wire.state.lock().unwrap();
+            let execs: Vec<usize> = st.log.iter().enumerate().filter(|(_, e)| e.op() == Some(EXECUTE_LIST)).map(|(i, _)| i).collect();
+            assert_eq!(execs.len(), 1, "{case}");
+            let exec = execs[0];
+            let mo1 = st.log.iter().position(|e| matches!(e, Ev::Single { words, .. } if words[0] == FIBER_SET_MO && words[1] == 1)).unwrap();
+            assert!(mo1 < exec, "{case}");
+            let before = &st.log[..exec];
+            let sent = before.iter().filter(|e| matches!(e, Ev::Packet { .. })).count();
+            let done = before.iter().filter(|e| matches!(e, Ev::PacketDone { .. })).count();
+            assert!(sent >= 1 && sent == done, "{case}: {sent} packets sent, {done} completed before ExecuteList");
+            let last_write = before.iter().rposition(|e| matches!(e, Ev::Packet { .. }) || e.op().is_some_and(|op| op != GET_VERSION)).unwrap();
+            assert_eq!(before[last_write].op(), Some(SET_END_OF_LIST), "{case}");
+            assert_eq!(st.writes_while_not_ready, 0, "{case}");
+        }
+    }
+
+    #[test]
+    fn a_host_stall_that_starves_the_board_is_survived_or_stops_the_board() {
+        // D9 underrun: the host is descheduled right after packet #4 (at its SetEndOfList, so the completed transfer
+        // is not the progress that ends the stall) and the board runs dry mid-list. A short stall is
+        // survived: no fault, no write while not READY, one ExecuteList, MO(0) only after BUSY cleared, every packet
+        // run. A stall longer than the watchdog budget faults (fail-safe: the runtime's emergency stop follows).
+        // What a real board does while dry (holds with the laser off, resumes on the next packet) is hardware item
+        // H-UR in HARDWARE.md, not provable here: this sim board resumes.
+        for (stall, survives) in [(Duration::from_secs(1), true), (Duration::from_secs(5), false)] {
+            let rig = Rig::new();
+            let clock = rig.clock.clone();
+            let eols = AtomicU32::new(0);
+            let board = Board::new(rig.clock.clone(), Faults { buffer_depth: 3, ..Faults::default() }).with_hook(Box::new(move |ev| {
+                if ev.op() == Some(SET_END_OF_LIST) && eols.fetch_add(1, Ordering::SeqCst) == 3 {
+                    clock.advance(stall);
+                }
+            }));
+            let mut s = Session::new(board, SessionCfg::from_machine(&machine()).unwrap(), Pkt { id: 9999, exec: Duration::ZERO });
+            let (pk, est) = packets(8, Duration::from_millis(100));
+            let res = run_one_list(&rig, &mut s, &pk, &est);
+            if survives {
+                assert_eq!(res, Ok(()), "{stall:?}");
+            } else {
+                assert!(matches!(res, Err(Halt::Fault(DriverError::Watchdog { .. }))), "{stall:?}: {res:?}");
+                let report = s.emergency(&rig.cx());
+                assert!(report.confirmed, "{report:?}");
+            }
+            let st = s.wire.state.lock().unwrap();
+            assert_eq!(st.writes_while_not_ready, 0, "{stall:?}");
+            assert_eq!(st.mo_closed_while_busy, 0, "{stall:?}");
+            assert_eq!(st.log.iter().filter(|e| e.op() == Some(EXECUTE_LIST)).count(), 1, "{stall:?}");
+            if survives {
+                assert_eq!(st.log.iter().filter(|e| matches!(e, Ev::Packet { .. })).count(), 8);
+                assert!(!st.busy(rig.clock.now()) && !st.mo, "the list ran to the end and MO closed");
+            }
         }
     }
 

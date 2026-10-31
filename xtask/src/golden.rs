@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use crate::files::{join_rel, rel, walk};
 
 /// The tier directories whose every file must be listed in the manifest.
-const TIERS: &[&str] = &["t0_numeric", "t1_lmc", "t2_gcode", "t3_hatch", "t4_import"];
+const TIERS: &[&str] = &["rust-v1", "t0_numeric", "t1_lmc", "t2_gcode", "t3_hatch", "t4_import"];
 
 pub fn run(root: &Path) -> Result<(), String> {
     let golden = root.join("tests").join("golden");

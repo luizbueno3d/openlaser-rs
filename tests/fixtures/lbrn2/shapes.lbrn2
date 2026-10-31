@@ -1,0 +1,21 @@
+<LightBurnProject MirrorX="False" MirrorY="False">
+  <!-- Entirely synthetic: no real artwork. -->
+  <Shape Type="Rect" CutIndex="2" W="10" H="6" Cr="1"><XForm>-1 0 0 1 20 30</XForm></Shape>
+  <Shape Type="Ellipse" CutIndex="3" Rx="4" Ry="2"><XForm>1 0 0 1 1 2</XForm></Shape>
+  <Shape Type="Path" CutIndex="4" VertID="v" PrimID="p">
+    <VertList>V0 0c0x2c0y3c1x1V8 0c0x1c1x6c1y3V8 4c0x1c1x1</VertList>
+    <PrimList>B0 1L1 2L2 0</PrimList>
+  </Shape>
+  <Shape Type="Path" CutIndex="5" VertID="v" PrimID="p"><XForm>1 0 0 1 10 0</XForm></Shape>
+  <Shape Type="Path" CutIndex="1"><VertList>V0 0V2 0V1 2</VertList><PrimList>LineClosed</PrimList></Shape>
+  <Shape Type="Group"><XForm>0 1 -1 0 10 20</XForm><Children>
+    <Shape Type="Group"><XForm>2 0 0 2 3 4</XForm><Children>
+      <Shape Type="Rect" W="2" H="4" Cr="0"><XForm>1 0 0 1 1 2</XForm></Shape>
+    </Children></Shape>
+  </Children></Shape>
+  <Shape Type="Text" Str="Synthetic text" CutIndex="6"><XForm>1 0 0 1 5 7</XForm>
+    <BackupPath Type="Path"><XForm>1 0 0 1 999 999</XForm><VertList>V0 0V1 0</VertList><PrimList>L0 1</PrimList></BackupPath>
+  </Shape>
+  <Shape Type="Text" Str="Missing outline"/>
+  <Shape Type="Star"/><Shape Type="Star"/><Shape Type="VirtualArray"/><SubLayer/>
+</LightBurnProject>

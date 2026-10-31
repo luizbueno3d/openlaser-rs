@@ -165,6 +165,7 @@ impl Refusal {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum NoticeCode {
+    RotaryScanAngle,
     OpenShapeUnhatched,
     PulseSnapped,
     SpeedQuantized,

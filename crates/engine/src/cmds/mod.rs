@@ -1,7 +1,7 @@
 //! The command table (SPEC Appendix A): one module per LightBurn area. Each module's `specs()` lists its commands;
 //! `all()` assembles them in menu order for the registry.
 //!
-//! Stretch rows of Appendix A (†: `file.export`, `laser.redLight`, `laserTools.materialTest`) are not registered in
+//! Stretch rows of Appendix A (†: `file.export`, `laser.redLight`) are not registered in
 //! this build; `menu_catalog.rs` (WP8) renders them disabled.
 
 use openlaser_types::ObjectId;
@@ -18,6 +18,7 @@ mod file;
 mod job;
 mod laser;
 mod layer;
+mod material_test;
 mod path;
 mod text;
 mod tools;
@@ -32,6 +33,7 @@ pub(crate) fn all() -> Vec<CommandSpec> {
     v.extend(arrange::specs());
     v.extend(layer::specs());
     v.extend(laser::specs());
+    v.extend(material_test::specs());
     v.extend(device::specs());
     v.extend(job::specs());
     v.extend(camera::specs());

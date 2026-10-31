@@ -8,9 +8,10 @@
 //! nothing and is not framed (it can only burn less, never more; PlanFacts has no field for it yet).
 
 use std::collections::{BTreeSet, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
-use openlaser_doc::{ColorLayer, CutMode, CutOp, DeviceKind, Geom, Project, Shape, ToolLayer};
+use openlaser_doc::{BitmapData, ColorLayer, CutMode, CutOp, DeviceKind, GalvoParams, GantryParams, Geom, Project, Shape, ToolLayer};
 use openlaser_geom::{self as geom, Affine, BezPath, CLOSURE_TOL_MM, DEFAULT_FLATTEN_TOL_MM, HatchParams, PathEl, Point, Polyline};
 use openlaser_machine::{Kinematics, MachineProfile};
 use openlaser_types::{FrameStyle, LayerKey, ObjectId, SectionMode};
@@ -52,7 +53,7 @@ struct Leaf {
     id: ObjectId,
     layer: LayerKey,
     polys: Vec<Polyline>,
-    bitmap: bool,
+    image: Option<(Arc<BitmapData>, Affine)>,
     /// `Shape.power_scale` in percent (P1 behaviour: stored, not applied, so anything but 100 is refused).
     power_scale: f64,
 }
@@ -234,13 +235,16 @@ impl<'a> Ctx<'a> {
             if !sel {
                 continue;
             }
-            let bitmap = matches!(shape.geom, Geom::Bitmap(_));
+            let image = match &shape.geom {
+                Geom::Bitmap(b) => Some((Arc::clone(b), xf)),
+                _ => None,
+            };
             match flatten_placed(bez_of(&shape.geom), xf, tol, &mut budget) {
                 Flat::Polys(polys) => {
                     // Only in-range geometry reaches here (`TooFar` is all or nothing), so a dropped polyline is an
                     // in-range lone point: it burns nothing, and nothing stands in for it.
                     let polys: Vec<Polyline> = polys.into_iter().filter(|p| p.len() >= 2).collect();
-                    out.push(Leaf { id: shape.id, layer: shape.layer, polys, bitmap, power_scale: shape.power_scale.get() });
+                    out.push(Leaf { id: shape.id, layer: shape.layer, polys, image, power_scale: shape.power_scale.get() });
                 }
                 Flat::NonFinite => {
                     if self.non_finite_seen.insert(shape.id) {
@@ -291,15 +295,19 @@ impl<'a> Ctx<'a> {
     }
 
     fn cut_for(&mut self, key: LayerKey, layer: &ColorLayer, op: &CutOp) -> CutQ {
+        self.cut_params(key, layer.air_assist, &op.galvo, &op.gantry)
+    }
+
+    fn cut_params(&mut self, key: LayerKey, air_assist: bool, galvo: &GalvoParams, gantry: &GantryParams) -> CutQ {
         match &self.machine.kind {
             Kinematics::Galvo(g) => {
-                if op.galvo.timings.is_some() {
+                if galvo.timings.is_some() {
                     self.unsupported(key, format!("{key}: per-layer galvo timings are not in this build; clear them to use the machine's timings"));
                 }
-                if op.galvo.wobble.is_some() {
+                if galvo.wobble.is_some() {
                     self.unsupported(key, format!("{key}: wobble is not in this build; turn it off"));
                 }
-                let p = &op.galvo;
+                let p = galvo;
                 match quantise_galvo(p.speed, p.power, p.frequency, p.q_pulse, g) {
                     Ok(q) => CutQ::Galvo(q),
                     Err(e) => {
@@ -309,8 +317,8 @@ impl<'a> Ctx<'a> {
                 }
             }
             Kinematics::Gantry(g) => {
-                let p = &op.gantry;
-                match quantise_gantry(p.speed, p.power_max, layer.air_assist, p.constant_power, g) {
+                let p = gantry;
+                match quantise_gantry(p.speed, p.power_max, air_assist, p.constant_power, g) {
                     Ok(q) => CutQ::Gantry(q),
                     Err(e) => {
                         self.unsupported(key, format!("{key}: {e}"));
@@ -403,21 +411,33 @@ impl<'a> Ctx<'a> {
         if !layer.output {
             return Ok(());
         }
-        let images = leaves.iter().filter(|l| l.bitmap).count();
-        if images > 0 {
-            self.unsupported(
-                key,
-                format!("{key} holds {images} image(s): burning images is not in this build; turn the layer's Output off or move the images"),
-            );
+        if let Kinematics::Galvo(g) = &self.machine.kind
+            && let Some(r) = g.rotary.as_ref().filter(|r| r.enabled)
+        {
+            let expected = match r.axis {
+                openlaser_machine::RotaryAxis::Y => 0.0,
+                openlaser_machine::RotaryAxis::X => 90.0,
+            };
+            let aligned = |angle: f64| angle.rem_euclid(180.0) == expected;
+            let bad_fill = layer.ops.iter().filter(|op| op.enabled && op.mode == CutMode::Fill).any(|op| {
+                !aligned(op.fill.angle.get())
+                    || ((op.passes > 1 && !aligned(op.fill.angle.get() + op.fill.angle_increment.get()))
+                        || (op.fill.cross_hatch && !aligned(op.fill.angle.get() + 90.0)))
+            });
+            let bad_image = leaves.iter().any(|l| l.image.is_some()) && !aligned(layer.image.angle.get());
+            if bad_fill || bad_image {
+                self.facts.rotary_notices.push((key, format!("{key}: rotary Fill/Image scan angle should run along the non-rotary axis")));
+            }
         }
-        let vector: Vec<&Leaf> = leaves.iter().copied().filter(|l| !l.bitmap).collect();
+        let images: Vec<&Leaf> = leaves.iter().copied().filter(|l| l.image.is_some()).collect();
+        let vector: Vec<&Leaf> = leaves.iter().copied().filter(|l| l.image.is_none()).collect();
         if layer.ops.is_empty() || layer.ops.len() > MAX_SUB_LAYERS {
             self.unsupported(key, format!("{key} has {} sub-layers; a layer needs 1 to {MAX_SUB_LAYERS}", layer.ops.len()));
             return Ok(());
         }
         let enabled: Vec<(u8, &CutOp)> =
             layer.ops.iter().enumerate().filter(|(_, op)| op.enabled).filter_map(|(i, op)| Some((u8::try_from(i).ok()?, op))).collect();
-        if enabled.is_empty() || vector.is_empty() {
+        if (enabled.is_empty() || vector.is_empty()) && images.is_empty() {
             return Ok(());
         }
         // B6: this layer would burn, so it must be visible (it is framed either way).
@@ -426,15 +446,15 @@ impl<'a> Ctx<'a> {
         }
         // Per-object power scale is stored but not applied in this build: a scale below 100 % would burn hotter
         // than the document asks, so it is refused, never ignored.
-        let scaled = vector.iter().filter(|l| l.power_scale != 100.0).count();
+        let scaled = leaves.iter().filter(|l| l.power_scale != 100.0).count();
         if scaled > 0 {
             self.unsupported(
                 key,
                 format!("{key}: {scaled} object(s) have a Power Scale other than 100 %; per-object power scale is not in this build, set it to 100 %"),
             );
         }
-        // Frame ⊇ burn: every outline of every vector shape on an emitting layer, whatever `show` says (B6).
-        for l in &vector {
+        // Frame ⊇ burn: every outline of every vector and bitmap shape on an emitting layer, whatever `show` says (B6).
+        for l in leaves {
             let m = self.to_machine(&l.polys);
             self.frame_outlines.extend(m);
         }
@@ -471,9 +491,13 @@ impl<'a> Ctx<'a> {
             cut: CutQ,
             passes: Passes,
             of: u16,
+            objects: Vec<ObjectId>,
         }
         let mut ops: Vec<OpPlan> = Vec::new();
         for (sub, op) in enabled {
+            if vector.is_empty() {
+                break;
+            }
             if op.passes == 0 {
                 self.unsupported(key, format!("{key} sub-layer {}: Passes is 0; set at least 1", sub + 1));
                 continue;
@@ -496,7 +520,48 @@ impl<'a> Ctx<'a> {
             }
             let of = u16::try_from(total).unwrap_or(u16::MAX);
             let cut = self.cut_for(key, layer, op);
-            ops.push(OpPlan { sub, mode, cut, passes, of });
+            ops.push(OpPlan { sub, mode, cut, passes, of, objects: objects.clone() });
+        }
+
+        if !images.is_empty() {
+            let total = u32::from(layer.global_passes) * u32::from(layer.image.passes);
+            let rotary = matches!(&self.machine.kind, Kinematics::Galvo(g) if g.rotary.as_ref().is_some_and(|r|r.enabled));
+            if layer.image.angle.get() != 0.0 && !rotary {
+                self.unsupported(key, format!("{key}: an image Scan Angle other than 0° is not in this build; set 0"));
+            } else if total > MAX_PASSES_PER_LAYER {
+                self.unsupported(key, format!("{key} image: {total} passes is above the {MAX_PASSES_PER_LAYER} this build plans"));
+            } else {
+                let mut paths = Vec::new();
+                let mut image_objects = Vec::new();
+                for leaf in &images {
+                    let Some((bitmap, xf)) = &leaf.image else { continue };
+                    let runs = if rotary { crate::image::rotary_runs(bitmap, &layer.image) } else { crate::image::runs(bitmap, &layer.image) };
+                    match runs {
+                        Ok(runs) => {
+                            if runs.is_empty() && !self.facts.empty_fill_layers.contains(&key) {
+                                self.facts.empty_fill_layers.push(key);
+                            }
+                            if paths.len().saturating_add(runs.len()) > MAX_SECTION_POINTS / 2 {
+                                self.unsupported(key, format!("{key}: image runs exceed the {MAX_SECTION_POINTS} section-point budget; raise the interval"));
+                                paths.clear();
+                                break;
+                            }
+                            image_objects.push(leaf.id);
+                            paths.extend(runs.into_iter().map(|p| p.transformed(xf).transformed(&self.xf)));
+                        }
+                        Err(why) => self.unsupported(key, format!("{key} image {}: {why}", leaf.id.0)),
+                    }
+                }
+                let cut = self.cut_params(key, layer.air_assist, &layer.image.galvo, &layer.image.gantry);
+                ops.push(OpPlan {
+                    sub: u8::try_from(layer.ops.len()).unwrap_or(u8::MAX),
+                    mode: SectionMode::Image,
+                    cut,
+                    passes: Passes::Repeat(paths, layer.image.passes),
+                    of: u16::try_from(total).unwrap_or(u16::MAX),
+                    objects: image_objects,
+                });
+            }
         }
 
         for g in 0..u32::from(layer.global_passes) {
@@ -513,6 +578,7 @@ impl<'a> Ctx<'a> {
                     }
                     let estimate = self.estimate(paths, &op.cut);
                     self.sections.push(Section {
+                        rotary: None,
                         layer: key,
                         layer_name: layer.name.clone(),
                         sub: op.sub,
@@ -521,7 +587,7 @@ impl<'a> Ctx<'a> {
                         mode: op.mode,
                         cut: op.cut.clone(),
                         paths: paths.clone(),
-                        objects: objects.clone(),
+                        objects: op.objects.clone(),
                         estimate,
                     });
                 }
@@ -593,6 +659,17 @@ impl Ctx<'_> {
             self.unsupported(key, HULL_FRAME_UNSUPPORTED.to_owned());
         }
 
+        if let Kinematics::Galvo(g) = &self.machine.kind
+            && g.rotary.as_ref().is_some_and(|r| r.enabled)
+        {
+            match crate::rotary::strips(&self.sections, &self.frame_outlines, g, self.opts.repeats) {
+                Ok((sections, outlines)) => {
+                    self.sections = sections;
+                    self.frame_outlines = outlines;
+                }
+                Err(why) => self.unsupported(self.job_key(), why),
+            }
+        }
         let machine = self.machine;
         let opts = self.opts;
         let device = device_of(machine);
@@ -676,7 +753,7 @@ mod tests {
     }
 
     fn leaf(id: u64, layer: LayerKey, cx: f64, power_scale: f64) -> Leaf {
-        Leaf { id: ObjectId(id), layer, polys: vec![square(cx)], bitmap: false, power_scale }
+        Leaf { id: ObjectId(id), layer, polys: vec![square(cx)], image: None, power_scale }
     }
 
     /// B6 regression that runs on WP0 stubs (the leaves are built directly, no `to_bez`/`flatten`): a hidden layer
