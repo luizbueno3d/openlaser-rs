@@ -384,7 +384,13 @@ impl OpenLaserApp {
             for shape in egui::Shape::dashed_line(&corners, egui::Stroke::new(1.0, colors.field), 6.0, 4.0) {
                 painter.add(shape);
             }
-            painter.text(r.left_top() + egui::vec2(4.0, 2.0), egui::Align2::LEFT_TOP, "encodable", egui::FontId::proportional(10.0), colors.field);
+            painter.text(
+                r.left_top() + egui::vec2(4.0, 2.0),
+                egui::Align2::LEFT_TOP,
+                crate::i18n::t("encodable", "área útil"),
+                egui::FontId::proportional(10.0),
+                colors.field,
+            );
         }
         painter.rect_stroke(work, 0.0, egui::Stroke::new(1.0, colors.work_area), egui::StrokeKind::Middle);
         let origin = view.world_to_screen([0.0, 0.0]);
@@ -563,7 +569,7 @@ impl OpenLaserApp {
         let button = egui::Rect::from_min_size(canvas.right_bottom() - egui::vec2(34.0, 30.0), egui::vec2(28.0, 24.0));
         let fit_response = ui.put(button, egui::Button::image(crate::panels::icon_image("maximize", ui)));
         self.labeled(&fit_response, egui::WidgetType::Button, "Zoom to fit", false);
-        if fit_response.on_hover_text("Zoom to fit (frame the field)").clicked() {
+        if fit_response.on_hover_text(crate::i18n::t("Zoom to fit (frame the field)", "Ajustar à tela (mostrar o campo inteiro)")).clicked() {
             self.view.fit();
         }
     }
@@ -718,7 +724,10 @@ impl OpenLaserApp {
                     })
                     .collect();
                 painter.extend(egui::Shape::dashed_line(&outline, ghost, 4.0, 3.0));
-                self.ui.status_message = format!("Polygon: radius {radius:.2} mm, {sides} sides, rotate {rotate:+.1}°");
+                self.ui.status_message = crate::tf!(
+                    "Polygon: radius {radius:.2} mm, {sides} sides, rotate {rotate:+.1}°",
+                    "Polígono: raio {radius:.2} mm, {sides} lados, giro {rotate:+.1}°"
+                );
                 if response.drag_stopped() {
                     if radius >= 0.01 {
                         self.execute_widget(
@@ -840,9 +849,9 @@ impl OpenLaserApp {
         if sel.len() != 1 {
             self.ui.nodes = None;
             if sel.is_empty() {
-                self.ui.status_message = "Edit Nodes: select one shape".to_owned();
+                self.ui.status_message = crate::i18n::t("Edit Nodes: select one shape", "Editar nós: selecione uma forma").to_owned();
             } else {
-                self.ui.status_message = "Edit Nodes edits one shape at a time".to_owned();
+                self.ui.status_message = crate::i18n::t("Edit Nodes edits one shape at a time", "Editar nós edita uma forma por vez").to_owned();
             }
             return;
         }
@@ -864,7 +873,9 @@ impl OpenLaserApp {
                     self.ui.nodes = Some(crate::app::NodeEditUi { id: id.0, subs, sel: Vec::new(), drag: None, marquee: None, locked });
                 }
                 if locked {
-                    self.ui.status_message = "the shape is locked; unlock it to edit its nodes".to_owned();
+                    self.ui.status_message =
+                        crate::i18n::t("the shape is locked; unlock it to edit its nodes", "a forma está bloqueada; desbloqueie-a para editar seus nós")
+                            .to_owned();
                 }
             }
             openlaser_doc::Geom::Rect { .. }
@@ -873,11 +884,13 @@ impl OpenLaserApp {
             | openlaser_doc::Geom::Text(_)
             | openlaser_doc::Geom::Bitmap(_) => {
                 self.ui.nodes = None;
-                self.ui.status_message = "Convert to path to edit its nodes".to_owned();
+                self.ui.status_message = crate::i18n::t("Convert to path to edit its nodes", "Converta em caminho para editar seus nós").to_owned();
             }
             openlaser_doc::Geom::Group(_) => {
                 self.ui.nodes = None;
-                self.ui.status_message = "Edit Nodes works on a single path; ungroup first".to_owned();
+                self.ui.status_message =
+                    crate::i18n::t("Edit Nodes works on a single path; ungroup first", "Editar nós funciona em um único caminho; desagrupe primeiro")
+                        .to_owned();
             }
         }
     }
@@ -1140,7 +1153,7 @@ impl OpenLaserApp {
                             let sel = n.sel.clone();
                             crate::node_edit::move_nodes(&mut n.subs, &sel, dv);
                             n.drag = Some(crate::app::NodeDrag::Move { last: world });
-                            self.ui.status_message = format!("Node move: {:.2}, {:.2} mm", dv.x, dv.y);
+                            self.ui.status_message = crate::tf!("Node move: {:.2}, {:.2} mm", "Mover nó: {:.2}, {:.2} mm", dv.x, dv.y);
                         }
                     }
                 }
@@ -1332,7 +1345,7 @@ impl OpenLaserApp {
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) && (self.view.sel_drag.is_some() || self.view.marquee_from.is_some()) {
             self.view.sel_drag = None;
             self.view.marquee_from = None;
-            self.ui.status_message = "Cancelled".to_owned();
+            self.ui.status_message = crate::i18n::t("Cancelled", "Cancelado").to_owned();
             return;
         }
         let painter = ui.painter().with_clip_rect(view.rect);
@@ -1350,7 +1363,7 @@ impl OpenLaserApp {
             let (affine, preview_bounds, status) = match drag.kind {
                 SelDragKind::Move => {
                     let a = crate::canvas_xform::move_affine(delta);
-                    (a, crate::canvas_xform::bounds_of(&drag.bounds, a), format!("Move {:+.3}, {:+.3} mm", delta[0], delta[1]))
+                    (a, crate::canvas_xform::bounds_of(&drag.bounds, a), crate::tf!("Move {:+.3}, {:+.3} mm", "Mover {:+.3}, {:+.3} mm", delta[0], delta[1]))
                 }
                 SelDragKind::Scale(i) => {
                     let new_b = crate::canvas_xform::scale_bounds(&drag.bounds, i, delta, lock, alt);
@@ -1361,7 +1374,7 @@ impl OpenLaserApp {
                     let c = [(drag.bounds.min[0] + drag.bounds.max[0]) / 2.0, (drag.bounds.min[1] + drag.bounds.max[1]) / 2.0];
                     let deg = crate::canvas_xform::rotate_deg(c, drag.press_world, to_world, if shift { 15.0 } else { 0.0 });
                     let a = crate::canvas_xform::rotate_affine(&drag.bounds, deg);
-                    (a, crate::canvas_xform::bounds_of(&drag.bounds, a), format!("Rotate {deg:+.2}°"))
+                    (a, crate::canvas_xform::bounds_of(&drag.bounds, a), crate::tf!("Rotate {deg:+.2}°", "Girar {deg:+.2}°"))
                 }
             };
             let ghost_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 150, 255));

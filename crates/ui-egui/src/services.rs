@@ -62,6 +62,9 @@ pub struct UiSettings {
     /// ticked once per app session.
     #[serde(default)]
     pub skip_arm: bool,
+    /// Settings ▸ Language (or the Language menu): the interface language. English until someone picks another.
+    #[serde(default)]
+    pub language: crate::i18n::Language,
 }
 
 impl UiSettings {
@@ -74,6 +77,7 @@ impl UiSettings {
             camera_background: false,
             require_frame: false,
             skip_arm: false,
+            language: crate::i18n::Language::English,
         }
     }
 }

@@ -6,13 +6,24 @@ use openlaser_engine::{EmissionSummary, MachineState};
 use openlaser_types::{FrameOrigin, FrameReceipt, LayerKey, MonoTime, SessionId};
 
 use crate::app::{OpenLaserApp, PlanView, state_requires_stop};
+use crate::i18n::t;
 use crate::menu_catalog::{self, CATALOG, MENUS};
+use crate::tf;
 
 /// STOP's colours are fixed and theme-independent (UI §9.1): white on saturated red.
 pub(crate) const STOP_RED: egui::Color32 = egui::Color32::from_rgb(196, 18, 28);
 
-pub(crate) const NOT_YET: &str = "Not in OpenLaser yet";
-pub(crate) const FILES_WHILE_ACTIVE: &str = "Stop the active frame or job before opening, importing or saving files.";
+pub(crate) fn not_yet() -> &'static str {
+    t("Not in OpenLaser yet", "Ainda não disponível no OpenLaser")
+}
+
+pub(crate) fn files_while_active() -> &'static str {
+    t(
+        "Stop the active frame or job before opening, importing or saving files.",
+        "Pare o enquadramento ou o trabalho ativo antes de abrir, importar ou salvar arquivos.",
+    )
+}
+
 /// The Laser panel's notice list scrolls inside this height so it never pushes the rest of the panel away.
 const NOTICES_MAX_HEIGHT: f32 = 160.0;
 
@@ -42,6 +53,14 @@ pub(crate) fn caption(ui: &mut egui::Ui, text: &str) {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color());
     let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
     ui.painter().galley(rect.min, galley, ui.visuals().text_color());
+}
+
+/// The swatch's visible name in the current language: "Layer 05" / "Camada 05", "T1".
+fn swatch_title(key: LayerKey) -> String {
+    match key {
+        LayerKey::Color(i) => tf!("Layer {i:02}", "Camada {i:02}"),
+        LayerKey::Tool(t) => format!("T{t}"),
+    }
 }
 
 /// Palette slot 0..=31 → layer (30 = T1, 31 = T2).
@@ -122,18 +141,32 @@ pub(crate) fn command_live(id: &str) -> bool {
 pub(crate) fn start_gate(plan: Option<&PlanView>, receipt: Option<&FrameReceipt>, session: SessionId, now: MonoTime, active: bool) -> Result<(), String> {
     let summary = ready_summary(plan)?;
     if active {
-        return Err("The machine is busy. Stop it, or wait for the frame or job to finish.".into());
+        return Err(t(
+            "The machine is busy. Stop it, or wait for the frame or job to finish.",
+            "A máquina está ocupada. Pare-a ou espere o enquadramento ou o trabalho terminar.",
+        )
+        .into());
     }
     let Some(receipt) = receipt.filter(|r| {
         r.fingerprint == summary.fingerprint && r.machine == summary.machine && r.session == session && r.origin == FrameOrigin::Human && r.covers_job()
     }) else {
-        return Err("Frame this job first. A human must approve every marking job.".into());
+        return Err(t(
+            "Frame this job first. A human must approve every marking job.",
+            "Enquadre este trabalho primeiro. Uma pessoa precisa aprovar todo trabalho de marcação.",
+        )
+        .into());
     };
     if receipt.full_passes == 0 {
-        return Err("Frame this job first: no full frame pass has been executed yet.".into());
+        return Err(t(
+            "Frame this job first: no full frame pass has been executed yet.",
+            "Enquadre este trabalho primeiro: nenhuma passada completa de enquadramento foi feita ainda.",
+        )
+        .into());
     }
     if now.saturating_since(receipt.at) > openlaser_types::FRAME_RECEIPT_MAX_AGE {
-        return Err("The frame is older than 10 minutes. Frame this job again.".into());
+        return Err(
+            t("The frame is older than 10 minutes. Frame this job again.", "O enquadramento tem mais de 10 minutos. Enquadre este trabalho de novo.").into()
+        );
     }
     Ok(())
 }
@@ -142,16 +175,22 @@ pub(crate) fn start_gate(plan: Option<&PlanView>, receipt: Option<&FrameReceipt>
 pub(crate) fn frame_gate(plan: Option<&PlanView>, active: bool) -> Result<(), String> {
     ready_summary(plan)?;
     if active {
-        return Err("The machine is busy. Stop it first.".into());
+        return Err(t("The machine is busy. Stop it first.", "A máquina está ocupada. Pare-a primeiro.").into());
     }
     Ok(())
 }
 
 fn ready_summary(plan: Option<&PlanView>) -> Result<&EmissionSummary, String> {
     match plan {
-        None => Err("No job: open, import or draw a design first.".into()),
-        Some(PlanView::Refused(refused)) if refused.refusals.is_empty() => Err(refused.error.clone().unwrap_or_else(|| "The job cannot be planned.".into())),
-        Some(PlanView::Refused(refused)) => Err(format!("{} refusal(s) block this job. Fix them first (see the list below).", refused.refusals.len())),
+        None => Err(t("No job: open, import or draw a design first.", "Nenhum trabalho: abra, importe ou desenhe um projeto primeiro.").into()),
+        Some(PlanView::Refused(refused)) if refused.refusals.is_empty() => {
+            Err(refused.error.clone().unwrap_or_else(|| t("The job cannot be planned.", "O trabalho não pode ser planejado.").into()))
+        }
+        Some(PlanView::Refused(refused)) => Err(tf!(
+            "{} refusal(s) block this job. Fix them first (see the list below).",
+            "{} recusa(s) bloqueiam este trabalho. Corrija-as primeiro (veja a lista abaixo).",
+            refused.refusals.len()
+        )),
         Some(PlanView::Ready(summary)) => Ok(summary),
     }
 }
@@ -159,60 +198,75 @@ fn ready_summary(plan: Option<&PlanView>) -> Result<&EmissionSummary, String> {
 /// The machine state chip (UI §4.3 / §4.9).
 pub(crate) fn state_text(state: Option<&MachineState>, armed: bool) -> (String, egui::Color32) {
     if armed {
-        return ("Armed".into(), egui::Color32::from_rgb(230, 140, 30));
+        return (t("Armed", "Armado").into(), egui::Color32::from_rgb(230, 140, 30));
     }
     match state {
-        None | Some(MachineState::Disconnected) => ("Disconnected".into(), egui::Color32::GRAY),
-        Some(MachineState::Connecting) => ("Connecting…".into(), egui::Color32::GRAY),
-        Some(MachineState::Idle) => ("Ready".into(), egui::Color32::from_rgb(60, 170, 90)),
-        Some(MachineState::Framing) => ("Framing".into(), egui::Color32::from_rgb(230, 80, 60)),
+        None | Some(MachineState::Disconnected) => (t("Disconnected", "Desconectado").into(), egui::Color32::GRAY),
+        Some(MachineState::Connecting) => (t("Connecting…", "Conectando…").into(), egui::Color32::GRAY),
+        Some(MachineState::Idle) => (t("Ready", "Pronto").into(), egui::Color32::from_rgb(60, 170, 90)),
+        Some(MachineState::Framing) => (t("Framing", "Enquadrando").into(), egui::Color32::from_rgb(230, 80, 60)),
         Some(MachineState::Running { packets_acked, total }) => {
             let pct = if *total == 0 { 0 } else { u64::from(*packets_acked) * 100 / u64::from(*total) };
-            (format!("Marking {pct}%"), egui::Color32::from_rgb(230, 60, 40))
+            (tf!("Marking {pct}%", "Marcando {pct}%"), egui::Color32::from_rgb(230, 60, 40))
         }
-        Some(MachineState::Stopping) => ("Stopping".into(), egui::Color32::from_rgb(230, 140, 30)),
-        Some(MachineState::Stopped) => ("Stopped".into(), egui::Color32::GRAY),
-        Some(MachineState::Fault) => ("Fault".into(), egui::Color32::from_rgb(230, 60, 40)),
-        Some(MachineState::StopNotConfirmed) => ("STOP NOT CONFIRMED".into(), STOP_RED),
+        Some(MachineState::Stopping) => (t("Stopping", "Parando").into(), egui::Color32::from_rgb(230, 140, 30)),
+        Some(MachineState::Stopped) => (t("Stopped", "Parado").into(), egui::Color32::GRAY),
+        Some(MachineState::Fault) => (t("Fault", "Falha").into(), egui::Color32::from_rgb(230, 60, 40)),
+        Some(MachineState::StopNotConfirmed) => (t("STOP NOT CONFIRMED", "PARADA NÃO CONFIRMADA").into(), STOP_RED),
     }
 }
 
-const TOOLBAR_GROUPS: &[&[(&str, &str, &str)]] = &[
-    &[("New", "file.new", "file-plus"), ("Open", "file.open", "folder-open"), ("Import", "file.import", "file-input"), ("Save", "file.save", "save")],
-    &[("Undo", "edit.undo", "undo-2"), ("Redo", "edit.redo", "redo-2")],
-    &[("Cut", "edit.cut", "scissors"), ("Copy", "edit.copy", "copy"), ("Paste", "edit.paste", "clipboard-paste"), ("Delete", "edit.delete", "trash-2")],
+/// (automation label, Portuguese text, command id, icon). The English label is also the English text.
+const TOOLBAR_GROUPS: &[&[(&str, &str, &str, &str)]] = &[
     &[
-        ("Pan / Drag View", "view.pan", "hand"),
-        ("Zoom In", "view.zoomIn", "zoom-in"),
-        ("Zoom Out", "view.zoomOut", "zoom-out"),
-        ("Zoom to Page", "view.zoomPage", "maximize"),
-        ("Frame Selection", "view.zoomSelection", "scan"),
+        ("New", "Novo", "file.new", "file-plus"),
+        ("Open", "Abrir", "file.open", "folder-open"),
+        ("Import", "Importar", "file.import", "file-input"),
+        ("Save", "Salvar", "file.save", "save"),
     ],
-    &[("Settings", "edit.settings", "settings"), ("Device Settings", "edit.deviceSettings", "settings-2")],
-    &[("Trace Image", "tools.traceImage", "wand-sparkles"), ("Preview", "preview.open", "eye"), ("Camera", "laserTools.cameras", "camera")],
+    &[("Undo", "Desfazer", "edit.undo", "undo-2"), ("Redo", "Refazer", "edit.redo", "redo-2")],
+    &[
+        ("Cut", "Recortar", "edit.cut", "scissors"),
+        ("Copy", "Copiar", "edit.copy", "copy"),
+        ("Paste", "Colar", "edit.paste", "clipboard-paste"),
+        ("Delete", "Excluir", "edit.delete", "trash-2"),
+    ],
+    &[
+        ("Pan / Drag View", "Mover / arrastar vista", "view.pan", "hand"),
+        ("Zoom In", "Aumentar zoom", "view.zoomIn", "zoom-in"),
+        ("Zoom Out", "Diminuir zoom", "view.zoomOut", "zoom-out"),
+        ("Zoom to Page", "Zoom na página", "view.zoomPage", "maximize"),
+        ("Frame Selection", "Zoom na seleção", "view.zoomSelection", "scan"),
+    ],
+    &[("Settings", "Configurações", "edit.settings", "settings"), ("Device Settings", "Configurações do dispositivo", "edit.deviceSettings", "settings-2")],
+    &[
+        ("Trace Image", "Vetorizar imagem", "tools.traceImage", "wand-sparkles"),
+        ("Preview", "Pré-visualização", "preview.open", "eye"),
+        ("Camera", "Câmera", "laserTools.cameras", "camera"),
+    ],
 ];
 
-const LEFT_TOOLS: &[(&str, &str, &str)] = &[
-    ("Select", "tools.select", "mouse-pointer-2"),
-    ("Draw Lines", "tools.drawLines", "pen-tool"),
-    ("Rectangle", "tools.rectangle", "rectangle-horizontal"),
-    ("Ellipse", "tools.ellipse", "circle"),
-    ("Polygon", "tools.polygon", "pentagon"),
-    ("Edit Text", "tools.text", "type"),
-    ("Edit Nodes", "tools.editNodes", "spline"),
-    ("Measure", "tools.measure", "ruler"),
-    ("Offset Shapes", "tools.offsetShapes", "layers"),
-    ("Weld Shapes", "tools.weld", "link-2"),
+const LEFT_TOOLS: &[(&str, &str, &str, &str)] = &[
+    ("Select", "Selecionar", "tools.select", "mouse-pointer-2"),
+    ("Draw Lines", "Desenhar linhas", "tools.drawLines", "pen-tool"),
+    ("Rectangle", "Retângulo", "tools.rectangle", "rectangle-horizontal"),
+    ("Ellipse", "Elipse", "tools.ellipse", "circle"),
+    ("Polygon", "Polígono", "tools.polygon", "pentagon"),
+    ("Edit Text", "Editar texto", "tools.text", "type"),
+    ("Edit Nodes", "Editar nós", "tools.editNodes", "spline"),
+    ("Measure", "Medir", "tools.measure", "ruler"),
+    ("Offset Shapes", "Deslocar formas", "tools.offsetShapes", "layers"),
+    ("Weld Shapes", "Soldar formas", "tools.weld", "link-2"),
 ];
 
-const ARRANGE_TOOLS: &[(&str, &str, &str)] = &[
-    ("Group", "arrange.group", "link-2"),
-    ("Ungroup", "arrange.ungroup", "unlink"),
-    ("Flip Horizontal", "arrange.flipH", "flip-horizontal-2"),
-    ("Flip Vertical", "arrange.flipV", "flip-vertical-2"),
-    ("Rotate 90° Clockwise", "arrange.rotateCw90", "rotate-cw"),
-    ("Rotate 90° Counter-Clockwise", "arrange.rotateCcw90", "rotate-ccw"),
-    ("Page Center", "arrange.moveSelection.pageCenter", "move"),
+const ARRANGE_TOOLS: &[(&str, &str, &str, &str)] = &[
+    ("Group", "Agrupar", "arrange.group", "link-2"),
+    ("Ungroup", "Desagrupar", "arrange.ungroup", "unlink"),
+    ("Flip Horizontal", "Espelhar na horizontal", "arrange.flipH", "flip-horizontal-2"),
+    ("Flip Vertical", "Espelhar na vertical", "arrange.flipV", "flip-vertical-2"),
+    ("Rotate 90° Clockwise", "Girar 90° no sentido horário", "arrange.rotateCw90", "rotate-cw"),
+    ("Rotate 90° Counter-Clockwise", "Girar 90° no sentido anti-horário", "arrange.rotateCcw90", "rotate-ccw"),
+    ("Page Center", "Centro da página", "arrange.moveSelection.pageCenter", "move"),
 ];
 
 const BUTTON: egui::Vec2 = egui::vec2(28.0, 26.0);
@@ -223,7 +277,7 @@ impl OpenLaserApp {
     pub(crate) fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             for menu in MENUS {
-                let response = ui.menu_button(*menu, |ui| self.menu_branch(ui, &[*menu])).response;
+                let response = ui.menu_button(crate::i18n::menu(menu), |ui| self.menu_branch(ui, &[*menu])).response;
                 self.track(&response, "menu", *menu, false);
             }
         });
@@ -238,7 +292,7 @@ impl OpenLaserApp {
                     seen.push(next);
                     let mut nested = path.to_vec();
                     nested.push(next);
-                    ui.menu_button(*next, |ui| self.menu_branch(ui, &nested));
+                    ui.menu_button(crate::i18n::menu(next), |ui| self.menu_branch(ui, &nested));
                 }
             } else if menu_catalog::is_separator(row) {
                 ui.separator();
@@ -246,8 +300,11 @@ impl OpenLaserApp {
                 let live = menu_catalog::is_live(row);
                 let blocked = self.ui.machine_active && crate::app::opens_files(row.id);
                 let no_image = row.id == "tools.traceImage" && !self.trace_target();
-                let checked = row.id == "view.cameraBackground" && self.ui.camera_background;
-                let mut button = egui::Button::new(if checked { format!("✓ {}", row.label) } else { row.label.to_owned() });
+                let checked = (row.id == "view.cameraBackground" && self.ui.camera_background)
+                    || (row.id == "prefs.language.en" && crate::i18n::language() == crate::i18n::Language::English)
+                    || (row.id == "prefs.language.ptBr" && crate::i18n::language() == crate::i18n::Language::Portuguese);
+                let label = crate::i18n::menu(row.label);
+                let mut button = egui::Button::new(if checked { format!("✓ {label}") } else { label.to_owned() });
                 if let Some(shortcut) = row.shortcut {
                     button = button.shortcut_text(crate::shortcuts::pretty(shortcut));
                 }
@@ -255,13 +312,16 @@ impl OpenLaserApp {
                 // The reason names the predicate that actually failed: `!live` before `blocked` (a row that
                 // is not in OpenLaser yet is not "blocked by an active machine").
                 let response = if no_image {
-                    response.on_disabled_hover_text("Select one image to trace")
+                    response.on_disabled_hover_text(t("Select one image to trace", "Selecione uma imagem para vetorizar"))
                 } else if menu_catalog::is_hw_row(row) {
-                    response.on_disabled_hover_text("Hardware actions are human-only and live in the Laser panel.")
+                    response.on_disabled_hover_text(t(
+                        "Hardware actions are human-only and live in the Laser panel.",
+                        "Ações de hardware só podem ser feitas por uma pessoa e ficam no painel Laser.",
+                    ))
                 } else if !live {
-                    response.on_disabled_hover_text(NOT_YET)
+                    response.on_disabled_hover_text(not_yet())
                 } else {
-                    response.on_disabled_hover_text(FILES_WHILE_ACTIVE)
+                    response.on_disabled_hover_text(files_while_active())
                 };
                 if response.clicked() {
                     self.invoke_menu_command(ui.ctx(), &menu_catalog::native_id(row));
@@ -277,10 +337,19 @@ impl OpenLaserApp {
         let overlay = self.stop_overlay_needed(ui.ctx());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // The machine group is never part of the overflow (UI §7.1): STOP and the state chip come first.
-            let stop =
-                ui.add(egui::Button::new(egui::RichText::new("STOP").strong().color(egui::Color32::WHITE)).fill(STOP_RED).min_size(egui::vec2(64.0, BUTTON.y)));
+            let stop = ui.add(
+                egui::Button::new(egui::RichText::new(t("STOP", "PARAR")).strong().color(egui::Color32::WHITE))
+                    .fill(STOP_RED)
+                    .min_size(egui::vec2(64.0, BUTTON.y)),
+            );
             self.labeled(&stop, egui::WidgetType::Button, if overlay { "Stop laser (toolbar)" } else { "Stop laser" }, false);
-            if stop.on_hover_text("Stop laser (Esc while active). The E-stop always works.").clicked() {
+            if stop
+                .on_hover_text(t(
+                    "Stop laser (Esc while active). The E-stop always works.",
+                    "Parar o laser (Esc durante a operação). O botão de emergência sempre funciona.",
+                ))
+                .clicked()
+            {
                 self.stop();
             }
             let (text, color) = self.chip();
@@ -304,17 +373,17 @@ impl OpenLaserApp {
             if n > 0 {
                 ui.separator();
             }
-            for (label, id, icon) in TOOLBAR_GROUPS.get(*index).copied().unwrap_or_default() {
-                self.toolbar_button(ui, label, id, icon);
+            for (label, pt, id, icon) in TOOLBAR_GROUPS.get(*index).copied().unwrap_or_default() {
+                self.toolbar_button(ui, label, t(label, pt), id, icon);
             }
         }
         if !overflow.is_empty() {
             let response = ui
                 .menu_button("»", |ui| {
                     for index in &overflow {
-                        for (label, id, _) in TOOLBAR_GROUPS.get(*index).copied().unwrap_or_default() {
+                        for (label, pt, id, _) in TOOLBAR_GROUPS.get(*index).copied().unwrap_or_default() {
                             let (enabled, reason) = self.toolbar_state(id);
-                            let r = ui.add_enabled(enabled, egui::Button::new(*label));
+                            let r = ui.add_enabled(enabled, egui::Button::new(t(label, pt)));
                             let r = match reason {
                                 Some(reason) => r.on_disabled_hover_text(reason),
                                 None => r,
@@ -334,24 +403,24 @@ impl OpenLaserApp {
 
     fn toolbar_state(&self, id: &str) -> (bool, Option<&'static str>) {
         if !command_live(id) {
-            (false, Some(NOT_YET))
+            (false, Some(not_yet()))
         } else if self.ui.machine_active && crate::app::opens_files(id) {
-            (false, Some(FILES_WHILE_ACTIVE))
+            (false, Some(files_while_active()))
         } else if id == "tools.traceImage" && !self.trace_target() {
-            (false, Some("Select one image to trace"))
+            (false, Some(t("Select one image to trace", "Selecione uma imagem para vetorizar")))
         } else {
             (true, None)
         }
     }
 
-    fn toolbar_button(&mut self, ui: &mut egui::Ui, label: &str, id: &str, icon: &str) {
+    fn toolbar_button(&mut self, ui: &mut egui::Ui, label: &str, text: &str, id: &str, icon: &str) {
         let (enabled, reason) = self.toolbar_state(id);
         let selected = id == "view.pan" && self.ui.selected_tool == "Pan";
         let response = ui.add_enabled(enabled, egui::Button::image(icon_image(icon, ui)).selected(selected).min_size(BUTTON));
         self.labeled(&response, egui::WidgetType::Button, label, false);
         let response = match reason {
-            Some(reason) => response.on_disabled_hover_text(format!("{label}: {reason}")),
-            None => response.on_hover_text(label),
+            Some(reason) => response.on_disabled_hover_text(format!("{text}: {reason}")),
+            None => response.on_hover_text(text),
         };
         if response.clicked() {
             self.invoke_menu_command(ui.ctx(), id);
@@ -360,7 +429,7 @@ impl OpenLaserApp {
 
     /// "JPT M7 · Simulator: Ready".
     pub(crate) fn chip(&self) -> (String, egui::Color32) {
-        let name = self.active_machine().map(|m| m.name.clone()).unwrap_or_else(|| "No device".into());
+        let name = self.active_machine().map(|m| m.name.clone()).unwrap_or_else(|| t("No device", "Nenhum dispositivo").into());
         let states = self.machine_states();
         let state = self
             .active_machine()
@@ -408,9 +477,9 @@ impl OpenLaserApp {
             };
             // Font: a searchable combo of the indexed families; Style: that family's styles.
             let families: Vec<(String, Vec<String>)> = self.session.fonts().families();
-            caption(ui, "Font");
+            caption(ui, t("Font", "Fonte"));
             let mut family = self.ui.text_defaults.family.clone();
-            egui::ComboBox::from_id_salt("text-font").selected_text(if family.is_empty() { "(default)" } else { &family }).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("text-font").selected_text(if family.is_empty() { t("(default)", "(padrão)") } else { &family }).show_ui(ui, |ui| {
                 for (f, _) in &families {
                     if ui.selectable_label(&family == f, f).clicked() {
                         family = f.clone();
@@ -421,9 +490,9 @@ impl OpenLaserApp {
                     }
                 }
             });
-            caption(ui, "Style");
+            caption(ui, t("Style", "Estilo"));
             let mut style = self.ui.text_defaults.style.clone();
-            egui::ComboBox::from_id_salt("text-style").selected_text(if style.is_empty() { "(default)" } else { &style }).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("text-style").selected_text(if style.is_empty() { t("(default)", "(padrão)") } else { &style }).show_ui(ui, |ui| {
                 for st in families.iter().find(|(f, _)| f == &family).map(|(_, s)| s.clone()).unwrap_or_default() {
                     if ui.selectable_label(style == st, &st).clicked() {
                         style = st.clone();
@@ -432,10 +501,12 @@ impl OpenLaserApp {
                     }
                 }
             });
-            for (label, field, key) in
-                [("Height", "height", "heightMm"), ("Letter spacing", "letter_spacing", "letterSpacingMm"), ("Line spacing", "line_spacing", "lineSpacing")]
-            {
-                caption(ui, label);
+            for (label, pt, field, key) in [
+                ("Height", "Altura", "height", "heightMm"),
+                ("Letter spacing", "Espaço entre letras", "letter_spacing", "letterSpacingMm"),
+                ("Line spacing", "Espaço entre linhas", "line_spacing", "lineSpacing"),
+            ] {
+                caption(ui, t(label, pt));
                 let mut value = match field {
                     "height" => self.ui.text_defaults.height,
                     "letter_spacing" => self.ui.text_defaults.letter_spacing,
@@ -452,7 +523,7 @@ impl OpenLaserApp {
                     fire(self, key);
                 }
             }
-            for (name, n) in [("L", 0u8), ("C", 1u8), ("R", 2u8)] {
+            for (name, n) in [(t("L", "E"), 0u8), ("C", 1u8), (t("R", "D"), 2u8)] {
                 let r = ui.selectable_label(self.ui.text_defaults.align == n, name);
                 self.labeled(
                     &r,
@@ -483,7 +554,11 @@ impl OpenLaserApp {
         // An unmeasurable selection (a non-finite transform) gives no bounds: the edits stay disabled.
         let bounds = self.project().and_then(|p| p.bounds(&selection).unwrap_or_default());
         let enabled = bounds.is_some() && !self.ui.machine_active;
-        let reason = if self.ui.machine_active { "Edits are locked while a machine is active." } else { "Select shapes to edit their position and size." };
+        let reason = if self.ui.machine_active {
+            t("Edits are locked while a machine is active.", "As edições ficam bloqueadas enquanto uma máquina está ativa.")
+        } else {
+            t("Select shapes to edit their position and size.", "Selecione formas para editar a posição e o tamanho.")
+        };
         ui.horizontal(|ui| {
             // The 9-point anchor: which point of the selection bounds XPos/YPos name.
             egui::Grid::new("anchor-grid").spacing([2.0, 2.0]).min_col_width(8.0).min_row_height(8.0).show(ui, |ui| {
@@ -492,6 +567,23 @@ impl OpenLaserApp {
                         .get(usize::from(n))
                         .copied()
                         .unwrap_or("centre");
+                    let shown = t(
+                        name,
+                        [
+                            "o canto superior esquerdo",
+                            "o topo",
+                            "o canto superior direito",
+                            "a esquerda",
+                            "o centro",
+                            "a direita",
+                            "o canto inferior esquerdo",
+                            "a base",
+                            "o canto inferior direito",
+                        ]
+                        .get(usize::from(n))
+                        .copied()
+                        .unwrap_or("o centro"),
+                    );
                     // A painted dot per anchor point (one AccessKit radio button each), LightBurn's 9-dot selector.
                     let (rect, r) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::click());
                     let selected = self.ui.anchor == n;
@@ -504,7 +596,7 @@ impl OpenLaserApp {
                     };
                     ui.painter().circle(rect.center(), if selected { 4.0 } else { 2.5 }, color, egui::Stroke::NONE);
                     self.labeled(&r, egui::WidgetType::RadioButton, &format!("Anchor {name}"), false);
-                    if r.on_hover_text(format!("XPos/YPos name the {name} of the selection")).clicked() {
+                    if r.on_hover_text(tf!("XPos/YPos name the {name} of the selection", "PosX/PosY indicam {shown} da seleção")).clicked() {
                         self.ui.anchor = n;
                     }
                     if n % 3 == 2 {
@@ -517,27 +609,27 @@ impl OpenLaserApp {
                 let (w, h) = (b.max[0] - b.min[0], b.max[1] - b.min[1]);
                 [b.min[0] + w * col / 2.0, b.max[1] - h * row / 2.0, w, h, 100.0, 100.0, 0.0]
             });
-            let fields: [(&str, &str, &str); 7] = [
-                ("XPos", "xMm", "mm"),
-                ("YPos", "yMm", "mm"),
-                ("Width", "wMm", "mm"),
-                ("Height", "hMm", "mm"),
-                ("W%", "wPct", "%"),
-                ("H%", "hPct", "%"),
-                ("Rotate", "rotateDeg", "°"),
+            let fields: [(&str, &str, &str, &str); 7] = [
+                ("XPos", "PosX", "xMm", "mm"),
+                ("YPos", "PosY", "yMm", "mm"),
+                ("Width", "Largura", "wMm", "mm"),
+                ("Height", "Altura", "hMm", "mm"),
+                ("W%", "L%", "wPct", "%"),
+                ("H%", "A%", "hPct", "%"),
+                ("Rotate", "Girar", "rotateDeg", "°"),
             ];
             // The 9-dot selector's index → the engine's AnchorP (row-major from the top-left, Y up).
             const ANCHORS: [&str; 9] = ["topLeft", "top", "topRight", "left", "center", "right", "bottomLeft", "bottom", "bottomRight"];
-            for (n, (label, key, unit)) in fields.iter().enumerate() {
+            for (n, (label, pt, key, unit)) in fields.iter().enumerate() {
                 if n == 4 {
                     let icon = if self.ui.lock_ratio { "lock" } else { "lock-open" };
                     let r = ui.add(egui::Button::image(icon_image(icon, ui)).selected(self.ui.lock_ratio));
                     self.labeled(&r, egui::WidgetType::Checkbox, "Lock aspect ratio", false);
-                    if r.on_hover_text("Lock the aspect ratio").clicked() {
+                    if r.on_hover_text(t("Lock the aspect ratio", "Travar a proporção")).clicked() {
                         self.ui.lock_ratio = !self.ui.lock_ratio;
                     }
                 }
-                caption(ui, label);
+                caption(ui, t(label, pt));
                 let mut value = values.and_then(|v| v.get(n).copied()).unwrap_or(0.0);
                 let r = ui.add_enabled(enabled, egui::DragValue::new(&mut value).speed(0.1).max_decimals(3).suffix(*unit));
                 self.labeled(&r, egui::WidgetType::DragValue, label, false);
@@ -577,9 +669,13 @@ impl OpenLaserApp {
                         })
                     });
                 if convertible {
-                    let r = ui.add(egui::Button::new("Convert to Path"));
+                    let r = ui.add(egui::Button::new(t("Convert to Path", "Converter em caminho")));
                     self.labeled(&r, egui::WidgetType::Button, "Convert to Path", false);
-                    if r.on_hover_text("Convert the shape to a path so its nodes can be edited").clicked()
+                    if r.on_hover_text(t(
+                        "Convert the shape to a path so its nodes can be edited",
+                        "Converte a forma em caminho para que seus nós possam ser editados",
+                    ))
+                    .clicked()
                         && let Some(id) = sel.first()
                     {
                         self.execute_widget("edit.convertToPath", serde_json::json!({ "ids": [id.0] }));
@@ -588,11 +684,11 @@ impl OpenLaserApp {
             }
             // The Polygon tool's side count, set before the drag as LightBurn's shape properties do.
             if self.ui.selected_tool == "Polygon" {
-                caption(ui, "Sides");
+                caption(ui, t("Sides", "Lados"));
                 let mut sides = f64::from(self.ui.polygon_sides);
                 let r = ui.add(egui::DragValue::new(&mut sides).speed(0.1).range(3.0..=64.0).max_decimals(0));
                 self.labeled(&r, egui::WidgetType::DragValue, "Sides", false);
-                let r = r.on_hover_text("The polygon's vertex count (3–64)");
+                let r = r.on_hover_text(t("The polygon's vertex count (3–64)", "O número de vértices do polígono (3–64)"));
                 if r.changed() && (3.0..=64.0).contains(&sides) {
                     self.ui.polygon_sides = sides as u16;
                 }
@@ -604,14 +700,15 @@ impl OpenLaserApp {
 
     pub(crate) fn tool_palette(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
-            for (n, (label, id, icon)) in LEFT_TOOLS.iter().enumerate() {
+            for (n, (label, pt, id, icon)) in LEFT_TOOLS.iter().enumerate() {
                 if n == 8 {
                     ui.separator();
                 }
                 let live = *id == "tools.select" || command_live(id);
                 let r = ui.add_enabled(live, egui::Button::image(icon_image(icon, ui)).selected(self.ui.selected_tool == *label).min_size(BUTTON));
                 self.labeled(&r, egui::WidgetType::Button, label, false);
-                let r = if live { r.on_hover_text(*label) } else { r.on_disabled_hover_text(format!("{label}: {NOT_YET}")) };
+                let text = t(label, pt);
+                let r = if live { r.on_hover_text(text) } else { r.on_disabled_hover_text(format!("{text}: {}", not_yet())) };
                 if r.clicked() {
                     // Route every palette row through the one dispatcher: it knows which ids arm a canvas
                     // tool and which execute, marks provenance, and applies the machine-active guard.
@@ -625,14 +722,18 @@ impl OpenLaserApp {
 
     pub(crate) fn arrange_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            for (label, id, icon) in ARRANGE_TOOLS {
+            for (label, pt, id, icon) in ARRANGE_TOOLS {
                 let live = command_live(id);
                 let r = ui.add_enabled(live && !self.ui.machine_active, egui::Button::image(icon_image(icon, ui)).min_size(BUTTON));
                 self.labeled(&r, egui::WidgetType::Button, label, false);
+                let text = t(label, pt);
                 let r = if live {
-                    r.on_hover_text(*label).on_disabled_hover_text("Edits are locked while a machine is active.")
+                    r.on_hover_text(text).on_disabled_hover_text(t(
+                        "Edits are locked while a machine is active.",
+                        "As edições ficam bloqueadas enquanto uma máquina está ativa.",
+                    ))
                 } else {
-                    r.on_disabled_hover_text(format!("{label}: {NOT_YET}"))
+                    r.on_disabled_hover_text(format!("{text}: {}", not_yet()))
                 };
                 if r.clicked() {
                     self.execute_widget(id, serde_json::Value::Null);
@@ -659,7 +760,7 @@ impl OpenLaserApp {
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, swatch_text(key), egui::FontId::proportional(10.0), text_on(fill));
                 let label = swatch_label(key);
                 self.labeled(&response, egui::WidgetType::Button, &label, false);
-                let hover = format!("{label} · {}", self.layer_summary(key));
+                let hover = format!("{} · {}", swatch_title(key), self.layer_summary(key));
                 let response = response.on_hover_text(hover);
                 if response.clicked() {
                     self.palette_click(key);
@@ -687,8 +788,10 @@ impl OpenLaserApp {
             ui.separator();
             let selection = self.selection();
             let summary = match self.project().and_then(|p| p.bounds(&selection).unwrap_or_default()) {
-                Some(b) if !selection.is_empty() => format!("{} selected · {:.2} × {:.2} mm", selection.len(), b.max[0] - b.min[0], b.max[1] - b.min[1]),
-                _ => format!("{} shapes", self.project().map(|p| p.shapes.len()).unwrap_or(0)),
+                Some(b) if !selection.is_empty() => {
+                    tf!("{} selected · {:.2} × {:.2} mm", "{} selecionado(s) · {:.2} × {:.2} mm", selection.len(), b.max[0] - b.min[0], b.max[1] - b.min[1])
+                }
+                _ => tf!("{} shapes", "{} formas", self.project().map(|p| p.shapes.len()).unwrap_or(0)),
             };
             ui.label(summary);
             ui.separator();
@@ -696,14 +799,18 @@ impl OpenLaserApp {
             ui.colored_label(color, chip);
             if let Some(summary) = self.plan().and_then(PlanView::summary) {
                 ui.separator();
-                ui.label(format!("est {}", mmss(summary.estimate)));
+                ui.label(tf!("est {}", "est. {}", mmss(summary.estimate)));
             }
             let refusals = self.plan().map(|p| p.refusals().len()).unwrap_or(0);
             if refusals > 0 {
                 ui.separator();
-                let r = ui.add(egui::Button::new(egui::RichText::new(format!("{refusals} refusal(s)")).color(egui::Color32::WHITE)).fill(STOP_RED).small());
+                let r = ui.add(
+                    egui::Button::new(egui::RichText::new(tf!("{refusals} refusal(s)", "{refusals} recusa(s)")).color(egui::Color32::WHITE))
+                        .fill(STOP_RED)
+                        .small(),
+                );
                 self.labeled(&r, egui::WidgetType::Button, "Refusals", false);
-                if r.on_hover_text("Show the refusals in the Laser panel").clicked() {
+                if r.on_hover_text(t("Show the refusals in the Laser panel", "Mostrar as recusas no painel Laser")).clicked() {
                     let _ = self.show_panel(&serde_json::json!({ "panel": "laser", "visible": true }));
                 }
             }
@@ -711,9 +818,9 @@ impl OpenLaserApp {
             ui.label(&self.ui.status_message);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let agent = match self.services.automation.info() {
-                    None => "agent: none".to_owned(),
-                    Some(info) if info.clients.is_empty() => format!("agent: listening on {}", info.port),
-                    Some(info) => format!("agent: connected ({})", info.clients.len()),
+                    None => t("agent: none", "agente: nenhum").to_owned(),
+                    Some(info) if info.clients.is_empty() => tf!("agent: listening on {}", "agente: aguardando na porta {}", info.port),
+                    Some(info) => tf!("agent: connected ({})", "agente: conectado ({})", info.clients.len()),
                 };
                 ui.label(agent);
             });
@@ -745,13 +852,22 @@ impl OpenLaserApp {
                     egui::ScrollArea::vertical().id_salt("camera-scroll").show(ui, |ui| self.camera_panel(ui));
                 }
                 "library" => {
-                    ui.label("Material Library: presets by material and thickness arrive in P1 (CAT §5.12).");
+                    ui.label(t(
+                        "Material Library: presets by material and thickness arrive in P1 (CAT §5.12).",
+                        "Biblioteca de materiais: predefinições por material e espessura chegam na P1 (CAT §5.12).",
+                    ));
                 }
                 "move" => {
                     ui.label(if self.active_is_galvo() {
-                        "Move (jog) is for gantry machines. On this galvo, use Live Framing to see where the job lands."
+                        t(
+                            "Move (jog) is for gantry machines. On this galvo, use Live Framing to see where the job lands.",
+                            "Mover (jog) é para máquinas de pórtico. Neste galvo, use o Enquadramento ao vivo para ver onde o trabalho cai.",
+                        )
                     } else {
-                        "Jogging a gantry arrives with live GRBL streaming (M4); G-code export works today."
+                        t(
+                            "Jogging a gantry arrives with live GRBL streaming (M4); G-code export works today.",
+                            "O jog de pórtico chega com o streaming GRBL ao vivo (M4); a exportação de G-code já funciona.",
+                        )
                     });
                 }
                 _ => {
@@ -800,14 +916,17 @@ impl OpenLaserApp {
                     });
                 }
                 Some(Ok(_)) => {
-                    ui.weak("No camera found — check the OS camera permission, then Refresh.");
+                    ui.weak(t(
+                        "No camera found — check the OS camera permission, then Refresh.",
+                        "Nenhuma câmera encontrada — verifique a permissão de câmera do sistema e clique em Atualizar.",
+                    ));
                 }
                 Some(Err(e)) => {
-                    ui.weak(format!("Cannot enumerate cameras: {e}"));
+                    ui.weak(tf!("Cannot enumerate cameras: {e}", "Não foi possível listar as câmeras: {e}"));
                 }
                 None => {}
             }
-            let refresh = ui.button("Refresh");
+            let refresh = ui.button(t("Refresh", "Atualizar"));
             self.labeled(&refresh, egui::WidgetType::Button, "Refresh camera list", false);
             if refresh.clicked() {
                 self.refresh_cameras();
@@ -815,10 +934,10 @@ impl OpenLaserApp {
             // Opening a camera runs on this thread and can stall (a slow device, the OS permission prompt). Never
             // during a frame or a job: a stalled window would freeze the on-screen STOP until it returns.
             let busy = self.safety_active();
-            let start = ui.add_enabled(!running && !busy, egui::Button::new("Start")).on_disabled_hover_text(if busy {
-                "Not while framing or marking: stop the machine first."
+            let start = ui.add_enabled(!running && !busy, egui::Button::new(t("Start", "Iniciar"))).on_disabled_hover_text(if busy {
+                t("Not while framing or marking: stop the machine first.", "Não durante o enquadramento ou a marcação: pare a máquina primeiro.")
             } else {
-                "The camera is already running."
+                t("The camera is already running.", "A câmera já está ligada.")
             });
             self.labeled(&start, egui::WidgetType::Button, "Start camera", false);
             if start.clicked() {
@@ -826,7 +945,7 @@ impl OpenLaserApp {
                 let params = if has_devices { serde_json::json!({ "index": self.ui.camera.selected }) } else { serde_json::json!({}) };
                 self.execute_widget("camera.start", params);
             }
-            let stop = ui.add_enabled(running, egui::Button::new("Stop"));
+            let stop = ui.add_enabled(running, egui::Button::new(t("Stop", "Parar")));
             self.labeled(&stop, egui::WidgetType::Button, "Stop camera", false);
             if stop.clicked() {
                 self.execute_widget("camera.stop", serde_json::json!({}));
@@ -834,19 +953,25 @@ impl OpenLaserApp {
         });
 
         if let Some(error) = self.session.camera_last_error() {
-            ui.colored_label(egui::Color32::from_rgb(230, 80, 60), format!("Camera: {error}"));
+            ui.colored_label(egui::Color32::from_rgb(230, 80, 60), tf!("Camera: {error}", "Câmera: {error}"));
         }
 
         if running {
             ui.horizontal(|ui| {
-                let cal = ui.selectable_label(self.ui.camera.calibrating, "Calibrate");
+                let cal = ui.selectable_label(self.ui.camera.calibrating, t("Calibrate", "Calibrar"));
                 self.labeled(&cal, egui::WidgetType::Button, "Calibrate camera", false);
                 if cal.clicked() {
                     self.ui.camera.calibrating = !self.ui.camera.calibrating;
                     self.ui.camera.pending_cam = None;
                 }
                 if let Some(stored) = self.session.camera_calibration() {
-                    ui.weak(format!("{} fit · rms {:.2} px · {} pts", stored.calibration.kind(), stored.calibration.rms_error_px(), stored.pairs.len()));
+                    ui.weak(tf!(
+                        "{} fit · rms {:.2} px · {} pts",
+                        "ajuste {} · rms {:.2} px · {} pts",
+                        stored.calibration.kind(),
+                        stored.calibration.rms_error_px(),
+                        stored.pairs.len()
+                    ));
                 }
             });
             match self.camera_frame() {
@@ -867,7 +992,7 @@ impl OpenLaserApp {
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
                 }
                 None => {
-                    ui.weak("Waiting for the first frame…");
+                    ui.weak(t("Waiting for the first frame…", "Aguardando o primeiro quadro…"));
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
                 }
             }
@@ -916,20 +1041,23 @@ impl OpenLaserApp {
     /// Calibrate mode's controls: the bed-mm inputs for the pending click, Add/Undo/Clear, Fit and the
     /// honest hint — everything dispatches the `camera.calibrate.*` engine commands.
     fn camera_cal_controls(&mut self, ui: &mut egui::Ui) {
-        ui.weak("Place a marked target at a known bed position, click it in the image, enter its mm coordinates; repeat for at least 4 spread-out points.");
+        ui.weak(t(
+            "Place a marked target at a known bed position, click it in the image, enter its mm coordinates; repeat for at least 4 spread-out points.",
+            "Coloque um alvo marcado numa posição conhecida da mesa, clique nele na imagem e digite as coordenadas em mm; repita para pelo menos 4 pontos espalhados.",
+        ));
         let pairs = self.session.camera_cal_pairs().len();
         ui.horizontal(|ui| {
             let cam = self.ui.camera.pending_cam;
             ui.label(match cam {
-                Some(c) => format!("image ({:.0}, {:.0}) ↔ bed", c[0], c[1]),
-                None => "click a target in the image".to_owned(),
+                Some(c) => tf!("image ({:.0}, {:.0}) ↔ bed", "imagem ({:.0}, {:.0}) ↔ mesa", c[0], c[1]),
+                None => t("click a target in the image", "clique em um alvo na imagem").to_owned(),
             });
             let x = ui.add(egui::TextEdit::singleline(&mut self.ui.camera.bed_x).desired_width(56.0).hint_text("x mm"));
             self.labeled(&x, egui::WidgetType::TextEdit, "Bed X (mm)", false);
             let y = ui.add(egui::TextEdit::singleline(&mut self.ui.camera.bed_y).desired_width(56.0).hint_text("y mm"));
             self.labeled(&y, egui::WidgetType::TextEdit, "Bed Y (mm)", false);
             let ready = cam.is_some() && parse_bed(&self.ui.camera).is_some();
-            let add = ui.add_enabled(ready, egui::Button::new("Add point"));
+            let add = ui.add_enabled(ready, egui::Button::new(t("Add point", "Adicionar ponto")));
             self.labeled(&add, egui::WidgetType::Button, "Add calibration point", false);
             if add.clicked()
                 && let (Some(c), Some((bx, by))) = (cam, parse_bed(&self.ui.camera))
@@ -944,23 +1072,23 @@ impl OpenLaserApp {
             }
         });
         ui.horizontal(|ui| {
-            let undo = ui.add_enabled(pairs > 0, egui::Button::new("Undo last"));
+            let undo = ui.add_enabled(pairs > 0, egui::Button::new(t("Undo last", "Desfazer último")));
             self.labeled(&undo, egui::WidgetType::Button, "Remove last calibration point", false);
             if undo.clicked() {
                 self.execute_widget("camera.calibrate.removeLast", serde_json::json!({}));
             }
-            let clear = ui.add_enabled(pairs > 0 || self.session.camera_calibration().is_some(), egui::Button::new("Clear"));
+            let clear = ui.add_enabled(pairs > 0 || self.session.camera_calibration().is_some(), egui::Button::new(t("Clear", "Limpar")));
             self.labeled(&clear, egui::WidgetType::Button, "Clear camera calibration", false);
             if clear.clicked() {
                 self.execute_widget("camera.calibrate.clear", serde_json::json!({}));
             }
-            let fit = ui.add_enabled(pairs >= 3, egui::Button::new("Fit"));
+            let fit = ui.add_enabled(pairs >= 3, egui::Button::new(t("Fit", "Ajustar")));
             self.labeled(&fit, egui::WidgetType::Button, "Fit camera calibration", false);
             if fit.clicked() {
                 self.execute_widget("camera.calibrate.fit", serde_json::json!({}));
             }
-            ui.label(format!("{pairs} point(s)"));
-            let done = ui.button("Done");
+            ui.label(tf!("{pairs} point(s)", "{pairs} ponto(s)"));
+            let done = ui.button(t("Done", "Concluir"));
             self.labeled(&done, egui::WidgetType::Button, "Finish calibrating", false);
             if done.clicked() {
                 self.ui.camera.calibrating = false;
@@ -974,9 +1102,9 @@ impl OpenLaserApp {
     pub(crate) fn cuts_panel(&mut self, ui: &mut egui::Ui) {
         let used = self.project().map(used_layers).unwrap_or_default();
         let gantry = !self.active_is_galvo();
-        let mut columns = vec!["#", "Layer", "Mode", "Spd/Pwr", "Output", "Show"];
+        let mut columns = vec!["#", t("Layer", "Camada"), t("Mode", "Modo"), t("Spd/Pwr", "Vel/Pot"), t("Output", "Saída"), t("Show", "Mostrar")];
         if gantry {
-            columns.push("Air");
+            columns.push(t("Air", "Ar"));
         }
         egui::Grid::new("cuts-table").striped(true).num_columns(columns.len()).spacing([8.0, 4.0]).show(ui, |ui| {
             for heading in &columns {
@@ -989,7 +1117,10 @@ impl OpenLaserApp {
             }
         });
         if used.is_empty() {
-            ui.weak("No layers in use. Draw or import shapes, or pick a colour in the palette below.");
+            ui.weak(t(
+                "No layers in use. Draw or import shapes, or pick a colour in the palette below.",
+                "Nenhuma camada em uso. Desenhe ou importe formas, ou escolha uma cor na paleta abaixo.",
+            ));
         }
         ui.separator();
         self.quick_editor(ui);
@@ -1005,10 +1136,8 @@ impl OpenLaserApp {
                 .selected(self.ui.active_layer == key),
         );
         self.labeled(&number, egui::WidgetType::Button, &format!("Cut layer {name}"), false);
-        let refusals: Vec<String> = self
-            .plan()
-            .map(|p| p.refusals().iter().filter(|r| r.layer == Some(key)).map(|r| format!("{}: {}", r.code.as_str(), r.message)).collect())
-            .unwrap_or_default();
+        let refusals: Vec<String> =
+            self.plan().map(|p| p.refusals().iter().filter(|r| r.layer == Some(key)).map(crate::i18n::refusal).collect()).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.label(&name);
             if !refusals.is_empty() {
@@ -1024,7 +1153,11 @@ impl OpenLaserApp {
         let tool = key.is_tool();
         let out = ui.add_enabled(!tool && !self.ui.machine_active, egui::Checkbox::without_text(&mut output));
         self.labeled(&out, egui::WidgetType::Checkbox, &format!("Output {name}"), false);
-        let out = out.on_disabled_hover_text(if tool { "Tool layers (T1/T2) never output." } else { "Locked while a machine is active." });
+        let out = out.on_disabled_hover_text(if tool {
+            t("Tool layers (T1/T2) never output.", "Camadas de ferramenta (T1/T2) nunca têm saída.")
+        } else {
+            t("Locked while a machine is active.", "Bloqueado enquanto uma máquina está ativa.")
+        });
         if out.changed() {
             self.execute_widget("layer.setOutput", serde_json::json!({ "layer": layer_param(key), "on": output }));
         }
@@ -1082,15 +1215,19 @@ impl OpenLaserApp {
     /// otherwise the requested speed, never called actual.
     fn layer_columns(&self, key: LayerKey) -> (String, String, String) {
         let LayerKey::Color(i) = key else {
-            return ("Tool".into(), "—".into(), "Tool layers trace and guide; they never burn.".into());
+            return (
+                t("Tool", "Ferramenta").into(),
+                "—".into(),
+                t("Tool layers trace and guide; they never burn.", "Camadas de ferramenta traçam e guiam; nunca queimam.").into(),
+            );
         };
         let Some(op) = self.project().and_then(|p| p.color_layer(i)).and_then(|l| l.ops.first()) else {
             return ("—".into(), "—".into(), String::new());
         };
         let mode = match op.mode {
-            openlaser_doc::CutMode::Line => "Line",
-            openlaser_doc::CutMode::Fill => "Fill",
-            openlaser_doc::CutMode::OffsetFill => "Offset Fill",
+            openlaser_doc::CutMode::Line => t("Line", "Linha"),
+            openlaser_doc::CutMode::Fill => t("Fill", "Preenchimento"),
+            openlaser_doc::CutMode::OffsetFill => t("Offset Fill", "Preenchimento deslocado"),
         };
         let gantry = !self.active_is_galvo();
         let (requested, power) = if gantry { (op.gantry.speed.get(), op.gantry.power_max.get()) } else { (op.galvo.speed.get(), op.galvo.power.get()) };
@@ -1100,12 +1237,18 @@ impl OpenLaserApp {
             Some(actual) => (
                 mode.into(),
                 format!("{actual:.1} / {power:.0}"),
-                format!("Speed {actual:.2} mm/s (actual, decoded from the bytes) · requested {requested} mm/s · power {power} % · {khz} kHz · {ns}"),
+                tf!(
+                    "Speed {actual:.2} mm/s (actual, decoded from the bytes) · requested {requested} mm/s · power {power} % · {khz} kHz · {ns}",
+                    "Velocidade {actual:.2} mm/s (real, decodificada dos bytes) · pedida {requested} mm/s · potência {power} % · {khz} kHz · {ns}"
+                ),
             ),
             None => (
                 mode.into(),
                 format!("{requested} / {power:.0}"),
-                format!("Speed {requested} mm/s (requested; the actual encoded speed shows once the job plans) · power {power} % · {khz} kHz · {ns}"),
+                tf!(
+                    "Speed {requested} mm/s (requested; the actual encoded speed shows once the job plans) · power {power} % · {khz} kHz · {ns}",
+                    "Velocidade {requested} mm/s (pedida; a velocidade real codificada aparece quando o trabalho for planejado) · potência {power} % · {khz} kHz · {ns}"
+                ),
             ),
         }
     }
@@ -1118,36 +1261,43 @@ impl OpenLaserApp {
     fn quick_editor(&mut self, ui: &mut egui::Ui) {
         let key = self.ui.active_layer;
         let name = self.layer_name(key);
-        ui.strong(format!("Layer {name}"));
+        ui.strong(tf!("Layer {name}", "Camada {name}"));
         let LayerKey::Color(i) = key else {
-            ui.label("Tool layer: never output. Live Framing can trace it (Tool Layers Only).");
+            ui.label(t(
+                "Tool layer: never output. Live Framing can trace it (Tool Layers Only).",
+                "Camada de ferramenta: nunca tem saída. O Enquadramento ao vivo pode traçá-la (Só camadas de ferramenta).",
+            ));
             return;
         };
         let Some(op) = self.project().and_then(|p| p.color_layer(i)).and_then(|l| l.ops.first()).cloned() else {
-            ui.weak("This layer has no cut settings yet.");
+            ui.weak(t("This layer has no cut settings yet.", "Esta camada ainda não tem configurações de corte."));
             return;
         };
         let speed = match self.actual_speed(key) {
-            Some(actual) => format!("Speed: {} mm/s requested · {actual:.2} mm/s (actual)", op.galvo.speed.get()),
-            None => format!("Speed: {} mm/s requested", op.galvo.speed.get()),
+            Some(actual) => {
+                tf!("Speed: {} mm/s requested · {actual:.2} mm/s (actual)", "Velocidade: {} mm/s pedida · {actual:.2} mm/s (real)", op.galvo.speed.get())
+            }
+            None => tf!("Speed: {} mm/s requested", "Velocidade: {} mm/s pedida", op.galvo.speed.get()),
         };
         ui.label(speed);
-        ui.label(format!(
+        ui.label(tf!(
             "Power {} % · Frequency {} kHz · Q-Pulse {} · Passes {}",
+            "Potência {} % · Frequência {} kHz · Q-Pulse {} · Passadas {}",
             op.galvo.power.get(),
             f64::from(op.galvo.frequency.get()) / 1000.0,
             op.galvo.q_pulse.map(|n| format!("{} ns", n.get())).unwrap_or_else(|| "—".into()),
             op.passes
         ));
         if op.mode != openlaser_doc::CutMode::Line {
-            ui.label(format!(
+            ui.label(tf!(
                 "Interval {} mm · Angle {}°{}",
+                "Intervalo {} mm · Ângulo {}°{}",
                 op.fill.interval.get(),
                 op.fill.angle.get(),
-                if op.fill.cross_hatch { " · Cross-Hatch" } else { "" }
+                if op.fill.cross_hatch { t(" · Cross-Hatch", " · Hachura cruzada") } else { "" }
             ));
         }
-        let edit = ui.add(egui::Button::new("Edit Cut Settings…"));
+        let edit = ui.add(egui::Button::new(t("Edit Cut Settings…", "Editar configurações de corte…")));
         self.track(&edit, "button", "Edit Cut Settings…", false);
         if edit.clicked() {
             self.ui.cut_settings_open = true;
@@ -1162,15 +1312,15 @@ impl OpenLaserApp {
         let active = self.ui.machine_active;
         let galvo = self.active_is_galvo();
         if self.active_machine().is_some_and(|m| matches!(&m.kind, openlaser_machine::Kinematics::Galvo(g) if g.rotary.as_ref().is_some_and(|r| r.enabled))) {
-            ui.strong("ROTARY ON");
+            ui.strong(t("ROTARY ON", "ROTATIVO LIGADO"));
         }
         let busy = self.is_machine_busy();
 
         // 1. Device row.
         ui.horizontal(|ui| {
-            let devices = ui.button("Devices…");
+            let devices = ui.button(t("Devices…", "Dispositivos…"));
             self.track(&devices, "button", "Devices…", false);
-            if devices.on_hover_text("Device Settings for the selected machine").clicked() {
+            if devices.on_hover_text(t("Device Settings for the selected machine", "Configurações do dispositivo da máquina selecionada")).clicked() {
                 self.ui.device_settings_open = true;
             }
             let machines: Vec<(openlaser_types::MachineId, String)> = self.session.machines().iter().map(|m| (m.id.clone(), m.name.clone())).collect();
@@ -1178,8 +1328,14 @@ impl OpenLaserApp {
             let mut chosen = current.clone();
             let combo = ui
                 .add_enabled_ui(!busy, |ui| {
-                    egui::ComboBox::from_label("Device")
-                        .selected_text(machines.iter().find(|(id, _)| Some(id) == current.as_ref()).map(|(_, n)| n.as_str()).unwrap_or("No device"))
+                    egui::ComboBox::new("laser-device", t("Device", "Dispositivo"))
+                        .selected_text(
+                            machines
+                                .iter()
+                                .find(|(id, _)| Some(id) == current.as_ref())
+                                .map(|(_, n)| n.as_str())
+                                .unwrap_or(t("No device", "Nenhum dispositivo")),
+                        )
                         .show_ui(ui, |ui| {
                             for (id, name) in &machines {
                                 ui.selectable_value(&mut chosen, Some(id.clone()), name);
@@ -1189,7 +1345,7 @@ impl OpenLaserApp {
                 })
                 .inner;
             self.track(&combo, "comboBox", "Device", false);
-            combo.on_disabled_hover_text("Stop the machine before switching devices.");
+            combo.on_disabled_hover_text(t("Stop the machine before switching devices.", "Pare a máquina antes de trocar de dispositivo."));
             if chosen != current
                 && let Some(id) = chosen
             {
@@ -1201,15 +1357,29 @@ impl OpenLaserApp {
             ui.colored_label(color, text);
             let connected = self.active_machine().is_some_and(|m| self.session.status(&m.id).is_some());
             if connected {
-                self.human_button(ui, &ctx, "Disconnect", if busy { Err("Stop the machine first.".to_owned()) } else { Ok(()) }, |app| {
-                    let id = app.active_machine().map(|m| m.id.clone()).ok_or(openlaser_engine::EngineError::NoDevice)?;
-                    app.session.disconnect(openlaser_engine::Origin::Human, &id)
-                });
+                self.human_button(
+                    ui,
+                    &ctx,
+                    "Disconnect",
+                    t("Disconnect", "Desconectar"),
+                    if busy { Err(t("Stop the machine first.", "Pare a máquina primeiro.").to_owned()) } else { Ok(()) },
+                    |app| {
+                        let id = app.active_machine().map(|m| m.id.clone()).ok_or(openlaser_engine::EngineError::NoDevice)?;
+                        app.session.disconnect(openlaser_engine::Origin::Human, &id)
+                    },
+                );
             } else {
-                self.human_button(ui, &ctx, "Connect", if busy { Err("Stop the machine first.".to_owned()) } else { Ok(()) }, |app| {
-                    let id = app.active_machine().map(|m| m.id.clone()).ok_or(openlaser_engine::EngineError::NoDevice)?;
-                    app.session.connect(openlaser_engine::Origin::Human, &id)
-                });
+                self.human_button(
+                    ui,
+                    &ctx,
+                    "Connect",
+                    t("Connect", "Conectar"),
+                    if busy { Err(t("Stop the machine first.", "Pare a máquina primeiro.").to_owned()) } else { Ok(()) },
+                    |app| {
+                        let id = app.active_machine().map(|m| m.id.clone()).ok_or(openlaser_engine::EngineError::NoDevice)?;
+                        app.session.connect(openlaser_engine::Origin::Human, &id)
+                    },
+                );
             }
         });
 
@@ -1224,50 +1394,104 @@ impl OpenLaserApp {
         };
         let frame = frame_gate(plan.as_ref(), active);
         ui.horizontal(|ui| {
-            self.disabled_button(ui, "Pause", if galvo { "Pause is not available on galvo machines in this build (H15). Use Stop." } else { NOT_YET });
-            let stop = ui.add(egui::Button::new("Stop").min_size(egui::vec2(56.0, 24.0)));
+            self.disabled_button(
+                ui,
+                "Pause",
+                t("Pause", "Pausar"),
+                if galvo {
+                    t(
+                        "Pause is not available on galvo machines in this build (H15). Use Stop.",
+                        "Pausar não está disponível em máquinas galvo nesta versão (H15). Use Parar.",
+                    )
+                } else {
+                    not_yet()
+                },
+            );
+            let stop = ui.add(egui::Button::new(t("Stop", "Parar")).min_size(egui::vec2(56.0, 24.0)));
             self.track(&stop, "button", "Stop", false);
-            if stop.on_hover_text("Stop laser: latches every machine at once").clicked() {
+            if stop.on_hover_text(t("Stop laser: latches every machine at once", "Parar o laser: trava todas as máquinas de uma vez")).clicked() {
                 self.stop();
             }
-            self.human_button(ui, &ctx, "Start", start.clone(), |app| app.session.request_arm(openlaser_engine::Origin::Human).map(|_| ()));
+            self.human_button(ui, &ctx, "Start", t("Start", "Iniciar"), start.clone(), |app| {
+                app.session.request_arm(openlaser_engine::Origin::Human).map(|_| ())
+            });
         });
         ui.horizontal(|ui| {
             let (style, source) = (self.ui.live_style, self.ui.live_source);
-            self.human_button(ui, &ctx, "Frame", frame, move |app| {
+            self.human_button(ui, &ctx, "Frame", t("Frame", "Enquadrar"), frame, move |app| {
                 app.ui.live_framing_open = true;
                 app.session.start_frame(openlaser_engine::Origin::Human, openlaser_types::FrameMode::Once, Some(style), Some(source)).map(|_| ())
             });
-            self.disabled_button(ui, "Send", "Not available for this device: Send uploads to DSP controllers only.");
-            self.disabled_button(ui, "Home", if galvo { "A galvo has no homing: its origin is the field centre." } else { NOT_YET });
-            self.disabled_button(ui, "Go to Origin", if galvo { "A galvo has no head to move: its origin is the field centre." } else { NOT_YET });
+            self.disabled_button(
+                ui,
+                "Send",
+                t("Send", "Enviar"),
+                t(
+                    "Not available for this device: Send uploads to DSP controllers only.",
+                    "Indisponível neste dispositivo: Enviar só transfere para controladoras DSP.",
+                ),
+            );
+            self.disabled_button(
+                ui,
+                "Home",
+                t("Home", "Referenciar"),
+                if galvo {
+                    t("A galvo has no homing: its origin is the field centre.", "Um galvo não tem referenciamento: a origem é o centro do campo.")
+                } else {
+                    not_yet()
+                },
+            );
+            self.disabled_button(
+                ui,
+                "Go to Origin",
+                t("Go to Origin", "Ir para a origem"),
+                if galvo {
+                    t("A galvo has no head to move: its origin is the field centre.", "Um galvo não tem cabeçote para mover: a origem é o centro do campo.")
+                } else {
+                    not_yet()
+                },
+            );
         });
 
         // 3. Start From and Job Origin (galvos always use absolute coordinates, CTL-03).
         ui.horizontal(|ui| {
-            caption(ui, "Start From");
-            let r = ui.add_enabled(false, egui::Button::new("Absolute Coords"));
+            caption(ui, t("Start From", "Iniciar de"));
+            let r = ui.add_enabled(false, egui::Button::new(t("Absolute Coords", "Coord. absolutas")));
             self.labeled(&r, egui::WidgetType::ComboBox, "Start From", false);
-            r.on_disabled_hover_text(if galvo { "Galvos always use absolute coordinates: the field centre is the origin." } else { NOT_YET });
+            r.on_disabled_hover_text(if galvo {
+                t(
+                    "Galvos always use absolute coordinates: the field centre is the origin.",
+                    "Galvos sempre usam coordenadas absolutas: o centro do campo é a origem.",
+                )
+            } else {
+                not_yet()
+            });
             let r = ui.add_enabled(false, egui::Button::new("⋮⋮⋮"));
             self.labeled(&r, egui::WidgetType::Button, "Job Origin", false);
-            r.on_disabled_hover_text("Job Origin applies to User Origin and Current Position only.");
+            r.on_disabled_hover_text(t(
+                "Job Origin applies to User Origin and Current Position only.",
+                "A origem do trabalho só se aplica a Origem do usuário e Posição atual.",
+            ));
         });
 
         // 4. Options.
         let has_doc = self.project().is_some();
         let mut cut_selected = self.project().is_some_and(|p| p.job.cut_selected);
-        let r = ui.add_enabled(has_doc && !active, egui::Checkbox::new(&mut cut_selected, "Cut Selected Graphics"));
+        let r = ui.add_enabled(has_doc && !active, egui::Checkbox::new(&mut cut_selected, t("Cut Selected Graphics", "Cortar gráficos selecionados")));
         self.track(&r, "checkBox", "Cut Selected Graphics", false);
         if r.changed() {
             self.execute_widget("laser.cutSelected", serde_json::json!({ "on": cut_selected }));
         }
         let mut use_origin = false;
-        let r = ui.add_enabled(false, egui::Checkbox::new(&mut use_origin, "Use Selection Origin"));
+        let r = ui.add_enabled(false, egui::Checkbox::new(&mut use_origin, t("Use Selection Origin", "Usar origem da seleção")));
         self.track(&r, "checkBox", "Use Selection Origin", false);
-        r.on_disabled_hover_text(if galvo { "Not used on galvos: the field centre is the origin." } else { NOT_YET });
+        r.on_disabled_hover_text(if galvo {
+            t("Not used on galvos: the field centre is the origin.", "Não usado em galvos: o centro do campo é a origem.")
+        } else {
+            not_yet()
+        });
         ui.horizontal(|ui| {
-            caption(ui, "Repeat");
+            caption(ui, t("Repeat", "Repetir"));
             let mut repeats = self.project().map(|p| p.job.repeats).unwrap_or(1);
             let r = ui.add_enabled(has_doc && !active, egui::DragValue::new(&mut repeats).range(1..=999));
             self.labeled(&r, egui::WidgetType::DragValue, "Repeat count", false);
@@ -1284,24 +1508,25 @@ impl OpenLaserApp {
         ui.separator();
         match &plan {
             None => {
-                ui.weak("No current job. Open, import or draw a design.");
+                ui.weak(t("No current job. Open, import or draw a design.", "Nenhum trabalho atual. Abra, importe ou desenhe um projeto."));
             }
             Some(PlanView::Ready(summary)) => {
-                ui.label(format!(
+                ui.label(tf!(
                     "Estimate {} · {} pass row(s) · {} packet(s) · crash bound {:.1} s",
+                    "Estimativa {} · {} linha(s) de passada · {} pacote(s) · limite em falha {:.1} s",
                     mmss(summary.estimate),
                     summary.rows.len(),
                     summary.packets,
                     summary.crash_bound.as_secs_f64()
                 ));
                 if receipt.is_none() {
-                    ui.label("Frame this job first.");
+                    ui.label(t("Frame this job first.", "Enquadre este trabalho primeiro."));
                 }
             }
             Some(PlanView::Refused(refused)) => {
-                ui.colored_label(STOP_RED, format!("{} refusal(s): this job will not run", refused.refusals.len()));
+                ui.colored_label(STOP_RED, tf!("{} refusal(s): this job will not run", "{} recusa(s): este trabalho não vai rodar", refused.refusals.len()));
                 for r in &refused.refusals {
-                    ui.label(format!("• {}: {}", r.code.as_str(), r.message));
+                    ui.label(format!("• {}", crate::i18n::refusal(r)));
                 }
                 if let Some(error) = &refused.error {
                     ui.label(error);
@@ -1311,7 +1536,7 @@ impl OpenLaserApp {
         if let Some(plan) = &plan {
             let notices = plan.notices();
             if !notices.is_empty() {
-                ui.label(format!("{} notice(s):", notices.len()));
+                ui.label(tf!("{} notice(s):", "{} aviso(s):", notices.len()));
                 // Bounded, so a long list (the business card has 67) never pushes the rest of the panel away.
                 egui::ScrollArea::vertical().id_salt("laser-notices").max_height(NOTICES_MAX_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
                     for notice in notices {
@@ -1321,29 +1546,34 @@ impl OpenLaserApp {
             }
         }
         if let Err(reason) = &start {
-            ui.weak(format!("Start: {reason}"));
+            ui.weak(tf!("Start: {reason}", "Iniciar: {reason}"));
         }
         ui.separator();
-        ui.weak("STOP works while this window is focused; the E-stop always works.");
+        ui.weak(t(
+            "STOP works while this window is focused; the E-stop always works.",
+            "PARAR funciona com esta janela em foco; o botão de emergência sempre funciona.",
+        ));
     }
 
-    fn disabled_button(&mut self, ui: &mut egui::Ui, label: &str, reason: &str) {
-        let r = ui.add_enabled(false, egui::Button::new(label));
+    fn disabled_button(&mut self, ui: &mut egui::Ui, label: &str, text: &str, reason: &str) {
+        let r = ui.add_enabled(false, egui::Button::new(text));
         self.track(&r, "button", label, false);
         r.on_disabled_hover_text(reason);
     }
 
     /// A human-only widget (Connect, Frame, Start): enabled when `gate` allows it; acts only on a real click in an
     /// untainted frame (`services.human.is_human_click`, asked every frame so it can time the widget's visibility).
+    /// `label` is the English automation label (also matched below); `text` is what the button shows.
     fn human_button(
         &mut self,
         ui: &mut egui::Ui,
         ctx: &egui::Context,
         label: &'static str,
+        text: &'static str,
         gate: Result<(), String>,
         action: impl FnOnce(&mut Self) -> Result<(), openlaser_engine::EngineError>,
     ) {
-        let r = ui.add_enabled(gate.is_ok(), egui::Button::new(label).min_size(egui::vec2(56.0, 24.0)));
+        let r = ui.add_enabled(gate.is_ok(), egui::Button::new(text).min_size(egui::vec2(56.0, 24.0)));
         self.track(&r, "button", label, true);
         // Start keeps its click for the ARM confirmation that follows (ARM once per session, Settings).
         let human = if label == "Start" { self.services.human.start_click(ctx, &r) } else { self.services.human.is_human_click(ctx, &r) };
@@ -1352,12 +1582,15 @@ impl OpenLaserApp {
             #[cfg(test)]
             self.seam.human_actions.push(label);
             let message = match action(self) {
-                Ok(()) => format!("{label}: requested"),
+                Ok(()) => tf!("{label}: requested", "{text}: solicitado"),
                 Err(e) => e.to_string(),
             };
             self.set_status(message);
         } else if r.clicked() {
-            self.set_status(format!("{label} is human-only: it needs a person's click in this window (automation input is ignored)."));
+            self.set_status(tf!(
+                "{label} is human-only: it needs a person's click in this window (automation input is ignored).",
+                "{text} só pode ser feito por uma pessoa: precisa de um clique nesta janela (entradas de automação são ignoradas)."
+            ));
         }
         if let Err(reason) = gate {
             r.on_disabled_hover_text(reason);
@@ -1371,15 +1604,18 @@ impl OpenLaserApp {
             .submissions()
             .into_iter()
             .filter(|r| r.state == openlaser_engine::SubmissionState::AwaitingHuman)
-            .map(|r| (r.submission, format!("Job from {}", r.client), format!("Note from agent: {} · est {}", r.note, mmss(r.summary.estimate))))
+            .map(|r| {
+                (
+                    r.submission,
+                    tf!("Job from {}", "Trabalho de {}", r.client),
+                    tf!("Note from agent: {} · est {}", "Nota do agente: {} · est. {}", r.note, mmss(r.summary.estimate)),
+                )
+            })
             .collect();
         cards.extend(
-            self.session
-                .requests()
-                .frame_requests()
-                .into_iter()
-                .filter(|r| r.state == openlaser_engine::FrameRequestState::AwaitingHuman)
-                .map(|r| (r.request, format!("Frame request from {}", r.client), format!("{:?} framing", r.mode))),
+            self.session.requests().frame_requests().into_iter().filter(|r| r.state == openlaser_engine::FrameRequestState::AwaitingHuman).map(|r| {
+                (r.request, tf!("Frame request from {}", "Pedido de enquadramento de {}", r.client), tf!("{:?} framing", "Enquadramento {:?}", r.mode))
+            }),
         );
         for (id, title, detail) in cards {
             self.request_card(ui, ctx, id, &title, &detail);
@@ -1391,8 +1627,10 @@ impl OpenLaserApp {
             ui.strong(title);
             ui.label(detail);
             ui.horizontal(|ui| {
-                for (label, approve) in [("Approve framing", true), ("Reject request", false)] {
-                    let r = ui.add_enabled(!self.ui.machine_active, egui::Button::new(label));
+                for (label, text, approve) in
+                    [("Approve framing", t("Approve framing", "Aprovar enquadramento"), true), ("Reject request", t("Reject request", "Recusar pedido"), false)]
+                {
+                    let r = ui.add_enabled(!self.ui.machine_active, egui::Button::new(text));
                     self.track(&r, "button", label, true);
                     let human = self.services.human.is_human_click(ctx, &r);
                     if human && !self.frame_synthetic && !self.services.human.frame_is_synthetic(ctx) {
@@ -1404,12 +1642,15 @@ impl OpenLaserApp {
                             self.session.decline_request(openlaser_engine::Origin::Human, id)
                         };
                         let message = match result {
-                            Ok(()) => format!("{label}: done"),
+                            Ok(()) => tf!("{label}: done", "{text}: concluído"),
                             Err(e) => e.to_string(),
                         };
                         self.set_status(message);
                     } else if r.clicked() {
-                        self.set_status(format!("{label} is human-only: it needs a person's click in this window."));
+                        self.set_status(tf!(
+                            "{label} is human-only: it needs a person's click in this window.",
+                            "{text} só pode ser feito por uma pessoa: precisa de um clique nesta janela."
+                        ));
                     }
                 }
             });
@@ -1419,14 +1660,14 @@ impl OpenLaserApp {
     // ---- Console ---------------------------------------------------------------------------------------------------------
 
     fn console_panel(&mut self, ui: &mut egui::Ui) {
-        ui.strong("Log");
+        ui.strong(t("Log", "Registro"));
         egui::ScrollArea::vertical().id_salt("console-log").max_height(ui.available_height() * 0.5).stick_to_bottom(true).show(ui, |ui| {
             for line in &self.log {
                 ui.monospace(line);
             }
         });
         ui.separator();
-        ui.strong("USB trace (decoded)");
+        ui.strong(t("USB trace (decoded)", "Rastreamento USB (decodificado)"));
         let lines: Vec<String> = self
             .session
             .machines()
@@ -1436,7 +1677,7 @@ impl OpenLaserApp {
             .collect();
         egui::ScrollArea::vertical().id_salt("console-trace").stick_to_bottom(true).show(ui, |ui| {
             if lines.is_empty() {
-                ui.weak("No device traffic.");
+                ui.weak(t("No device traffic.", "Sem tráfego do dispositivo."));
             }
             for line in lines {
                 ui.monospace(line);
@@ -1460,7 +1701,7 @@ impl OpenLaserApp {
         let area = egui::Area::new(egui::Id::new("stop_overlay")).order(egui::Order::Tooltip).anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 72.0)).show(
             ctx,
             |ui| {
-                let button = egui::Button::new(egui::RichText::new("Stop laser").strong().size(16.0).color(egui::Color32::WHITE))
+                let button = egui::Button::new(egui::RichText::new(t("Stop laser", "Parar laser")).strong().size(16.0).color(egui::Color32::WHITE))
                     .fill(STOP_RED)
                     .min_size(egui::vec2(120.0, 40.0));
                 let r = ui.add(button);

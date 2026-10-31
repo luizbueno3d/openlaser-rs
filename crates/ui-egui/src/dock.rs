@@ -40,14 +40,15 @@ pub fn encode(layout: &DockLayout) -> String {
     serde_json::to_string(layout).unwrap_or_default()
 }
 pub fn label(panel: &str) -> String {
+    use crate::i18n::t;
     match panel {
-        "canvas" => "Design",
-        "cuts" => "Cuts / Layers",
-        "laser" => "Laser",
-        "library" => "Library",
-        "move" => "Move",
-        "console" => "Console",
-        "camera" => "Camera Control",
+        "canvas" => t("Design", "Desenho"),
+        "cuts" => t("Cuts / Layers", "Cortes / Camadas"),
+        "laser" => t("Laser", "Laser"),
+        "library" => t("Library", "Biblioteca"),
+        "move" => t("Move", "Mover"),
+        "console" => t("Console", "Console"),
+        "camera" => t("Camera Control", "Controle da câmera"),
         _ => panel,
     }
     .into()
