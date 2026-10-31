@@ -33,14 +33,22 @@ This page is for Luiz, at the machine. **No AI agent runs any of this.** It is t
       each one actually cuts.
 - [ ] If you still have the old EZCAD PC: copy its `.cor` file and `markcfg*` files. They likely explain the 1.1834
       scale factor.
-- [ ] Build the hardware binaries yourself, in a terminal with no agent running:
+- [ ] **Build the hardware binaries yourself, at home, before you leave** (no laser attached: compiling never touches
+      a device; close agent sessions first). Nobody has compiled the `hw` feature yet — agents and CI are not
+      allowed to — so a compile error must show up here, not at the machine. The first build takes 5–10 minutes and
+      about 5 GB of disk.
 
 ```sh
-cd ~/AI/OpenLaser/openlaser && git pull
-export PATH="$HOME/.cargo/bin:$PATH"
+cd ~/AI/OpenLaser/openlaser && git fetch && git checkout preflight-hil && git pull
+export PATH="$HOME/.cargo/bin:$PATH" CARGO_INCREMENTAL=0
 CARGO_TARGET_DIR=~/AI/OpenLaser/.target/hw cargo build -p openlaser-hw -p openlaser --features hw
 alias olhw=~/AI/OpenLaser/.target/hw/debug/openlaser-hw
 ```
+
+      If it fails, send Claude the error (it can fix the code; it cannot build `hw` itself).
+- [ ] **Use the MacBook.** Every step here is written for macOS, where the board needs no driver. On a Windows PC the
+      board needs the WinUSB driver (Zadig), which replaces EZCAD's driver: EZCAD stops seeing the laser until the
+      old driver is restored in Device Manager. Don't do that on the company's EZCAD PC today.
 
 - [ ] **Rehearse on the simulator first** (no laser, same keys and prompts):
       `olhw run --builtin dot --sim`, then `olhw run --builtin box10 --sim` (practise Enter, the `ARM <code>` prompt,
@@ -99,9 +107,35 @@ olhw bench start
 
 ## 5. HIL-3: the GUI
 
-- [ ] `~/AI/OpenLaser/.target/hw/debug/openlaser`, choose the **JPT M7 · USB** machine, import the business card,
+- [ ] From the same terminal as the bench session (so `OPENLASER_HW_PRESENT=1` is set and Ctrl-C there stops the
+      machine): `~/AI/OpenLaser/.target/hw/debug/openlaser`. The window title must read **"OpenLaser — REAL LASER
+      (USB)"**; plain "OpenLaser" means it is on the simulator. Choose the **JPT M7 · USB** machine, import the business card,
       Frame (human click), Start → ARM dialog (check the power, kHz, ns and actual speed shown) → mark. 20 STOPs from
       the GUI. One MOPA colour test.
+
+## 6. Rotary (next session, after HIL-2 passes)
+
+D12 is **UNSIGNED, proposed** and is not covered by the D1–D11 sign-off. All axis units,
+sign-magnitude replies, direction, acceleration, moving-bit timing and timeout assumptions remain unverified.
+Rotary jobs and the human-only `rotary` CLI refuse until a human saves `rotary.enabled=true` in the profile
+(default off). The job currently requires controller position **0** at start; it refuses a nonzero position
+rather than change the exact absolute bytes approved at ARM. `rotary pos` shows the reported pulses.
+
+- [ ] **R0 — key switch OFF.** After checking the profile's pulses/rev, diameter and conservative speeds,
+      `olhw rotary move --deg 90 --trace rotary-r0.jsonl` (motion only, laser off). Check direction and pulses/rev;
+      `olhw rotary pos` must show the expected sign-magnitude position. No homing command is sent.
+- [ ] **R1 — one full turn.** `olhw rotary move --deg 360 --trace rotary-r1.jsonl`; the same physical mark must
+      return to the same place. Check chuck object diameter versus roller drive diameter. Undo bench motion
+      with the opposite degrees so the reported controller position is 0 before the job.
+- [ ] **R2 — red light.** Frame a rotary job and compare the union of centred strip outlines with the intended
+      tube layout; check receipt/ARM strip count, split, total degrees/pulses and return choice.
+- [ ] **R3 — low-power scrap.** Burn a ring of text on a scrap tube, with framing and typed ARM. Check seams,
+      overlap, direction, scale, rounding and return registration. Record the trace and stop timing.
+
+**Residual risk:** no stop-axis command is known. StopExecute may or may not stop the motor. A stop closes
+MO and ports with the unchanged emergency sequence, but **the rotary axis may finish its move**. A confirmed
+StopReport confirms laser-off/list-idle, not motor-stopped; the report notes this explicitly. Keep hands clear
+and use the physical E-stop/key switch. Never attempt a rotary bench move while any machine is active.
 
 ## Stop the session if
 
@@ -163,4 +197,6 @@ close them:
 
 | Date | Step | Result (pass/fail + numbers) | Trace file | Notes |
 |---|---|---|---|---|
-| | | | | |
+| 2026-10-30 | HIL-0 `detect`, `status` | pass: 9588:9899 "20200507" USBLMCV4 found; GetSerialNo `0000 0007 0006 0220`, GetVersion `0000 8421 0009 0220`; status 0x0220 = READY, idle; 6 trace events in 2.6 ms, no Reset or laser command | `hil0.jsonl` | Bit 0x0200 set, not used by our code; `usbSetConfiguration` not needed on macOS |
+| 2026-10-30 | GUI frame (red light) | fail → fixed: the frame was X/Y transposed against the canvas ("rotated 90° CW and mirrored" seen from the front) | none (GUI) | Fixed with `cal.swapXy = true` in the saved profile `machines/jpt-m7-200.json` (Galvo 1 is X Axis OFF); confirmed. The built-in default stays identity: the rust-v1 frozen bytes are identity-mapped |
+| 2026-10-30 | GUI first burns | ARM dialog reached for C00 Line at 74.99 %, 2 passes; burn result not yet reported | none (GUI) | Bench cap refused 30 % on the first emission as designed. Field feedback → branch `phase3-field`: ARM once per session, framing optional, Disconnect, Device Settings save, marquee selection |

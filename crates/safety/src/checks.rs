@@ -7,7 +7,7 @@ use openlaser_machine::{GalvoMachine, GantryMachine, JobLimits, Kinematics, Lase
 use openlaser_plan::quantise::{self, pulse_request, pulse_word, speed_field_mm};
 use openlaser_plan::{CutQ, GalvoCutQ, GantryCutQ, JobPlan, PlanFacts, Section};
 use openlaser_types::galvo::{self, PulseDecision};
-use openlaser_types::{DeviceKind, LayerKey, Notice, NoticeCode, Ns, ObjectId, Refusal, RefusalCode, SectionMode};
+use openlaser_types::{DeviceKind, LayerKey, Notice, NoticeCode, Ns, ObjectId, Refusal, RefusalCode};
 
 /// Float noise from transforms must not refuse a shape drawn exactly on an edge (OM v1 `FIELD_EDGE_TOLERANCE_MM`).
 /// Points are never moved: a point within the tolerance is sent as it is, and its encodability is checked exactly.
@@ -279,6 +279,9 @@ pub(crate) fn check_frame_covers(out: &mut Out, frame: &[Polyline], sections: &[
 
 /// The plan's facts → refusals and notices.
 pub(crate) fn check_facts(out: &mut Out, facts: &PlanFacts) {
+    for (k, why) in &facts.rotary_notices {
+        out.notice(NoticeCode::RotaryScanAngle, why.clone(), None, Some(*k));
+    }
     for id in &facts.orphan_objects {
         out.refuse(
             Refusal::new(
@@ -604,9 +607,6 @@ pub(crate) fn check_section(out: &mut Out, m: &MachineProfile, area: &Area, s: &
     if k.is_tool() {
         out.refuse(Refusal::new(RefusalCode::UnsupportedMode, format!("{}: tool layers are framed, never burned; plan again", label(s))).layer(k));
     }
-    if s.mode == SectionMode::Image {
-        out.refuse(Refusal::new(RefusalCode::UnsupportedMode, format!("{}: burning images is not in this build", label(s))).layer(k));
-    }
     check_paths(out, area, &m.limits, &k.to_string(), Some(k), &s.paths);
 }
 
@@ -615,6 +615,57 @@ pub(crate) fn check_repeats(out: &mut Out, plan: &JobPlan) {
         out.refuse(Refusal::new(RefusalCode::NothingToMark, "the repeat count is 0, so nothing would burn; set 1 to 999"));
     } else if plan.repeats > MAX_REPEATS {
         out.refuse(Refusal::new(RefusalCode::UnsupportedMode, format!("the repeat count {} is above {MAX_REPEATS}; lower it", plan.repeats)));
+    }
+}
+
+/// Rotary defence in depth: never accept forged steps, reversals, or excess travel.
+pub(crate) fn check_rotary(out: &mut Out, plan: &JobPlan, m: &MachineProfile) {
+    let cfg = match &m.kind {
+        Kinematics::Galvo(g) => g.rotary.as_ref().filter(|r| r.enabled).map(|r| (r, g)),
+        _ => None,
+    };
+    let refuse = |out: &mut Out, msg| out.refuse(Refusal::new(RefusalCode::UnsupportedMode, msg));
+    let has_steps = plan.sections.iter().any(|s| s.rotary.is_some());
+    let Some((r, g)) = cfg else {
+        if has_steps {
+            refuse(out, "rotary steps require rotary.enabled on this machine");
+        }
+        return;
+    };
+    if r.validate(g.work_area).is_err() {
+        refuse(out, "rotary configuration is invalid");
+        return;
+    }
+    if plan.sections.iter().any(|s| s.rotary.is_none()) {
+        refuse(out, "rotary-enabled jobs require a rotary step on every section");
+    }
+    let mut previous: Option<openlaser_plan::RotaryStep> = None;
+    let limit = r.max_turns_per_job * f64::from(r.pulses_per_rev);
+    for step in plan.sections.iter().filter_map(|s| s.rotary) {
+        if f64::from(step.target_pulses).abs() > limit {
+            refuse(out, "rotary target exceeds max turns per job");
+        }
+        if let Some(p) = previous {
+            let delta = i64::from(step.target_pulses) - i64::from(p.target_pulses);
+            if step.strip < p.strip || (step.strip == p.strip && delta != 0) || (!r.reverse && delta < 0) || (r.reverse && delta > 0) {
+                refuse(out, "rotary targets and strips must be monotonic, with one target per strip");
+            }
+        }
+        previous = Some(step);
+    }
+    let mut position = 0i64;
+    let mut travel = 0u64;
+    for _ in 0..plan.repeats.min(MAX_REPEATS) {
+        for step in plan.sections.iter().filter_map(|s| s.rotary) {
+            travel = travel.saturating_add((i64::from(step.target_pulses) - position).unsigned_abs());
+            position = i64::from(step.target_pulses);
+        }
+    }
+    if r.return_to_start {
+        travel = travel.saturating_add(position.unsigned_abs());
+    }
+    if travel as f64 > limit {
+        refuse(out, "total rotary travel exceeds max turns per job");
     }
 }
 

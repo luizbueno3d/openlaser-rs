@@ -86,6 +86,7 @@ fn square(cx: f64, cy: f64, half: f64) -> Polyline {
 
 fn section(layer: u8, paths: Vec<Polyline>, cut: CutQ) -> Section {
     Section {
+        rotary: None,
         layer: LayerKey::Color(layer),
         layer_name: format!("C{layer:02}"),
         sub: 0,
@@ -674,12 +675,6 @@ fn safety_unsupported_mode_refused() {
     p.facts.unsupported = vec![(LayerKey::Color(1), "C01: Offset Fill is not in this build; use Line or Fill".into())];
     let r = validate(&p, &m).unwrap_err();
     assert!(r.refusals.iter().any(|x| x.code == RefusalCode::UnsupportedMode && x.message.contains("Offset Fill")));
-    // An Image section (burning images is a stretch item, not built) is refused too.
-    let m = jpt();
-    let mut s = section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(default_words(&m)));
-    s.mode = SectionMode::Image;
-    let p = job(&m, vec![s]);
-    assert!(codes(&validate(&p, &m)).contains(&RefusalCode::UnsupportedMode));
     // A section on a tool layer (T1/T2 never burn, S8): a forged plan.
     let m = jpt();
     let mut s = section(0, vec![square(0.0, 0.0, 5.0)], CutQ::Galvo(default_words(&m)));
@@ -691,6 +686,29 @@ fn safety_unsupported_mode_refused() {
     p.repeats = 1000;
     let p = refingerprint(p, &m);
     assert!(codes(&validate(&p, &m)).contains(&RefusalCode::UnsupportedMode));
+}
+
+#[test]
+fn safety_image_sections_use_the_same_area_cut_and_frame_checks_as_fill() {
+    for mode in [SectionMode::Fill, SectionMode::Image] {
+        let m = jpt();
+        let mut s = section(0, vec![line(&[[-2.0, 0.5], [2.0, 0.5]])], CutQ::Galvo(default_words(&m)));
+        s.mode = mode;
+        let mut p = job(&m, vec![s]);
+        p.frame = vec![square(0.0, 0.0, 3.0)];
+        assert!(validate(&p, &m).is_ok(), "{mode:?}");
+        p.sections[0].paths = vec![line(&[[150.0, 0.0], [151.0, 0.0]])];
+        p = refingerprint(p, &m);
+        assert!(codes(&validate(&p, &m)).contains(&RefusalCode::OutsideWorkArea));
+        p.sections[0].paths = vec![line(&[[10.0, 0.0], [11.0, 0.0]])];
+        p = refingerprint(p, &m);
+        assert!(codes(&validate(&p, &m)).contains(&RefusalCode::FrameDoesNotCoverJob), "{mode:?}: uncovered burn must be refused");
+        p.sections[0].paths = vec![line(&[[-2.0, 0.5], [2.0, 0.5]])];
+        let CutQ::Galvo(q) = &mut p.sections[0].cut else { panic!("galvo") };
+        q.mark_current = 0;
+        p = refingerprint(p, &m);
+        assert!(validate(&p, &m).is_err(), "{mode:?}: invalid cut words must be refused");
+    }
 }
 
 #[test]
@@ -977,4 +995,37 @@ fn safety_business_card_validates_with_numbered_notices() {
     assert_eq!(v.frame().paths().len(), 403);
     assert!(validate_frame(&plan, &m, FrameSource::Job).is_ok());
     assert!(validate_frame(&plan, &m, FrameSource::ToolLayersOnly).is_err(), "no tool-layer shapes");
+}
+
+#[test]
+fn safety_rotary_forgery_limits_monotonicity_and_field() {
+    use openlaser_machine::RotaryCfg;
+    use openlaser_plan::RotaryStep;
+    let (mut m, mut p) = galvo_job(vec![Polyline(vec![[0.0, -5.0], [0.0, 5.0]])]);
+    p.sections[0].rotary = Some(RotaryStep { strip: 0, target_pulses: 0 });
+    assert!(codes(&validate(&refingerprint(p.clone(), &m), &m)).contains(&RefusalCode::UnsupportedMode), "forged rotary on disabled machine");
+    let Kinematics::Galvo(g) = &mut m.kind else { panic!("galvo") };
+    g.rotary = Some(RotaryCfg { enabled: true, ..RotaryCfg::default() });
+    assert!(validate(&refingerprint(p.clone(), &m), &m).is_ok());
+    let mut bad = p.clone();
+    bad.sections[0].rotary.as_mut().unwrap().target_pulses = 25601;
+    assert!(codes(&validate(&refingerprint(bad, &m), &m)).contains(&RefusalCode::UnsupportedMode));
+    let mut bad = p.clone();
+    let mut second = bad.sections[0].clone();
+    second.rotary = Some(RotaryStep { strip: 1, target_pulses: -1 });
+    bad.sections.push(second);
+    assert!(codes(&validate(&refingerprint(bad, &m), &m)).contains(&RefusalCode::UnsupportedMode));
+    let mut travel = p.clone();
+    travel.sections[0].rotary.as_mut().unwrap().target_pulses = -10000;
+    let mut second = travel.sections[0].clone();
+    second.rotary = Some(RotaryStep { strip: 1, target_pulses: 10000 });
+    travel.sections.push(second);
+    let refused = validate(&refingerprint(travel, &m), &m).unwrap_err();
+    assert!(refused.refusals.iter().any(|r| r.message.contains("total rotary travel")), "individual targets fit but total travel must refuse");
+    let mut bad = p.clone();
+    bad.sections[0].paths[0].0[1] = [0.0, 101.0];
+    assert!(codes(&validate(&refingerprint(bad, &m), &m)).contains(&RefusalCode::OutsideWorkArea));
+    let Kinematics::Galvo(g) = &mut m.kind else { panic!("galvo") };
+    g.rotary.as_mut().unwrap().pulses_per_rev = 0;
+    assert!(codes(&validate(&refingerprint(p, &m), &m)).contains(&RefusalCode::UnsupportedMode));
 }

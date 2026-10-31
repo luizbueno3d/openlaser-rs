@@ -1,13 +1,15 @@
 //! Native OpenLaser GUI entry point (SPEC §3.21). Default builds inject the simulator and never link hardware
 //! transport. Everything testable lives in `src/lib.rs`.
 #![forbid(unsafe_code)]
+// Release builds on Windows open no console window behind the app.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::process::ExitCode;
 use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use std::sync::mpsc;
 
-use openlaser_engine::{DeviceAccess, FsAuthority, Origin, Session, SessionConfig};
+use openlaser_engine::{DeviceAccess, DeviceProvider, FsAuthority, Origin, Session, SessionConfig};
 use openlaser_format::machines;
 use openlaser_lmc_sim::{SimConfig, SimProvider};
 use openlaser_types::{Clock, SystemClock};
@@ -81,17 +83,14 @@ fn main() -> ExitCode {
     // Phase 6b: the camera↔bed calibration is machine-local setup data (never the project file).
     let camera_store = openlaser_format::camera_cal::calibration_path()
         .map(|path| Arc::new(openlaser_format::camera_cal::DirCalibrationStore::new(path)) as Arc<dyn openlaser_engine::CameraCalibrationStore>);
+    let (provider, real_laser) = device_provider();
+    if real_laser {
+        eprintln!("openlaser: REAL LASER: this window drives the USB board (hw build, OPENLASER_HW_PRESENT=1)");
+    }
     let session = Session::new(SessionConfig {
         origin: Origin::Human,
         window: true,
-        devices: DeviceAccess::Provider(Arc::new(SimProvider::new(SimConfig {
-            buffer_depth: 3,
-            transfer_latency: std::time::Duration::ZERO,
-            status_extra_bits: 0,
-            pid: 0x9899,
-            faults: Vec::new(),
-            emission_cap_pct: None,
-        }))),
+        devices: DeviceAccess::Provider(provider),
         machines: profiles,
         profiles: profile_store,
         camera_store,
@@ -111,7 +110,11 @@ fn main() -> ExitCode {
     // `main` keeps `registry` for the post-run fail-safe stop; the app closure gets its own clone.
     let registry_for_app = Arc::clone(&registry);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("OpenLaser").with_inner_size([1440.0, 900.0]).with_min_inner_size([760.0, 480.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_title(if real_laser { "OpenLaser — REAL LASER (USB)" } else { "OpenLaser" })
+            .with_inner_size([1440.0, 900.0])
+            .with_min_inner_size([760.0, 480.0])
+            .with_icon(app_icon()),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -120,6 +123,8 @@ fn main() -> ExitCode {
         Box::new(move |cc| {
             let settings = PersistentSettings::open();
             let in_window_menus = args.in_window_menus || settings.load().in_window_menus;
+            // Before the native menu is built: its labels are fixed until the next start.
+            openlaser_ui_egui::i18n::set_language(settings.load().language);
             let quit_ctx = cc.egui_ctx.clone();
             let mut automation = openlaser::control_runtime::Automation::new(&args, Arc::clone(&registry_for_app), cc.egui_ctx.clone());
             if args.control.is_some() {
@@ -193,4 +198,30 @@ impl eframe::App for DesktopApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui, frame);
     }
+}
+
+/// The machines' device provider: the simulator, or, in a `hw` build run with `OPENLASER_HW_PRESENT=1` and
+/// `OPENLASER_NO_HW` unset, the real USB board (S4, S23), exactly as `openlaser-hw` opens it. The transport still
+/// refuses every open without a bench session (`openlaser-hw bench start`) and caps its first emission.
+fn device_provider() -> (Arc<dyn DeviceProvider>, bool) {
+    #[cfg(feature = "hw")]
+    {
+        if !openlaser_transport::hardware_disabled() {
+            return (Arc::new(openlaser_transport::UsbProvider::new()), true);
+        }
+    }
+    let sim = SimProvider::new(SimConfig {
+        buffer_depth: 3,
+        transfer_latency: std::time::Duration::ZERO,
+        status_extra_bits: 0,
+        pid: 0x9899,
+        faults: Vec::new(),
+        emission_cap_pct: None,
+    });
+    (Arc::new(sim), false)
+}
+
+/// OpenLaser's own icon (assets/icon.svg); without it eframe shows its default icon in the Dock and taskbar.
+fn app_icon() -> Arc<egui::IconData> {
+    Arc::new(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png")).unwrap_or_default())
 }

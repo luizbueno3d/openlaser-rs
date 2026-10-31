@@ -75,6 +75,7 @@ fn mark_box10_job() -> LmcJob {
         },
     };
     let section = Section {
+        rotary: None,
         layer: LayerKey::color(0).unwrap(),
         layer_name: "C00".to_owned(),
         sub: 0,

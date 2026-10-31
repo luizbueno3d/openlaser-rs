@@ -1096,7 +1096,14 @@ mod tests {
                 proptest::collection::vec(op(), 1..=3),
                 1u16..50,
                 (
-                    prop_oneof![Just(ImageMode::Threshold), Just(ImageMode::Jarvis)],
+                    prop_oneof![
+                        Just(ImageMode::Threshold),
+                        Just(ImageMode::Jarvis),
+                        Just(ImageMode::FloydSteinberg),
+                        Just(ImageMode::Stucki),
+                        Just(ImageMode::Atkinson),
+                        Just(ImageMode::Ordered)
+                    ],
                     0.01f64..1.0,
                     -90.0f64..90.0,
                     any::<bool>(),

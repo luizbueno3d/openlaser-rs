@@ -398,3 +398,17 @@ fn run_inner(rig: &mut dyn Rig, o: &RunOpts, term: &mut dyn Terminal, env: &Env,
     term.write(&format!("Finished in {:.1} s.\n", d.as_secs_f64()));
     Ok(())
 }
+
+/// Human-only motion bench commands: no marking list, laser source stays off.
+pub fn rotary(degrees: Option<f64>, device: &crate::args::DeviceOpts, term: &mut dyn Terminal, env: &mut Env) -> Result<(), HwError> {
+    require_tty(term, "rotary")?;
+    let mut rig = env.rigs.open(&RigSpec { purpose: Purpose::Status, device: device.clone(), extent: None })?;
+    rig.prepare_rotary()?;
+    let target = rig.stopper();
+    let _guards = guards(env, &target)?;
+    let stop = target.clone();
+    let _keys = term.keys(Arc::new(move |_| stop.stop_now())).map_err(HwError::Failed)?;
+    let position = rig.rotary(degrees)?;
+    term.write(&format!("Rotary position: {position} pulses (laser off).\n"));
+    Ok(())
+}

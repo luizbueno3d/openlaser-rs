@@ -259,6 +259,7 @@ fn used_project() -> Arc<openlaser_doc::Project> {
 
 fn summary(rows: Vec<openlaser_types::PassRow>) -> openlaser_engine::EmissionSummary {
     openlaser_engine::EmissionSummary {
+        rotary: None,
         fingerprint: openlaser_types::Fingerprint([7; 32]),
         bytes_hash: openlaser_types::Fingerprint([8; 32]),
         machine: openlaser_machine::jpt_m7_200_sim().id,
@@ -692,6 +693,8 @@ fn kittest_laser_panel_galvo_disabled_reasons() {
 #[test]
 fn kittest_start_without_receipt_says_frame_first() {
     let mut h = harness();
+    // Settings ▸ Laser ▸ Require framing before Start (off by default).
+    h.state_mut().session.set_frame_required(true);
     h.state_mut().seam.project = Some(used_project());
     let s = ready_plan(&mut h);
     h.run();
@@ -2747,4 +2750,73 @@ fn palette_tool_buttons_arm_without_dispatching() {
     h.get_by_label("Weld Shapes").click();
     h.run();
     assert_ne!(h.state().ui.selected_tool, "Weld Shapes");
+}
+
+#[test]
+fn material_test_menu_creates_three_by_three_in_a_new_document() {
+    let mut h = with_human(HumanFrames);
+    h.run();
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../text/tests/fonts");
+    h.state_mut().session.set_font_dirs(vec![dir]);
+    h.state_mut().session.execute_as(Origin::Human, "file.new", serde_json::json!({})).unwrap();
+    let old_index = h.state().session.active_index().unwrap();
+    h.get_by_label("Laser Tools").click();
+    h.run();
+    let menu_item = h.query_all_by_label_contains("Material Test…").next().expect("material test menu row");
+    assert!(!menu_item.accesskit_node().is_disabled());
+    menu_item.click();
+    h.run();
+    assert!(h.state().ui.material_test.is_some());
+    // Edit the actual count widgets, then dispatch through Create.
+    for label in ["Rows count", "Columns count"] {
+        h.get_by_label(label).focus();
+        h.get_by_label(label).type_text("3");
+        h.key_press(egui::Key::Enter);
+        h.run();
+    }
+    assert_eq!(h.state().ui.material_test.as_ref().unwrap().rows.count, 3);
+    assert_eq!(h.state().ui.material_test.as_ref().unwrap().cols.count, 3);
+    h.get_by_label("Create").click();
+    h.run();
+    assert!(h.state().ui.material_test.is_none(), "{}", h.state().ui.status_message);
+    assert_eq!(h.state().session.active_index(), Some(old_index + 1));
+    let p = &h.state().session.active().unwrap().project;
+    assert_eq!(p.layers.order.len(), 10);
+    assert_eq!(p.shapes.iter().filter(|s| matches!(s.geom, openlaser_doc::Geom::Rect { .. })).count(), 9);
+    assert_eq!(p.layers.order.last(), Some(&LayerKey::Color(9)));
+}
+
+/// Puts the test thread back to English even if the test fails.
+struct EnglishAfter;
+
+impl Drop for EnglishAfter {
+    fn drop(&mut self) {
+        crate::i18n::set_language(crate::i18n::Language::English);
+    }
+}
+
+#[test]
+fn kittest_language_menu_switches_the_window_and_saves() {
+    let _english = EnglishAfter;
+    let mut h = harness();
+    h.run();
+    assert!(has_text(&h, "Start") && has_text(&h, "File"));
+    h.state_mut().invoke_ui_action("prefs.language.ptBr");
+    h.run();
+    assert!(has_text(&h, "Iniciar"), "the Laser panel is in Portuguese");
+    assert!(has_text(&h, "Arquivo"), "the in-window menu bar is in Portuguese");
+    assert_eq!(h.state().services.settings.load().language, crate::i18n::Language::Portuguese, "the choice is saved");
+    h.state_mut().invoke_ui_action("prefs.language.en");
+    h.run();
+    assert!(has_text(&h, "Start") && !has_text(&h, "Iniciar"));
+    assert_eq!(h.state().services.settings.load().language, crate::i18n::Language::English);
+}
+
+#[test]
+fn kittest_saved_language_applies_at_start() {
+    let _english = EnglishAfter;
+    let settings = UiSettings { in_window_menus: true, language: crate::i18n::Language::Portuguese, ..UiSettings::default() };
+    let mut h = harness_with(Options { settings, ..Options::default() });
+    h.run();
+    assert!(has_text(&h, "Iniciar") && has_text(&h, "Arquivo"));
 }

@@ -10,7 +10,7 @@ mod profile;
 pub use builtin::{jpt_m7_200, jpt_m7_200_sim, om_gantries};
 pub use profile::{
     FieldCalibration, FieldRect, FirstJump, GalvoLink, GalvoMachine, GalvoTimingDefaults, GantryLink, GantryMachine, GantryTool, JobLimits, Kinematics,
-    LaserSource, LmcBoardFilter, MachineProfile, PortMap, ProfileStore, RedDotCal, RunAhead, SourceKind, validate_profile,
+    LaserSource, LmcBoardFilter, MachineProfile, PortMap, ProfileStore, RedDotCal, RotaryAxis, RotaryCfg, RotaryKind, RunAhead, SourceKind, validate_profile,
 };
 
 // Re-exports for callers that name these through the profile (SPEC §3.0).
@@ -142,5 +142,61 @@ mod tests {
         };
         galvo.h27_cleared = Some(FieldRect { min: [-90.0, -90.0], max: [90.0, 90.0] });
         assert!(validate_profile(&profile).is_err());
+    }
+}
+
+#[cfg(test)]
+mod rotary_tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+    use super::*;
+    #[test]
+    fn legacy_profile_and_partial_rotary_defaults_load() {
+        let mut json = serde_json::to_value(jpt_m7_200()).unwrap();
+        json["kind"].as_object_mut().unwrap().remove("rotary");
+        let old: MachineProfile = serde_json::from_value(json.clone()).unwrap();
+        let Kinematics::Galvo(g) = old.kind else { panic!("galvo") };
+        assert!(g.rotary.is_none());
+        json["kind"]["rotary"] = serde_json::json!({});
+        let profile: MachineProfile = serde_json::from_value(json).unwrap();
+        let Kinematics::Galvo(g) = &profile.kind else { panic!("galvo") };
+        assert_eq!(g.rotary, Some(RotaryCfg::default()));
+        assert!(validate_profile(&profile).is_ok());
+    }
+    #[test]
+    fn rotary_validation_refuses_each_invalid_range_even_when_disabled() {
+        let mut cases = Vec::new();
+        for ppr in [0, 1_000_001] {
+            cases.push(RotaryCfg { pulses_per_rev: ppr, ..Default::default() });
+        }
+        for d in [f64::NAN, 0.0, -1.0, 500.1] {
+            cases.push(RotaryCfg { drive_diameter_mm: d, ..Default::default() });
+            cases.push(RotaryCfg { object_diameter_mm: d, ..Default::default() });
+        }
+        for split in [f64::NAN, 0.0, 0.001, 200.1] {
+            cases.push(RotaryCfg { split_mm: split, ..Default::default() });
+        }
+        for overlap in [f64::NAN, -1.0, 5.0] {
+            cases.push(RotaryCfg { overlap_mm: overlap, ..Default::default() });
+        }
+        for accel in [0, 10001] {
+            cases.push(RotaryCfg { accel_ms: accel, ..Default::default() });
+        }
+        for turns in [f64::NAN, 0.0, -1.0, 20.1] {
+            cases.push(RotaryCfg { max_turns_per_job: turns, ..Default::default() });
+        }
+        cases.push(RotaryCfg { min_speed_pps: 0, ..Default::default() });
+        cases.push(RotaryCfg { min_speed_pps: 1001, max_speed_pps: 1000, ..Default::default() });
+        for r in cases {
+            let mut p = jpt_m7_200();
+            let Kinematics::Galvo(g) = &mut p.kind else { panic!("galvo") };
+            g.rotary = Some(r.clone());
+            assert!(validate_profile(&p).is_err(), "{r:?}");
+        }
+        let area = FieldRect { min: [-100.0, -100.0], max: [100.0, 100.0] };
+        assert!(
+            RotaryCfg { split_mm: std::f64::consts::PI * 40.0 / 12800.0, max_turns_per_job: 20.0, accel_ms: 10000, ..Default::default() }
+                .validate(area)
+                .is_ok()
+        );
     }
 }

@@ -585,3 +585,21 @@ mod props {
         }
     }
 }
+
+#[test]
+fn raster_alpha_composites_over_white_and_opaque_gray_is_unchanged() {
+    use std::io::Cursor;
+    let inputs = [
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(2, 1, vec![0, 0, 0, 0, 0, 0, 0, 255]).unwrap()),
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_raw(2, 1, vec![17, 83, 201, 244, 177, 10]).unwrap()),
+        image::DynamicImage::ImageLuma8(image::GrayImage::from_raw(2, 1, vec![17, 201]).unwrap()),
+    ];
+    for (i, image) in inputs.into_iter().enumerate() {
+        let mut encoded = Cursor::new(Vec::new());
+        image.write_to(&mut encoded, image::ImageFormat::Png).unwrap();
+        let imported = import("alpha.png", encoded.get_ref(), &ImportOptions::default()).unwrap();
+        let Geom::Bitmap(b) = &imported.shapes[0].geom else { panic!("bitmap") };
+        let expected = if i == 0 { vec![255, 0] } else { image.to_luma8().into_raw() };
+        assert_eq!(b.gray.as_ref(), expected);
+    }
+}

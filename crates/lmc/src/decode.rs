@@ -528,11 +528,17 @@ pub fn emission_summary(job: &LmcJob, m: &GalvoMachine, plan: &JobPlan, notices:
     if job.prelude != job_prelude(laser) || job.postlude != job_postlude() {
         return Err(Error::SummaryMismatch);
     }
+    if job.return_axis != crate::encode::return_axis(&plan.sections, m)? {
+        return Err(Error::SummaryMismatch);
+    }
     let window = usize::from(m.run_ahead.max_packets.max(1));
     let mut rows = Vec::with_capacity(job.lists.len());
     let mut crash_bound = Duration::ZERO;
     let mut one_repeat = Duration::ZERO;
     for (list, section) in job.lists.iter().zip(&plan.sections) {
+        if list.axis_move != crate::encode::section_axis(section, m)? {
+            return Err(Error::SummaryMismatch);
+        }
         if list.layer != section.layer || list.pass != section.pass || list.packet_est.len() != list.packets.len() {
             return Err(Error::SummaryMismatch);
         }
@@ -581,6 +587,7 @@ pub fn emission_summary(job: &LmcJob, m: &GalvoMachine, plan: &JobPlan, notices:
     }
     let packets = job.lists.iter().map(|l| l.packets.len()).try_fold(0usize, usize::checked_add).ok_or(Error::TooManyCommands)?;
     Ok(EmissionSummary {
+        rotary: rotary_summary(job, m, plan)?,
         fingerprint: job.fingerprint,
         bytes_hash: job.bytes_hash(),
         machine: job.machine.clone(),
@@ -594,6 +601,32 @@ pub fn emission_summary(job: &LmcJob, m: &GalvoMachine, plan: &JobPlan, notices:
         negate: m.cal.negate,
         swap_xy: m.cal.swap_xy,
     })
+}
+
+fn rotary_summary(job: &LmcJob, m: &GalvoMachine, plan: &JobPlan) -> Result<Option<openlaser_types::RotarySummary>, Error> {
+    if !job.lists.iter().any(|l| l.axis_move.is_some()) {
+        return Ok(None);
+    }
+    let r = m.rotary.as_ref().filter(|r| r.enabled).ok_or(Error::SummaryMismatch)?;
+    let strips = plan.sections.iter().filter_map(|s| s.rotary.map(|r| r.strip)).collect::<std::collections::BTreeSet<_>>().len();
+    let mut position = 0i64;
+    let mut total = 0u64;
+    for _ in 0..job.repeats {
+        for mv in job.lists.iter().filter_map(|l| l.axis_move) {
+            total = total.saturating_add((i64::from(mv.target_pulses) - position).unsigned_abs());
+            position = i64::from(mv.target_pulses);
+        }
+    }
+    if let Some(mv) = job.return_axis {
+        total = total.saturating_add((i64::from(mv.target_pulses) - position).unsigned_abs());
+    }
+    Ok(Some(openlaser_types::RotarySummary {
+        strips: u32::try_from(strips).map_err(|_| Error::TooManyCommands)?,
+        split_mm: r.split_mm,
+        total_degrees: total as f64 * 360.0 / f64::from(r.pulses_per_rev),
+        total_pulses: total,
+        return_to_start: job.return_axis.is_some(),
+    }))
 }
 
 #[cfg(test)]

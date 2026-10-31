@@ -28,6 +28,9 @@ This software controls a Class 4 laser that can blind, burn and start fires.
 
    Hardware sessions are run by a human at the machine.
 
+   One exception (Luiz, 2026-10-30): `.github/workflows/release.yml` compiles `hw` binaries on GitHub's runners for
+   the downloads. It never runs them and never sets `OPENLASER_HW_PRESENT`; the shipped app stays default-deny.
+
    A Claude Code hook in this repo (`.claude/hooks/no_hw.py`, wired in `.claude/settings.json`) refuses any Bash
    command that builds with `hw`/`--all-features`, sets `OPENLASER_HW_PRESENT`, uses `.target/hw`, or runs
    `openlaser-hw` without `--sim`. Hardware sessions follow [`HARDWARE.md`](HARDWARE.md).

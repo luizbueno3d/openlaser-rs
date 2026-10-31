@@ -193,6 +193,7 @@ fn row(power_pct: f64) -> PassRow {
 
 fn summary(power_pct: f64) -> EmissionSummary {
     EmissionSummary {
+        rotary: None,
         fingerprint: FP,
         bytes_hash: Fingerprint([0x43; 32]),
         machine: MachineId("jpt-m7-200-sim".into()),
@@ -1086,4 +1087,19 @@ fn cli_skipped_profile_file_refuses_device_commands() {
     let out = term.output();
     assert!(out.contains("machine profile files were skipped"), "{out}");
     assert!(!out.contains("Framing"), "{out}");
+}
+
+#[test]
+fn rotary_commands_require_tty_and_enabled_profile() {
+    for sub in ["rotary move --deg 90 --sim", "rotary pos --sim"] {
+        let (mut env, s) = fake_env(Script::default());
+        let mut term = Scripted::new(false, &[]);
+        assert_eq!(run_with(&argv(sub), &mut term, &mut env), EXIT_FAIL);
+        assert!(term.output().contains("not_a_tty"));
+        assert_eq!(s.lock().unwrap().opened, 0);
+        let (mut env, _profiles) = engine_env(default_sim_config());
+        let mut term = Scripted::new(true, &[]);
+        assert_eq!(run_with(&argv(sub), &mut term, &mut env), EXIT_FAIL);
+        assert!(term.output().contains("rotary.enabled"), "{}", term.output());
+    }
 }

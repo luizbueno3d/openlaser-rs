@@ -1,5 +1,5 @@
 //! Importers (SPEC §3.6): SVG through usvg at true scale, DXF (the OM parser port plus an evaluated-SPLINE shipping
-//! variant), raster images and the prototype's (OM) `workspace.json` + `layer_settings.json`.
+//! variant), LightBurn `.lbrn2`, raster images and the prototype's (OM) `workspace.json` + `layer_settings.json`.
 //!
 //! Every import is bounded (SPEC §1.3 rule 6, never crash): the input size, the number of output points (per entity
 //! and in total), the curve-evaluation work and the raster size are capped, and an SVG is measured by the SVG guard
@@ -22,6 +22,7 @@ use openlaser_types::{NoticeCode, ObjectId, Percent};
 use usvg::roxmltree;
 
 pub mod dxf_om;
+pub mod lbrn2;
 pub mod om;
 mod svg_guard;
 
@@ -31,7 +32,7 @@ pub use openlaser_types::{Bounds, LayerKey, Notice};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// Largest SVG, DXF or OM workspace / layer-settings file accepted, in bytes.
+/// Largest SVG, DXF, LBRN2 or OM workspace / layer-settings file accepted, in bytes.
 pub const MAX_VECTOR_FILE_BYTES: usize = 32 * 1024 * 1024;
 /// Largest raster file accepted, in bytes.
 pub const MAX_RASTER_FILE_BYTES: usize = 64 * 1024 * 1024;
@@ -114,6 +115,7 @@ pub enum Format {
     Webp,
     Gif,
     OmWorkspace,
+    Lbrn2,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -128,11 +130,14 @@ pub struct ImportOptions {
     pub svg_units: SvgUnits,
     pub dxf_units: DxfUnits,
     pub flatten_tol_mm: f64,
+    /// Required for LightBurn projects: defaults from the target machine profile.
+    pub layer_defaults: Option<openlaser_doc::LayerDefaults>,
 }
 
 impl Default for ImportOptions {
     fn default() -> Self {
         Self {
+            layer_defaults: None,
             layer: None,
             current_layer: LayerKey::Color(0),
             center_at: None,
@@ -163,7 +168,7 @@ pub enum DxfUnits {
 pub struct Imported {
     /// Ids are ObjectId(0): the engine assigns ids.
     pub shapes: Vec<Shape>,
-    /// Layer settings the file carries (OM workspace); applied by the engine.
+    /// Layer settings the file carries (OM workspace or LightBurn project); applied by the engine.
     pub layers: Vec<(LayerKey, ColorLayer)>,
     pub notices: Vec<Notice>,
     pub bounds: Option<Bounds>,
@@ -189,6 +194,7 @@ pub enum Error {
 pub fn sniff(name: &str, bytes: &[u8]) -> Option<Format> {
     let extension = name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase());
     match extension.as_deref() {
+        Some("lbrn2") => Some(Format::Lbrn2),
         Some("svg") => Some(Format::Svg),
         Some("dxf") => Some(Format::Dxf),
         Some("png") => Some(Format::Png),
@@ -204,6 +210,7 @@ pub fn sniff(name: &str, bytes: &[u8]) -> Option<Format> {
         _ if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") => Some(Format::Gif),
         _ if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") => Some(Format::Tiff),
         _ if bytes.get(0..4) == Some(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") => Some(Format::Webp),
+        _ if contains(bytes.get(..bytes.len().min(1 << 20)).unwrap_or(bytes), b"<LightBurnProject") => Some(Format::Lbrn2),
         _ if contains(bytes.get(..bytes.len().min(1 << 20)).unwrap_or(bytes), b"<svg") => Some(Format::Svg),
         _ => None,
     }
@@ -212,6 +219,7 @@ pub fn sniff(name: &str, bytes: &[u8]) -> Option<Format> {
 pub fn import(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Imported, Error> {
     validate_options(opts)?;
     match sniff(name, bytes).ok_or_else(|| Error::UnknownFormat(name.to_owned()))? {
+        Format::Lbrn2 => lbrn2::import(bytes, opts),
         Format::Svg => import_svg(name, bytes, opts),
         Format::Dxf => import_dxf(name, bytes, opts),
         Format::Png | Format::Jpeg | Format::Bmp | Format::Tiff | Format::Webp | Format::Gif => import_raster(name, bytes, opts),
@@ -732,7 +740,22 @@ fn import_raster(name: &str, bytes: &[u8], opts: &ImportOptions) -> Result<Impor
     let file_dpi = raster_dpi(bytes);
     let dpi = file_dpi.unwrap_or(254.0);
     let size_mm = [f64::from(width) * 25.4 / dpi * opts.scale, f64::from(height) * 25.4 / dpi * opts.scale];
-    let gray: Arc<[u8]> = image.to_luma8().into_raw().into();
+    // Preserve the existing luma conversion for opaque images, including 16-bit input. Alpha is coverage
+    // over white, not darkness: a transparent black RGB value must never become a black burn pixel.
+    let gray: Arc<[u8]> = if image.color().has_alpha() {
+        image
+            .to_luma_alpha8()
+            .pixels()
+            .map(|p| {
+                let [luma, alpha] = p.0;
+                let a = u32::from(alpha);
+                ((u32::from(luma) * a + 255 * (255 - a) + 127) / 255) as u8
+            })
+            .collect::<Vec<_>>()
+            .into()
+    } else {
+        image.to_luma8().into_raw().into()
+    };
     let [cx, cy] = opts.center_at.unwrap_or([0.0, 0.0]);
     let bounds = Bounds { min: [cx - size_mm[0] / 2.0, cy - size_mm[1] / 2.0], max: [cx + size_mm[0] / 2.0, cy + size_mm[1] / 2.0] };
     check_placed(bounds.min[0], bounds.min[1], "the image")?;

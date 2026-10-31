@@ -121,6 +121,9 @@ pub struct Session {
     pub(crate) camera_cal: Option<openlaser_camera::StoredCalibration>,
     /// Machine-local calibration persistence, injected like `profiles` (format::DirCalibrationStore).
     pub(crate) camera_store: Option<Arc<dyn openlaser_camera::CalibrationStore>>,
+    /// Start needs a red-light frame of this exact job first (the default). The person can turn it off in the GUI's
+    /// Settings; a typed Rust API only, so no command or control method changes it.
+    pub(crate) frame_required: bool,
 }
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -156,7 +159,17 @@ impl Session {
             camera_pairs: Vec::new(),
             camera_cal,
             camera_store,
+            frame_required: true,
         }
+    }
+
+    /// See `frame_required`. Called by the GUI from the person's own Settings.
+    pub fn set_frame_required(&mut self, on: bool) {
+        self.frame_required = on;
+    }
+
+    pub fn frame_required(&self) -> bool {
+        self.frame_required
     }
 
     pub fn id(&self) -> SessionId {
