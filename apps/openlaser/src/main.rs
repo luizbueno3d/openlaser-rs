@@ -123,6 +123,8 @@ fn main() -> ExitCode {
         Box::new(move |cc| {
             let settings = PersistentSettings::open();
             let in_window_menus = args.in_window_menus || settings.load().in_window_menus;
+            // Before the native menu is built: its labels are fixed until the next start.
+            openlaser_ui_egui::i18n::set_language(settings.load().language);
             let quit_ctx = cc.egui_ctx.clone();
             let mut automation = openlaser::control_runtime::Automation::new(&args, Arc::clone(&registry_for_app), cc.egui_ctx.clone());
             if args.control.is_some() {

@@ -41,14 +41,16 @@ impl NativeFiles {
 }
 
 fn filtered(dialog: rfd::AsyncFileDialog, kind: DialogKind) -> rfd::AsyncFileDialog {
+    use openlaser_ui_egui::i18n::t;
     match kind {
-        DialogKind::OpenProject => dialog.add_filter("Laser projects", &["olp", "lbrn2"]),
-        DialogKind::Import => {
-            dialog.add_filter("Vector and image files", &["lbrn2", "svg", "dxf", "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif", "json"])
-        }
-        DialogKind::SaveProject => dialog.add_filter("OpenLaser Project", &["olp"]),
+        DialogKind::OpenProject => dialog.add_filter(t("Laser projects", "Projetos de laser"), &["olp", "lbrn2"]),
+        DialogKind::Import => dialog.add_filter(
+            t("Vector and image files", "Arquivos vetoriais e de imagem"),
+            &["lbrn2", "svg", "dxf", "png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "gif", "json"],
+        ),
+        DialogKind::SaveProject => dialog.add_filter(t("OpenLaser Project", "Projeto OpenLaser"), &["olp"]),
         DialogKind::ExportGcode => dialog.add_filter("G-code", &["gcode", "nc"]),
-        DialogKind::ExportJob => dialog.add_filter("Job review (JSON)", &["json"]),
+        DialogKind::ExportJob => dialog.add_filter(t("Job review (JSON)", "Revisão do trabalho (JSON)"), &["json"]),
         DialogKind::ExportSvg => dialog.add_filter("SVG", &["svg"]),
     }
 }
