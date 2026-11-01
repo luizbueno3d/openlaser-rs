@@ -634,6 +634,7 @@ impl OpenLaserApp {
             now: self.services.clock.now(),
             thumbnail: openlaser_render::emission_list(&pending.burned, &[], machine),
             emission_cap_pct: None,
+            foot_switch: matches!(&machine.kind, openlaser_machine::Kinematics::Galvo(g) if g.ports.foot_switch.is_some()),
         };
         match self.services.human.arm_dialog(ctx, &model) {
             crate::ArmOutcome::Open => {}

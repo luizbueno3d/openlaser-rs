@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use openlaser_types::{ArmToken, Fingerprint, FrameReceipt, MachineId, MonoTime, Refusal, RefusalCode, SessionId};
 use openlaser_ui_egui::i18n::t;
-use openlaser_ui_egui::{ArmModel, ArmOutcome, tf};
+use openlaser_ui_egui::{ArmModel, ArmOutcome, PedalPress, tf};
 
 use crate::Human;
 use crate::format;
@@ -30,6 +30,11 @@ const FIELD_HINT_PT: &str = "Digite ARM";
 /// An empty checklist can never be confirmed (`mint` refuses it too, SPEC §3.9).
 pub const NO_CHECKLIST: &str = "This machine profile has no checklist, so nothing can be armed. Add one in Device Settings.";
 const NO_CHECKLIST_PT: &str = "Este perfil de máquina não tem lista de verificação, então nada pode ser armado. Adicione uma em Configurações do dispositivo.";
+/// SPEC M3 (design C3.8): the foot switch replaces typing ARM once every item is ticked.
+pub const PEDAL_HINT: &str = "Or tick every item and press the foot switch to ARM.";
+const PEDAL_HINT_PT: &str = "Ou marque todos os itens e pressione o pedal para ARMAR.";
+/// A press inside the dialog counts only within this long of the dialog opening (design C3.8).
+pub const PEDAL_WINDOW: Duration = Duration::from_secs(30);
 const THUMB_SIDE: f32 = 160.0;
 /// How long a Start click stays good for the ARM that follows it (the dialog is built in the next frames).
 const START_CLICK_WINDOW: Duration = Duration::from_secs(2);
@@ -77,6 +82,8 @@ pub(crate) struct ArmDialogState {
     ticked: Vec<bool>,
     automation_seen: bool,
     refusal: Option<String>,
+    /// When this opening was first drawn: a foot-switch press counts only after it, and within [`PEDAL_WINDOW`].
+    opened_at: Option<MonoTime>,
 }
 
 impl ArmDialogState {
@@ -142,18 +149,59 @@ impl Human {
     /// Start with a standing confirmation: mints from the person's real Start click (taken once, ≤ 2 s old) without
     /// drawing the dialog. Never over the bench cap and never in a tainted frame: then the dialog opens as usual.
     fn quick_arm(&mut self, ctx: &egui::Context, model: &ArmModel) -> Option<ArmToken> {
-        let (gesture, clicked_at) = self.start.take()?;
         let now = self.now();
-        if now.saturating_since(clicked_at) > START_CLICK_WINDOW || self.tainted(ctx, ctx.cumulative_pass_nr(), now) {
+        if let Some((gesture, clicked_at)) = self.start.take() {
+            if now.saturating_since(clicked_at) > START_CLICK_WINDOW || self.tainted(ctx, ctx.cumulative_pass_nr(), now) {
+                return None;
+            }
+            if !format::cap_violations(&model.summary.rows, model.emission_cap_pct).is_empty() {
+                return None;
+            }
+            let (typed, ticked) = self.standing_confirmation(model)?;
+            let at = latest(now, model.now);
+            let confirmation = gesture.confirm(&typed, ticked, at);
+            return self.mint(&model.summary, &model.receipt, confirmation, model.checklist.len(), model.session, at).ok();
+        }
+        // The foot switch as Start (SPEC M3): only before the dialog is drawn (a press while it is open is the dialog's,
+        // see `dialog_pedal`), with a standing confirmation, for this machine, a fresh press.
+        if self.arm.key.is_some() {
+            return None;
+        }
+        let press = self.pedal.take()?;
+        if !model.foot_switch || press.machine() != &model.summary.machine || press.at() > now || now.saturating_since(press.at()) > START_CLICK_WINDOW {
             return None;
         }
         if !format::cap_violations(&model.summary.rows, model.emission_cap_pct).is_empty() {
             return None;
         }
-        let (typed, ticked) = self.standing_confirmation(model)?;
-        let at = latest(now, model.now);
-        let confirmation = gesture.confirm(&typed, ticked, at);
-        self.mint(&model.summary, &model.receipt, confirmation, model.checklist.len(), model.session, at).ok()
+        let (_, ticked) = self.standing_confirmation(model)?;
+        let confirmation = crate::pedal::confirm(&press, ticked);
+        self.mint(&model.summary, &model.receipt, confirmation, model.checklist.len(), model.session, latest(now, model.now)).ok()
+    }
+
+    /// A foot-switch press inside the open dialog (design C3.8): after the dialog opened, within [`PEDAL_WINDOW`] of
+    /// it, for this machine, never in a tainted frame. None: no usable press.
+    fn dialog_pedal(&mut self, model: &ArmModel, now: MonoTime, tainted: bool) -> Option<PedalPress> {
+        if !model.foot_switch {
+            self.pedal = None;
+            return None;
+        }
+        let opened = self.arm.opened_at?;
+        let press = self.pedal.take()?;
+        if tainted || press.machine() != &model.summary.machine || press.at() <= opened || press.at() > now {
+            return None;
+        }
+        if press.at().saturating_since(opened) > PEDAL_WINDOW {
+            self.arm.refusal = Some(
+                t(
+                    "The foot switch counts only within 30 s of this dialog opening. Cancel and press Start again, or type ARM.",
+                    "O pedal só vale até 30 s após esta janela abrir. Cancele e pressione Iniciar de novo, ou digite ARM.",
+                )
+                .to_owned(),
+            );
+            return None;
+        }
+        Some(press)
     }
 
     pub(crate) fn show_arm_dialog(&mut self, ctx: &egui::Context, model: &ArmModel) -> ArmOutcome {
@@ -174,6 +222,9 @@ impl Human {
             }
         }
         self.arm.last_pass = Some(pass);
+        if self.arm.opened_at.is_none() {
+            self.arm.opened_at = Some(now);
+        }
         self.mark_shown(pass);
 
         let tainted = self.tainted(ctx, pass, now);
@@ -212,6 +263,9 @@ impl Human {
                 }
             }
             ui.add(egui::TextEdit::singleline(&mut state.typed).hint_text(t(FIELD_HINT, FIELD_HINT_PT)).desired_width(120.0));
+            if model.foot_switch {
+                ui.label(t(PEDAL_HINT, PEDAL_HINT_PT));
+            }
             if state.automation_seen {
                 ui.colored_label(ui.visuals().warn_fg_color, t(AUTOMATION_IGNORED, AUTOMATION_IGNORED_PT));
             }
@@ -235,6 +289,39 @@ impl Human {
             self.arm.forget();
             self.close_surfaces();
             return ArmOutcome::Cancelled;
+        }
+        // The foot switch replaces typing ARM and the Confirm click (design C3.8); the ticks and the cap still hold.
+        let before = self.arm.refusal.clone();
+        let press = self.dialog_pedal(model, now, tainted);
+        if press.is_some() || self.arm.refusal != before {
+            // Whatever the press led to is drawn at once, not at the next input event.
+            ctx.request_repaint();
+        }
+        if let Some(press) = press {
+            if !violations.is_empty() {
+                let r = Refusal::new(RefusalCode::BenchPowerCap, violations.join("; "));
+                self.arm.refusal = Some(refusal_text(&r));
+                return ArmOutcome::Open;
+            }
+            if !self.arm.all_ticked() {
+                self.arm.refusal = Some(t("Tick every item, then press the foot switch.", "Marque todos os itens e pressione o pedal.").to_owned());
+                return ArmOutcome::Open;
+            }
+            let ticked = self.arm.ticked.clone();
+            let confirmation = crate::pedal::confirm(&press, ticked.clone());
+            return match self.mint(&model.summary, &model.receipt, confirmation, model.checklist.len(), model.session, latest(now, model.now)) {
+                Ok(token) => {
+                    self.remembered =
+                        Some(Remembered { session: model.session, checklist: model.checklist.clone(), typed: openlaser_arm::ARM_TEXT.to_owned(), ticked });
+                    self.arm.forget();
+                    self.close_surfaces();
+                    ArmOutcome::Armed(token)
+                }
+                Err(r) => {
+                    self.arm.refusal = Some(refusal_text(&r));
+                    ArmOutcome::Open
+                }
+            };
         }
         // The gate runs every frame for the Confirm button (its visibility timer and the press provenance).
         let Some(confirm) = confirm else { return ArmOutcome::Open };

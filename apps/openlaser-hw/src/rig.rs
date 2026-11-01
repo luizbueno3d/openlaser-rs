@@ -513,7 +513,9 @@ impl Rig for EngineRig {
                     DriverEvent::Finished(Outcome::Finished { duration }) => out.push(RigEvent::Finished(duration)),
                     DriverEvent::Finished(Outcome::Stopped(r)) | DriverEvent::Stopped(r) => out.push(RigEvent::Stopped(r)),
                     DriverEvent::Fault(e) => out.push(RigEvent::Fault(e.to_string())),
-                    DriverEvent::Connected(_) | DriverEvent::State(_) | DriverEvent::Trace(_) => {}
+                    // The TTY flow arms only on the typed `ARM <challenge>`; the foot switch is the GUI's (SPEC M3).
+                    DriverEvent::Connected(_) | DriverEvent::State(_) | DriverEvent::Trace(_) | DriverEvent::Inputs { .. } | DriverEvent::FootSwitch { .. } => {
+                    }
                 },
                 Event::ArmVoided { reason } => out.push(RigEvent::ArmVoided(reason)),
                 _ => {}

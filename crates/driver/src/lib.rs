@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod backend;
+mod foot_switch;
 mod grbl;
 mod lmc_backend;
 mod lmc_ops;
@@ -19,6 +20,7 @@ pub use rotary::RotarySession;
 mod stop;
 
 pub use backend::{Backend, Capabilities, DeviceInfo, DriverError, DriverEvent, EncodedJob, FrameOutcome, MachineState, MachineStatus, Outcome, TraceLine};
+pub use foot_switch::{INPUT_POLL, PedalDetector};
 pub use grbl::{ByteLink, DEFAULT_RX_SIZE, GrblBackend, LinkError};
 pub use lmc_backend::LmcBackend;
 pub use runtime::{AnyDriver, DEAD_MAN_JOIN, DetectedDevice, DeviceProvider, DriverHandle, spawn};

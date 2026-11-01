@@ -21,6 +21,7 @@ use openlaser_types::{ArmToken, Clock, FrameMode, FrameReceipt, MachineId, Refus
 use serde::Serialize;
 
 use crate::backend::{Backend, Capabilities, DriverError, DriverEvent, EncodedJob, FrameOutcome, MachineState, Outcome};
+use crate::foot_switch::{INPUT_POLL, PedalDetector};
 use crate::grbl::{ByteLink, GrblBackend};
 use crate::lmc_backend::LmcBackend;
 use crate::stop::{Cx, CxHooks, StopLatch, StopMailbox, StopReport, Stopper};
@@ -69,6 +70,7 @@ pub fn spawn<B: Backend>(backend: B, machine: MachineId, session: SessionId, clo
     let stopper = Stopper::with_mailbox(Arc::clone(&latch), Arc::clone(&mailbox));
     let thread_name = format!("openlaser-driver {}", machine.0);
     let failure_events = events_tx.clone();
+    let pedal = backend.foot_switch().filter(|_| caps.inputs).map(PedalDetector::new);
     let rt = Runtime {
         backend,
         machine,
@@ -87,6 +89,8 @@ pub fn spawn<B: Backend>(backend: B, machine: MachineId, session: SessionId, clo
         handled_generation: 0,
         signal_handled: false,
         state: MachineState::Disconnected,
+        pedal,
+        last_inputs: None,
     };
     let thread = std::thread::Builder::new().name(thread_name).spawn(move || {
         let _done = done_tx; // dropped when the thread ends, however it ends
@@ -265,6 +269,8 @@ enum Op<R> {
 enum Next<B: Backend> {
     Cmd(Queued<B>),
     Wake,
+    /// Idle with a foot switch set: time to read the inputs.
+    ReadInputs,
     Closed,
 }
 
@@ -289,6 +295,10 @@ struct Runtime<B: Backend> {
     handled_generation: u64,
     signal_handled: bool,
     state: MachineState,
+    /// The foot switch of the profile (SPEC M3): read while connected and idle; None when unset.
+    pedal: Option<PedalDetector>,
+    /// The last input words reported (an `Inputs` event goes out only on a change).
+    last_inputs: Option<[u16; 4]>,
 }
 
 /// Records receipts and answers commands that arrive mid-operation.
@@ -349,6 +359,11 @@ impl<B: Backend> Runtime<B> {
             let queued = self.pending.try_borrow_mut().ok().and_then(|mut p| p.pop_front());
             let next = match queued {
                 Some(q) => Next::Cmd(q),
+                None if self.watching_inputs() => crossbeam_channel::select! {
+                    recv(self.ctl) -> msg => msg.map_or(Next::Closed, Next::Cmd),
+                    recv(self.wake) -> _ => Next::Wake,
+                    default(INPUT_POLL) => Next::ReadInputs,
+                },
                 None => crossbeam_channel::select! {
                     recv(self.ctl) -> msg => msg.map_or(Next::Closed, Next::Cmd),
                     recv(self.wake) -> _ => Next::Wake,
@@ -356,6 +371,7 @@ impl<B: Backend> Runtime<B> {
             };
             match next {
                 Next::Wake => continue,
+                Next::ReadInputs => self.read_inputs(),
                 Next::Closed => break,
                 Next::Cmd(q) => {
                     if matches!(q.cmd, Control::Shutdown) {
@@ -372,12 +388,51 @@ impl<B: Backend> Runtime<B> {
         self.set_state(MachineState::Disconnected);
     }
 
+    /// The input port is read only while connected, without a fault, and idle (never during a frame or run: the
+    /// stream owns the wire then), and only when the profile sets a foot switch.
+    fn watching_inputs(&self) -> bool {
+        self.pedal.is_some() && self.connected && !self.faulted && matches!(self.state, MachineState::Idle | MachineState::Stopped)
+    }
+
+    fn read_inputs(&mut self) {
+        let at = self.clock.now();
+        match self.with_cx(false, |b, cx| b.read_inputs(cx)) {
+            Op::Done(Ok(words)) => {
+                let Some(pedal) = self.pedal.as_mut() else { return };
+                let press = pedal.sample(words, at);
+                let pedal_down = pedal.pressed(words);
+                if self.last_inputs != Some(words) {
+                    self.last_inputs = Some(words);
+                    self.emit(DriverEvent::Inputs { words, pedal_down });
+                }
+                if let Some(at) = press {
+                    self.emit(DriverEvent::FootSwitch { at });
+                }
+            }
+            // A backend that cannot read inputs: stop asking.
+            Op::Done(Err(DriverError::NotImplemented(_))) => self.pedal = None,
+            Op::Done(Err(e)) => self.fault(e),
+            Op::Panicked(report) => {
+                self.faulted = true;
+                self.post_report(report, MachineState::Fault);
+            }
+        }
+    }
+
     fn emit(&self, ev: DriverEvent) {
         let _ = self.events.try_send(ev);
     }
 
     fn set_state(&mut self, s: MachineState) {
         if s != self.state {
+            // Any change (a frame, a run, a stop, a fault, a disconnect) forgets a press in progress: the pedal has
+            // to be released and pressed again afterwards.
+            if let Some(p) = self.pedal.as_mut() {
+                p.reset();
+            }
+            if !matches!(s, MachineState::Idle | MachineState::Stopped) {
+                self.last_inputs = None;
+            }
             self.state = s.clone();
             self.emit(DriverEvent::State(s));
         }

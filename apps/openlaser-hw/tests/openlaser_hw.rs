@@ -1098,6 +1098,8 @@ fn cli_ports_watch_reports_the_pedal_bit_and_its_rest_level_and_never_writes() {
     assert_eq!(out.matches("word 1 bit 15: 0 -> 1").count(), 2, "{out}");
     assert!(out.contains("word 1 bit 15: 4 change(s); rests at 1, so pressing pulls it to 0 (active low)"), "{out}");
     assert!(!out.contains("bit  3:"), "an input that never changed is not reported: {out}");
+    assert!(out.contains("profile set footSwitch.bit 15\n") && out.contains("profile set footSwitch.activeLow true\n"), "{out}");
+    assert!(!out.contains("footSwitch.word"), "word 1 is the default: {out}");
     // ReadPort only: every single on the wire is 0x0025, and no list (nothing that moves or fires) ever went out.
     let text = std::fs::read_to_string(&trace).unwrap();
     let lines: Vec<Value> = text.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).collect();

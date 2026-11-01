@@ -4,7 +4,9 @@
 //!
 //! Keys (galvo profiles): cal.negate.x, cal.negate.y, cal.swapXy, cal.offsetMm, cal.scale, runAhead.maxPackets,
 //! runAhead.maxEmissionS, runAhead.watchdogFactor, runAhead.watchdogSlackS, transferTimeoutMs, usbSetConfiguration,
-//! redDot.offsetMm, redDot.scale, workArea (within h27Cleared), h27Cleared.
+//! redDot.offsetMm, redDot.scale, workArea (within h27Cleared), h27Cleared, and the foot switch (SPEC M3):
+//! footSwitch.bit (0..=15, or `none` to turn the pedal off), footSwitch.word (0..=2), footSwitch.activeLow,
+//! footSwitch.fullPulse, footSwitch.debounceMs. Set them from what `ports --watch` measured.
 
 use std::path::Path;
 
@@ -17,7 +19,7 @@ use crate::args::{ProfileAction, ProfileOpts};
 use crate::rig::DEFAULT_USB_MACHINE;
 use crate::{Env, HwError, Terminal, require_tty};
 
-pub const KEYS: [&str; 29] = [
+pub const KEYS: [&str; 34] = [
     "cal.negate.x",
     "cal.negate.y",
     "cal.swapXy",
@@ -47,6 +49,11 @@ pub const KEYS: [&str; 29] = [
     "rotary.accel_ms",
     "rotary.return_to_start",
     "rotary.max_turns_per_job",
+    "footSwitch.bit",
+    "footSwitch.word",
+    "footSwitch.activeLow",
+    "footSwitch.fullPulse",
+    "footSwitch.debounceMs",
 ];
 
 fn bad(key: &str, value: &str, want: &str) -> HwError {
@@ -135,6 +142,30 @@ fn apply_galvo(g: &mut GalvoMachine, key: &str, v: &str) -> Result<(), HwError> 
             _ => return Err(bad(key, v, "a supported rotary field")),
         }
         g.rotary = Some(r);
+        return Ok(());
+    }
+    if let Some(field) = key.strip_prefix("footSwitch.") {
+        if field == "bit" && v.trim().eq_ignore_ascii_case("none") {
+            g.ports.foot_switch = None;
+            return Ok(());
+        }
+        let small = |want: &str| v.trim().parse::<u16>().map_err(|_| bad(key, v, want));
+        let f = match (&mut g.ports.foot_switch, field) {
+            (slot, "bit") => {
+                let bit = u8::try_from(small("a bit number from 0 to 15, or none")?).map_err(|_| bad(key, v, "a bit number from 0 to 15, or none"))?;
+                slot.get_or_insert_with(|| openlaser_machine::FootSwitchCfg::new(1, bit)).bit = bit;
+                return Ok(());
+            }
+            (Some(f), _) => f,
+            (None, _) => return Err(HwError::Usage(format!("profile set {key}: set footSwitch.bit first (the bit `ports --watch` showed)"))),
+        };
+        match field {
+            "word" => f.word = u8::try_from(small("0, 1 or 2")?).map_err(|_| bad(key, v, "0, 1 or 2"))?,
+            "activeLow" => f.active_low = parse_bool(key, v)?,
+            "fullPulse" => f.full_pulse = parse_bool(key, v)?,
+            "debounceMs" => f.debounce_ms = small("a whole number of milliseconds")?,
+            _ => return Err(bad(key, v, "a supported foot switch field (bit, word, activeLow, fullPulse, debounceMs)")),
+        }
         return Ok(());
     }
     match key {
@@ -363,6 +394,27 @@ mod tests {
         let d = diff(&base, &p);
         assert_eq!(d, vec!["cal.negate: [false,false] → [true,false]".to_owned(), "transferTimeoutMs: 250 → 300".to_owned()]);
     }
+    #[test]
+    fn foot_switch_keys_set_the_measured_input_and_none_turns_it_off() {
+        let mut p = jpt_m7_200();
+        assert!(apply(&mut p, "footSwitch.activeLow", "true").is_err(), "the bit comes first");
+        apply(&mut p, "footSwitch.bit", "15").unwrap();
+        apply(&mut p, "footSwitch.activeLow", "true").unwrap();
+        apply(&mut p, "footSwitch.debounceMs", "40").unwrap();
+        apply(&mut p, "footSwitch.fullPulse", "false").unwrap();
+        let f = galvo(&p).ports.foot_switch.clone().unwrap();
+        assert_eq!((f.word, f.bit, f.active_low, f.full_pulse, f.debounce_ms), (1, 15, true, false, 40));
+        assert!(validate_profile(&p).is_ok());
+        let d = diff(&jpt_m7_200(), &p);
+        assert!(d.iter().any(|l| l.starts_with("ports.footSwitch")), "{d:?}");
+        apply(&mut p, "footSwitch.word", "3").unwrap();
+        assert!(validate_profile(&p).is_err(), "word 3 is the status word");
+        assert!(apply(&mut p, "footSwitch.bit", "300").is_err());
+        assert!(apply(&mut p, "footSwitch.colour", "red").is_err());
+        apply(&mut p, "footSwitch.bit", "none").unwrap();
+        assert_eq!(galvo(&p).ports.foot_switch, None);
+    }
+
     #[test]
     fn every_rotary_field_applies_without_bypassing_profile_validation() {
         let mut p = jpt_m7_200();

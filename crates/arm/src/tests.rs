@@ -271,3 +271,28 @@ fn mint_checks_in_the_documented_order() {
     r.origin = AgentFrame;
     assert_eq!(refused(r, gui("nope"), CHECKLIST, now()), Some(RefusalCode::FrameRequired));
 }
+
+fn pedal(ticked: Vec<bool>, at: MonoTime) -> HumanConfirm {
+    HumanConfirm { kind: ConfirmKind::FootSwitch, typed: String::new(), ticked, at }
+}
+
+#[test]
+fn mint_foot_switch_needs_no_text_but_every_tick_and_the_frame_rules() {
+    // The pedal press replaces the typed ARM: nothing is typed and the token is issued.
+    let token = mint(&summary(), &receipt(), pedal(vec![true; CHECKLIST], now()), CHECKLIST, SESSION, now()).unwrap();
+    assert_eq!(token.bytes(), &BYTES);
+    // Every checklist box still has to be ticked.
+    let mut one_open = vec![true; CHECKLIST];
+    one_open[2] = false;
+    assert_eq!(refused(receipt(), pedal(one_open, now()), CHECKLIST, now()), Some(RefusalCode::ChecklistIncomplete));
+    assert_eq!(refused(receipt(), pedal(vec![true; 2], now()), CHECKLIST, now()), Some(RefusalCode::ChecklistIncomplete));
+    assert_eq!(refused(receipt(), pedal(Vec::new(), now()), 0, now()), Some(RefusalCode::ChecklistIncomplete));
+    // The frame rules are the same as for a click: an agent's frame, a stale press, a press before the frame.
+    assert_eq!(
+        refused(FrameReceipt { origin: AgentFrame, ..receipt() }, pedal(vec![true; CHECKLIST], now()), CHECKLIST, now()),
+        Some(RefusalCode::FrameNotHuman)
+    );
+    let old = MonoTime(now().0.saturating_sub(CONFIRM_MAX_AGE + Duration::from_millis(1)));
+    assert_eq!(refused(receipt(), pedal(vec![true; CHECKLIST], old), CHECKLIST, now()), Some(RefusalCode::ArmExpired));
+    assert_eq!(refused(receipt(), pedal(vec![true; CHECKLIST], t(99.0)), CHECKLIST, now()), Some(RefusalCode::ArmExpired));
+}

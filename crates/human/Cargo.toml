@@ -19,4 +19,5 @@ egui = { workspace = true }
 [dev-dependencies]
 egui_kittest = { workspace = true }
 openlaser-arm = { workspace = true, features = ["test-witness"] }
+openlaser-engine = { workspace = true, features = ["test-pedal"] }
 openlaser-testkit = { workspace = true }
