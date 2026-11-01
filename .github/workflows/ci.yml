@@ -102,6 +102,26 @@ jobs:
       - name: Test (i686)
         run: cargo test --workspace --locked --no-fail-fast --target $env:TARGET
 
+  # The 32-bit smoke tests in their own job, so their answer does not wait for the i686 clippy and test run.
+  windows-x86-smoke:
+    name: smoke (windows-latest, i686)
+    runs-on: windows-latest
+    env:
+      TARGET: i686-pc-windows-msvc
+      MESA: "26.2.5"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: i686-smoke
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
       - name: Build the simulator-only binaries (i686)
         run: cargo build --locked --target $env:TARGET -p openlaser -p openlaser-hw
 
