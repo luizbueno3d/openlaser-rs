@@ -41,6 +41,8 @@ enum Key {
     /// Pressed just as the key session ends: delivered by `Drop`, after the main loop stopped polling (a stop
     /// racing the acceptance of the frame).
     StopWhenDropped(StopKey),
+    /// Sets (true) or clears a simulated board input bit (a foot switch), then counts as one empty poll.
+    Input(u8, bool),
 }
 
 /// How the operator answers the challenge: the typed line, from the challenge printed.
@@ -55,6 +57,8 @@ struct Scripted {
     /// How long the operator takes to type the line, on this clock.
     typing_takes: Option<(Arc<VirtualClock>, Duration)>,
     checklist_len: usize,
+    /// The simulated board inputs `Key::Input` presses.
+    inputs: Option<openlaser_lmc_sim::SimInputs>,
     challenges: Vec<u64>,
     /// (when the challenge was printed, when the confirmation was stamped).
     stamps: Vec<(MonoTime, MonoTime)>,
@@ -70,6 +74,7 @@ impl Scripted {
             typing: None,
             typing_takes: None,
             checklist_len: 4,
+            inputs: None,
             challenges: Vec::new(),
             stamps: Vec::new(),
         }
@@ -113,13 +118,14 @@ impl Terminal for Scripted {
         if !self.tty {
             return Err("not a terminal".into());
         }
-        Ok(Box::new(ScriptedKeys { keys: Arc::clone(&self.keys), stop }))
+        Ok(Box::new(ScriptedKeys { keys: Arc::clone(&self.keys), stop, inputs: self.inputs.clone() }))
     }
 }
 
 struct ScriptedKeys {
     keys: Arc<Mutex<VecDeque<Key>>>,
     stop: StopFn,
+    inputs: Option<openlaser_lmc_sim::SimInputs>,
 }
 
 impl KeySession for ScriptedKeys {
@@ -140,6 +146,12 @@ impl KeySession for ScriptedKeys {
                 KeyPoll::Nothing
             }
             Some(Key::Close) => KeyPoll::Closed,
+            Some(Key::Input(bit, on)) => {
+                if let Some(i) = &self.inputs {
+                    i.set_bit(bit, on);
+                }
+                KeyPoll::Nothing
+            }
             Some(k @ Key::StopWhenDropped(_)) => {
                 keys.push_front(k);
                 KeyPoll::Nothing
@@ -1008,6 +1020,99 @@ fn engine_env(sim: openlaser_lmc_sim::SimConfig) -> (Env, tempfile::TempDir) {
         rigs: Box::new(EngineRigs::new(Some(dir), sim, clock)),
     };
     (env, profiles)
+}
+
+// ---- the input-port probe (H11) ---------------------------------------------------------------------------------
+
+/// [`engine_env`] that also hands back the simulated board inputs.
+fn ports_env() -> (Env, tempfile::TempDir, openlaser_lmc_sim::SimInputs) {
+    let (mut env, profiles) = engine_env(default_sim_config());
+    let rigs = EngineRigs::new(env.profiles_dir.clone(), default_sim_config(), Arc::clone(&env.clock));
+    let inputs = rigs.sim_inputs();
+    env.rigs = Box::new(rigs);
+    (env, profiles, inputs)
+}
+
+#[test]
+fn cli_ports_prints_every_bit_of_the_read_port_reply() {
+    let (mut env, _profiles, inputs) = ports_env();
+    inputs.set(0x8001);
+    // One read needs no TTY, as `status`.
+    let mut term = Scripted::new(false, &[]);
+    assert_eq!(run_with(&argv("ports --sim"), &mut term, &mut env), EXIT_OK, "{}", term.output());
+    let out = term.output();
+    assert!(out.contains("ReadPort (0x0025) reply: 0000 8001 0000"), "{out}");
+    assert!(out.contains("word 1            1000 0000 0000 0001   set: 0, 15"), "{out}");
+    assert!(out.contains("word 3 (status)"), "{out}");
+    assert!(!out.contains("Watching"), "{out}");
+}
+
+#[test]
+fn cli_ports_watch_needs_a_tty_and_opens_nothing_without_one() {
+    let (mut env, s) = fake_env(Script::default());
+    let mut term = Scripted::new(false, &[]);
+    assert_eq!(run_with(&argv("ports --watch --sim"), &mut term, &mut env), EXIT_FAIL);
+    assert!(term.output().contains("not_a_tty"), "{}", term.output());
+    assert_eq!(s.lock().unwrap().opened, 0);
+}
+
+#[cfg(not(feature = "hw"))]
+#[test]
+fn cli_ports_on_usb_requires_hw_feature() {
+    let (mut env, _profiles, _) = ports_env();
+    for sub in ["ports", "ports --watch"] {
+        let mut term = Scripted::new(true, &[]);
+        assert_eq!(run_with(&argv(sub), &mut term, &mut env), EXIT_FAIL, "{sub}");
+        assert!(term.output().contains("hardware_disabled"), "{sub}: {}", term.output());
+    }
+}
+
+#[test]
+fn cli_ports_watch_reports_the_pedal_bit_and_its_rest_level_and_never_writes() {
+    let (mut env, _profiles, inputs) = ports_env();
+    // An active-low pedal on bit 15 (rests at 1) plus an unrelated input on bit 3 that stays set.
+    inputs.set(0x8008);
+    let mut term = Scripted::new(
+        true,
+        &[
+            Key::Wait(2),
+            Key::Input(15, false),
+            Key::Wait(3),
+            Key::Input(15, true),
+            Key::Wait(3),
+            Key::Input(15, false),
+            Key::Wait(3),
+            Key::Input(15, true),
+            Key::Wait(2),
+            Key::Stop(StopKey::Esc),
+        ],
+    );
+    term.inputs = Some(inputs.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let trace = dir.path().join("ports.jsonl");
+    let args = vec!["ports".into(), "--watch".into(), "--sim".into(), "--trace".into(), trace.to_string_lossy().into_owned()];
+    assert_eq!(run_with(&args, &mut term, &mut env), EXIT_OK, "{}", term.output());
+    let out = term.output();
+    assert!(out.contains("Watching the input port"), "{out}");
+    assert_eq!(out.matches("word 1 bit 15: 1 -> 0").count(), 2, "{out}");
+    assert_eq!(out.matches("word 1 bit 15: 0 -> 1").count(), 2, "{out}");
+    assert!(out.contains("word 1 bit 15: 4 change(s); rests at 1, so pressing pulls it to 0 (active low)"), "{out}");
+    assert!(!out.contains("bit  3:"), "an input that never changed is not reported: {out}");
+    // ReadPort only: every single on the wire is 0x0025, and no list (nothing that moves or fires) ever went out.
+    let text = std::fs::read_to_string(&trace).unwrap();
+    let lines: Vec<Value> = text.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).collect();
+    assert!(lines.iter().all(|l| l["kind"] != "list"), "{text}");
+    let singles: Vec<&Value> = lines.iter().filter(|l| l["kind"] == "single").collect();
+    assert!(singles.len() >= 10, "{text}");
+    assert!(singles.iter().all(|l| l["op"] == "ReadPort"), "{text}");
+}
+
+#[test]
+fn cli_ports_watch_with_no_change_says_so() {
+    let (mut env, _profiles, _) = ports_env();
+    let mut term = Scripted::new(true, &[Key::Wait(3), Key::Close]);
+    assert_eq!(run_with(&argv("ports --watch --sim"), &mut term, &mut env), EXIT_OK, "{}", term.output());
+    assert!(term.output().contains("No input bit changed"), "{}", term.output());
 }
 
 /// Presses Enter every second for a minute: the first one after an executed pass is accepted, the earlier ones are

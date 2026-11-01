@@ -13,7 +13,7 @@ use openlaser_engine::{
     FsAuthority, JobOptions, MachineId, MachineProfile, MonoTime, Origin, Outcome, ProfileStore, Session, SessionConfig, SessionId, StopReport,
 };
 use openlaser_format::machines::DirProfileStore;
-use openlaser_lmc_sim::{SimConfig, SimProvider};
+use openlaser_lmc_sim::{SimConfig, SimInputs, SimProvider};
 use openlaser_machine::{FieldRect, GalvoLink, GalvoMachine, Kinematics};
 use openlaser_types::{Clock, RefusalCode};
 use serde_json::{Value, json};
@@ -58,6 +58,8 @@ pub struct ArmView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purpose {
     Status,
+    /// `ports`: ReadPort only (H11).
+    Ports,
     Frame,
     Run,
 }
@@ -98,6 +100,10 @@ pub trait Rig {
     fn run_armed(&mut self, token: ArmToken) -> Result<(), HwError>;
     /// `status`: GetSerialNo + GetVersion only, no init (H12).
     fn probe(&mut self) -> Result<Vec<String>, HwError>;
+    /// `ports` (H11): one `ReadPort` (0x0025) reply, all four words. Reads only: no init, no output, no emission.
+    fn read_port(&mut self) -> Result<[u16; 4], HwError> {
+        Err(HwError::Failed("reading the input port is unavailable on this rig".into()))
+    }
     fn disconnect(&mut self);
 }
 
@@ -121,6 +127,7 @@ fn job_refused(j: openlaser_engine::JobRefused) -> HwError {
 /// `status` (H12): GetSerialNo and GetVersion, each answered within 250 ms or a fault (never retried).
 const PROBE_GET_SERIAL_NO: u16 = 0x0009;
 const PROBE_GET_VERSION: u16 = 0x0007;
+const PROBE_READ_PORT: u16 = 0x0025;
 const PROBE_SLICE: Duration = Duration::from_millis(20);
 const PROBE_BUDGET: Duration = Duration::from_millis(250);
 /// GetVersion word 3 (R05 §1.3).
@@ -131,6 +138,24 @@ fn driver_error(e: openlaser_driver::DriverError) -> HwError {
     match e {
         openlaser_driver::DriverError::Refused(r) => HwError::Refused(r),
         other => HwError::Failed(other.to_string()),
+    }
+}
+
+/// One read-only single (`GetSerialNo`, `GetVersion`, `ReadPort`): its reply within [`PROBE_BUDGET`] or a fault,
+/// never retried.
+fn ask(t: &mut dyn openlaser_driver::LmcTransport, name: &str, op: u16) -> Result<Option<[u16; 4]>, HwError> {
+    t.submit_single(Single([op, 0, 0, 0, 0, 0])).map_err(|e| HwError::Failed(format!("{name}: {e}")))?;
+    let mut polls = 0u32;
+    loop {
+        match t.poll_single(PROBE_SLICE).map_err(|e| HwError::Failed(format!("{name}: {e}")))? {
+            Some(r) => return Ok(r),
+            None => {
+                polls += 1;
+                if PROBE_SLICE * polls >= PROBE_BUDGET {
+                    return Err(HwError::Failed(format!("{name}: no reply within {} ms (not retried)", PROBE_BUDGET.as_millis())));
+                }
+            }
+        }
     }
 }
 
@@ -173,18 +198,24 @@ pub fn detect(term: &mut dyn Terminal) -> Result<(), HwError> {
 pub struct EngineRigs {
     profiles_dir: Option<PathBuf>,
     sim: SimConfig,
+    sim_inputs: SimInputs,
     clock: Arc<dyn Clock>,
 }
 
 impl EngineRigs {
     pub fn new(profiles_dir: Option<PathBuf>, sim: SimConfig, clock: Arc<dyn Clock>) -> Self {
-        EngineRigs { profiles_dir, sim, clock }
+        EngineRigs { profiles_dir, sim, sim_inputs: SimInputs::default(), clock }
+    }
+
+    /// The input port of every `--sim` board these rigs open (tests press a simulated foot switch through it).
+    pub fn sim_inputs(&self) -> SimInputs {
+        self.sim_inputs.clone()
     }
 }
 
 impl RigFactory for EngineRigs {
     fn open(&mut self, spec: &RigSpec) -> Result<Box<dyn Rig>, HwError> {
-        Ok(Box::new(EngineRig::open(spec, self.profiles_dir.as_deref(), &self.sim, Arc::clone(&self.clock))?))
+        Ok(Box::new(EngineRig::open(spec, self.profiles_dir.as_deref(), &self.sim, &self.sim_inputs, Arc::clone(&self.clock))?))
     }
 }
 
@@ -201,6 +232,8 @@ pub struct EngineRig {
     usb_trace: Option<crate::usb_trace::SharedSink>,
     /// The machine's galvo settings, for `status` (None for a gantry).
     galvo: Option<GalvoMachine>,
+    /// `ports`: the transport `ReadPort` is asked on, opened on the first read and kept for the watch.
+    port_reader: Option<Box<dyn openlaser_driver::LmcTransport>>,
 }
 
 struct TraceState {
@@ -252,11 +285,11 @@ pub fn refuse_skipped_profiles(skipped: &[String]) -> Result<(), HwError> {
 }
 
 impl EngineRig {
-    pub fn open(spec: &RigSpec, profiles_dir: Option<&Path>, sim_cfg: &SimConfig, clock: Arc<dyn Clock>) -> Result<Self, HwError> {
+    pub fn open(spec: &RigSpec, profiles_dir: Option<&Path>, sim_cfg: &SimConfig, sim_inputs: &SimInputs, clock: Arc<dyn Clock>) -> Result<Self, HwError> {
         // The hardware gate comes first: without `hw` nothing past this line runs for a real device.
         let usb = if spec.device.sim { None } else { Some(usb_provider()?) };
         let loaded = openlaser_format::machines::load_all(profiles_dir);
-        Self::open_loaded(spec, usb, loaded, profiles_dir, sim_cfg, clock)
+        Self::open_loaded(spec, usb, loaded, profiles_dir, sim_cfg, sim_inputs, clock)
     }
 
     /// [`EngineRig::open`] after the hardware gate, with the profiles `format::machines::load_all` returned.
@@ -266,6 +299,7 @@ impl EngineRig {
         (mut machines, skipped): (Vec<MachineProfile>, Vec<String>),
         profiles_dir: Option<&Path>,
         sim_cfg: &SimConfig,
+        sim_inputs: &SimInputs,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, HwError> {
         refuse_skipped_profiles(&skipped)?;
@@ -284,7 +318,7 @@ impl EngineRig {
         };
         let (mut provider, sim): (Arc<dyn DeviceProvider>, Option<Arc<SimProvider>>) = match usb {
             None => {
-                let s = Arc::new(SimProvider::new(sim_cfg.clone()));
+                let s = Arc::new(SimProvider::new(sim_cfg.clone()).with_inputs(sim_inputs.clone()));
                 (Arc::clone(&s) as Arc<dyn DeviceProvider>, Some(s))
             }
             Some(_) if link_is_sim => return Err(HwError::Usage(format!("`{}` is a simulator profile: add --sim", machine.0))),
@@ -322,7 +356,7 @@ impl EngineRig {
             files: FsAuthority::TrustedLocal,
             clock: Arc::clone(&clock),
         });
-        Ok(EngineRig { rotary: None, session, clock, machine, provider, sim, trace, usb_trace, galvo })
+        Ok(EngineRig { rotary: None, session, clock, machine, provider, sim, trace, usb_trace, galvo, port_reader: None })
     }
 
     fn exec(&mut self, id: &str, params: Value) -> Result<Value, HwError> {
@@ -516,20 +550,7 @@ impl Rig for EngineRig {
         let mut t = self.provider.open_lmc(&g).map_err(driver_error)?;
         let mut lines = Vec::new();
         for (name, op) in [("GetSerialNo", PROBE_GET_SERIAL_NO), ("GetVersion", PROBE_GET_VERSION)] {
-            t.submit_single(Single([op, 0, 0, 0, 0, 0])).map_err(|e| HwError::Failed(format!("{name}: {e}")))?;
-            let mut polls = 0u32;
-            let reply = loop {
-                match t.poll_single(PROBE_SLICE).map_err(|e| HwError::Failed(format!("{name}: {e}")))? {
-                    Some(r) => break r,
-                    None => {
-                        polls += 1;
-                        if PROBE_SLICE * polls >= PROBE_BUDGET {
-                            return Err(HwError::Failed(format!("{name}: no reply within {} ms (not retried)", PROBE_BUDGET.as_millis())));
-                        }
-                    }
-                }
-            };
-            match reply {
+            match ask(t.as_mut(), name, op)? {
                 Some(w) => {
                     let mut line = format!("{name}: {:04x} {:04x} {:04x} {:04x}", w[0], w[1], w[2], w[3]);
                     if op == PROBE_GET_VERSION {
@@ -549,7 +570,24 @@ impl Rig for EngineRig {
         Ok(lines)
     }
 
+    fn read_port(&mut self) -> Result<[u16; 4], HwError> {
+        let t = match &mut self.port_reader {
+            Some(t) => t,
+            None => {
+                let Some(g) = self.galvo.clone() else {
+                    return Err(HwError::refused(RefusalCode::WrongDeviceKind, "`ports` reads LMC (galvo) boards; this machine is a gantry"));
+                };
+                // A freshly opened transport, as `status` uses: no init, no Reset, nothing that moves or fires.
+                self.port_reader.insert(self.provider.open_lmc(&g).map_err(driver_error)?)
+            }
+        };
+        let reply = ask(t.as_mut(), "ReadPort", PROBE_READ_PORT)?.ok_or_else(|| HwError::Failed("ReadPort: the board sent no reply words".into()));
+        self.pump_trace(false);
+        reply
+    }
+
     fn disconnect(&mut self) {
+        self.port_reader = None;
         let m = self.machine.clone();
         let _ = self.session.disconnect(Origin::Human, &m);
         let _ = self.session.poll();
@@ -612,10 +650,10 @@ mod tests {
         let clock: Arc<dyn Clock> = Arc::new(openlaser_types::VirtualClock::new());
         let sim = crate::default_sim_config();
         let loaded = (vec![jpt_m7_200_sim()], vec!["machines/jpt-m7-200-sim.json: not valid JSON".to_owned()]);
-        let err = EngineRig::open_loaded(&spec, None, loaded, None, &sim, Arc::clone(&clock)).err().unwrap();
+        let err = EngineRig::open_loaded(&spec, None, loaded, None, &sim, &SimInputs::default(), Arc::clone(&clock)).err().unwrap();
         assert!(err.to_string().contains("machines/jpt-m7-200-sim.json: not valid JSON"), "{err}");
         // The same profiles with nothing skipped open (no device is touched by opening).
-        let rig = EngineRig::open_loaded(&spec, None, (vec![jpt_m7_200_sim()], Vec::new()), None, &sim, clock).unwrap();
+        let rig = EngineRig::open_loaded(&spec, None, (vec![jpt_m7_200_sim()], Vec::new()), None, &sim, &SimInputs::default(), clock).unwrap();
         assert_eq!(rig.machine(), &MachineId(DEFAULT_SIM_MACHINE.to_owned()));
     }
 
@@ -635,7 +673,7 @@ mod tests {
         let clock: Arc<dyn Clock> = Arc::new(openlaser_types::VirtualClock::new());
         let sim = crate::default_sim_config();
         let board: Arc<dyn DeviceProvider> = Arc::new(SimProvider::new(sim.clone()));
-        let mut rig = EngineRig::open_loaded(&spec, Some(board), (vec![jpt_m7_200()], Vec::new()), None, &sim, clock).unwrap();
+        let mut rig = EngineRig::open_loaded(&spec, Some(board), (vec![jpt_m7_200()], Vec::new()), None, &sim, &SimInputs::default(), clock).unwrap();
         let lines = rig.probe().unwrap();
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[0].starts_with("GetSerialNo: "), "{lines:?}");

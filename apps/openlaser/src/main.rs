@@ -111,7 +111,12 @@ fn main() -> ExitCode {
     let registry_for_app = Arc::clone(&registry);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(if real_laser { "OpenLaser — REAL LASER (USB)" } else { "OpenLaser" })
+            .with_title(match (real_laser, cfg!(feature = "hw")) {
+                (true, _) => "OpenLaser — REAL LASER (USB)",
+                // A laser build started without OPENLASER_HW_PRESENT=1 (a double-clicked openlaser.exe).
+                (false, true) => "OpenLaser — SIMULATOR (no laser): use “Start OpenLaser with laser”",
+                (false, false) => "OpenLaser",
+            })
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([760.0, 480.0])
             .with_icon(app_icon()),
@@ -262,13 +267,15 @@ impl eframe::App for DesktopApp {
 
 /// The machines' device provider: the simulator, or, in a `hw` build run with `OPENLASER_HW_PRESENT=1` and
 /// `OPENLASER_NO_HW` unset, the real USB board (S4, S23), exactly as `openlaser-hw` opens it. The transport still
-/// refuses every open without a bench session (`openlaser-hw bench start`) and caps its first emission.
+/// refuses every open without a bench session (`openlaser-hw bench start`). Otherwise the simulator, which the
+/// status chip and the Laser panel name ("SIMULATOR, no laser") whenever a real machine's profile is active.
 fn device_provider() -> (Arc<dyn DeviceProvider>, bool) {
     #[cfg(feature = "hw")]
     {
         if !openlaser_transport::hardware_disabled() {
             return (Arc::new(openlaser_transport::UsbProvider::new()), true);
         }
+        eprintln!("openlaser: SIMULATOR: OPENLASER_HW_PRESENT=1 is not set, so this window cannot reach the laser. Use “Start OpenLaser with laser”.");
     }
     let sim = SimProvider::new(SimConfig {
         buffer_depth: 3,

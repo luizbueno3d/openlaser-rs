@@ -20,8 +20,8 @@ This page is for Luiz, at the machine. **No AI agent runs any of this.** It is t
 - MacBook lid open (closing it sleeps the Mac mid-job), on power, other heavy apps closed (stop timing depends on an
   idle host). Keep the terminal (or the OpenLaser window) focused: **Esc, Space or Ctrl-C stop the machine**.
 - After every stop, copy the printed `stop …: … in N ms (MO closed: …, ports at 0: …)` line into the log.
-- Start every session with `openlaser-hw bench start`. The software caps the first emission of a session at
-  **10 % power**.
+- Start every session with `openlaser-hw bench start`. There is no software power cap: the job's own power
+  applies from the first emission, so start low (`--power-pct 1`).
 - Record a USB trace for every step (`--trace <file>`), and keep the files: they are how problems get diagnosed.
 
 ## 0. One-time setup (before the cable goes in)
@@ -94,8 +94,7 @@ olhw bench start
 ## 4. HIL-2: first real burns (scrap, eyewear, start at 1 %)
 
 - [ ] `olhw run --builtin dot --power-pct 1 --allow-emission --trace hil2-dot.jsonl` — summary → frame loop →
-      Enter → type `ARM <code>`. Pass: one dot at the field centre; the software refuses anything above 10 % this
-      session.
+      Enter → type `ARM <code>`. Pass: one dot at the field centre.
 - [ ] Then `--builtin line`, `--builtin box10`, `--builtin square50` (low power). Pass: the 50 mm square measures
       50 ± 0.1 mm (compare with the Python version's).
 - [ ] **Key switch mid-job:** during a low-power mark, turn the key off. Pass: emission stops immediately.
@@ -159,7 +158,7 @@ close them:
    - **A crash keeps marking.** If the program dies mid-job (crash, `kill -9`, Force Quit, cable pull, Mac sleep),
      MO stays open and the board runs what it already holds. That is at most 3 packets and about 2 s by the time
      estimate, and one long slow packet can hold more. If the board runs slower than estimated, it is longer.
-   - **The first-emission cap is software-only.** The 10 % limit is a software check, as is every power refusal.
+   - **Power refusals are software-only.** Every power check is a software check; there is no first-emission cap.
 2. **Underrun behaviour is unknown (H-UR).**
    - **The board may run dry.** If the Mac stalls longer than the board's queue (a few hundred ms to 2 s), the board
      runs out of work mid-list. The software side is tested: no early write, no extra ExecuteList, and a watchdog stop

@@ -12,6 +12,8 @@ pub const USAGE: &str = "\
 usage:
   openlaser-hw detect                                       read-only enumeration (needs a `hw` build)
   openlaser-hw status  [--machine <id>] [--sim] [--trace <f>]
+  openlaser-hw ports   [--watch] [--machine <id>] [--sim] [--trace <f>]
+                                                            read the input port bits (foot switch, door); never writes
   openlaser-hw rotary  move --deg <d> | pos [--machine <id>] [--sim] [--trace <f>]
   openlaser-hw bench   start|status|end
   openlaser-hw profile show|set <key> <value>|import-om <calibration.json>|import-ezcad <markcfg> [--machine <id>]
@@ -40,6 +42,13 @@ pub struct DeviceOpts {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StatusOpts {
+    pub device: DeviceOpts,
+}
+
+/// `ports` (H11): read the LMC input port word, once or (`--watch`) until a stop key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortsOpts {
+    pub watch: bool,
     pub device: DeviceOpts,
 }
 
@@ -92,6 +101,7 @@ pub enum Cmd {
     Help,
     Detect,
     Status(StatusOpts),
+    Ports(PortsOpts),
     Bench(BenchCmd),
     Profile(ProfileOpts),
     Frame(FrameOpts),
@@ -204,6 +214,11 @@ pub fn parse(args: &[String]) -> Result<Cmd, HwError> {
             let f = Flags::parse("status", rest, &DEVICE_VALUED, &["--sim"])?;
             f.no_positional()?;
             Ok(Cmd::Status(StatusOpts { device: f.device() }))
+        }
+        "ports" => {
+            let f = Flags::parse("ports", rest, &DEVICE_VALUED, &["--sim", "--watch"])?;
+            f.no_positional()?;
+            Ok(Cmd::Ports(PortsOpts { watch: f.has("--watch"), device: f.device() }))
         }
         "bench" => match rest {
             [s] if s == "start" => Ok(Cmd::Bench(BenchCmd::Start)),
@@ -329,6 +344,12 @@ mod tests {
         assert!(s.device.sim);
         assert_eq!(s.device.machine, Some(MachineId("jpt-m7-200-sim".into())));
         assert_eq!(s.device.trace, Some(PathBuf::from("t.jsonl")));
+        assert_eq!(p("ports").ok(), Some(Cmd::Ports(PortsOpts { watch: false, device: DeviceOpts::default() })));
+        let Ok(Cmd::Ports(po)) = p("ports --watch --sim --machine jpt-m7-200-sim") else { panic!("ports") };
+        assert!(po.watch && po.device.sim);
+        assert!(is_usage(p("ports --watch --watch")));
+        assert!(is_usage(p("ports 15")));
+        assert!(is_usage(p("ports --write 1")));
         let Ok(Cmd::Profile(pr)) = p("profile set cal.negate.x true --machine jpt-m7-200") else { panic!("profile") };
         assert_eq!(pr.action, ProfileAction::Set { key: "cal.negate.x".into(), value: "true".into() });
         let Ok(Cmd::Frame(fr)) = p("frame --builtin corners --extent 110 --loop --style contour --source both --sim") else { panic!("frame") };

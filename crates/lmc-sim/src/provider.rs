@@ -7,7 +7,7 @@ use openlaser_lmc::LmcTransport;
 use openlaser_machine::{GalvoMachine, GantryMachine};
 use openlaser_types::{Clock, Refusal, RefusalCode, SystemClock};
 
-use crate::fake::{FakeLmc, Recorder, SimConfig};
+use crate::fake::{FakeLmc, Recorder, SimConfig, SimInputs};
 use crate::grbl::FakeGrbl;
 
 /// USBLMCV4 (SPEC §5.1).
@@ -20,11 +20,24 @@ pub struct SimProvider {
     /// SystemClock-paced by default.
     clock: Arc<dyn Clock>,
     last_recorder: Mutex<Option<Arc<Recorder>>>,
+    /// Every board this provider opens reads these inputs.
+    inputs: SimInputs,
 }
 
 impl SimProvider {
     pub fn new(cfg: SimConfig) -> Self {
-        SimProvider { cfg, clock: Arc::new(SystemClock::new()), last_recorder: Mutex::new(None) }
+        SimProvider { cfg, clock: Arc::new(SystemClock::new()), last_recorder: Mutex::new(None), inputs: SimInputs::default() }
+    }
+
+    /// Shares `inputs` with whoever presses them (a test, the hw CLI's rigs).
+    pub fn with_inputs(mut self, inputs: SimInputs) -> Self {
+        self.inputs = inputs;
+        self
+    }
+
+    /// The simulated input port (a foot switch, a door) of every board this provider opens.
+    pub fn inputs(&self) -> SimInputs {
+        self.inputs.clone()
     }
 
     pub fn last_recorder(&self) -> Option<Arc<Recorder>> {
@@ -73,6 +86,7 @@ impl DeviceProvider for SimProvider {
         let mut board = FakeLmc::new(self.cfg.clone(), Arc::clone(&self.clock));
         *self.last_recorder.lock().unwrap_or_else(|e| e.into_inner()) = Some(board.recorder());
         board.set_field_mm(m.field_f());
+        board.set_inputs(self.inputs.clone());
         Ok(Box::new(board))
     }
 
