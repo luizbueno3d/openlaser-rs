@@ -21,6 +21,7 @@ pub mod bench;
 pub mod builtin;
 pub mod flow;
 pub mod plain;
+pub mod ports;
 pub mod profile;
 pub mod rig;
 pub mod stop;
@@ -238,6 +239,7 @@ fn execute(cmd: Cmd, term: &mut dyn Terminal, env: &mut Env) -> Result<(), HwErr
         Cmd::Detect => rig::detect(term),
         Cmd::Rotary { degrees, device } => flow::rotary(degrees, &device, term, env),
         Cmd::Status(o) => flow::status(&o, term, env),
+        Cmd::Ports(o) => ports::run(&o, term, env),
         Cmd::Bench(b) => bench::run(b, term),
         Cmd::Profile(p) => profile::run(&p, term, env),
         Cmd::Frame(o) => flow::frame(&o, term, env),

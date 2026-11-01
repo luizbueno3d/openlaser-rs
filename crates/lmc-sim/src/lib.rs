@@ -7,7 +7,7 @@ mod fake;
 pub mod grbl;
 mod provider;
 
-pub use fake::{FakeLmc, Fault, Recorder, Recording, SimConfig, SimWire, WireHook, simulate_job};
+pub use fake::{FakeLmc, Fault, Recorder, Recording, SimConfig, SimInputs, SimWire, WireHook, simulate_job};
 pub use provider::SimProvider;
 
 // Re-exports for callers that name these through the simulator (SPEC §3.0).

@@ -56,6 +56,7 @@ pub fn single_name(op: u16) -> String {
         0x001F => "StopExecute",
         0x0021 => "WritePort",
         0x0022 => "WriteAnalogPort1",
+        0x0025 => "ReadPort",
         0x002E => "SetFpkParam2",
         0x0032 => "SetFlyRes",
         0x0033 => "Fiber_SetMo",

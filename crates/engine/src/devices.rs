@@ -314,6 +314,15 @@ impl Session {
         }
     }
 
+    /// The device provider's name (`"sim"` for the simulator, `"usb"` for the real board), None without devices. The
+    /// GUI names the simulator with it, so a window that cannot reach the laser never looks as if it could.
+    pub fn device_provider_name(&self) -> Option<&'static str> {
+        match &self.cfg.devices {
+            DeviceAccess::None => None,
+            DeviceAccess::Provider(p) => Some(p.name()),
+        }
+    }
+
     pub(crate) fn slot(&self, m: &MachineId) -> Option<&Slot> {
         self.hub.iter().find(|s| &s.machine == m)
     }

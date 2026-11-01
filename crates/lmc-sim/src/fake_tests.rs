@@ -444,3 +444,25 @@ fn polls_return_when_the_transfer_completes_not_after_a_whole_slice() {
     assert_eq!(b.poll_single(slice), Ok(None));
     assert_eq!(clock.now().saturating_since(t2), slice);
 }
+
+#[test]
+fn read_port_reports_the_shared_inputs_and_changes_nothing() {
+    let clock = Arc::new(VirtualClock::new());
+    let mut b = FakeLmc::new(config(), clock);
+    let inputs = SimInputs::default();
+    b.set_inputs(inputs.clone());
+    let read = |b: &mut FakeLmc| {
+        b.submit_single(Single([op::READ_PORT, 0, 0, 0, 0, 0])).unwrap_or_else(|e| panic!("{e}"));
+        b.poll_single(b.cfg.transfer_latency).unwrap_or_else(|e| panic!("{e}")).unwrap_or(None).unwrap_or([0xffff; 4])
+    };
+    assert_eq!(read(&mut b)[1], 0);
+    inputs.set_bit(15, true);
+    inputs.set_bit(3, true);
+    assert_eq!(read(&mut b)[1], 0x8008);
+    inputs.set_bit(15, false);
+    inputs.set_bit(16, true);
+    assert_eq!(read(&mut b)[1], 0x0008);
+    let rec = b.recorder().snapshot();
+    assert!(!rec.mo);
+    assert_eq!(rec.port, 0, "reading the inputs never writes an output");
+}

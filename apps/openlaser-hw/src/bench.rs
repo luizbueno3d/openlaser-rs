@@ -22,14 +22,14 @@ mod imp {
         match cmd {
             BenchCmd::Start => {
                 bench::start_from_tty()?;
-                term.write("Bench session started (valid for 2 h). The first emission is capped at 10 % power.\n");
+                term.write("Bench session started (valid for 2 h).\n");
                 Ok(())
             }
             BenchCmd::Status => {
                 bench::valid()?;
                 match bench::emission_cap_pct()? {
-                    Some(cap) => term.write(&format!("Bench session valid. First emission still capped at {cap} %.\n")),
-                    None => term.write("Bench session valid. The first emission has completed; no cap.\n"),
+                    Some(cap) => term.write(&format!("Bench session valid. Emission capped at {cap} %.\n")),
+                    None => term.write("Bench session valid. No power cap: the job's own power applies.\n"),
                 }
                 Ok(())
             }
