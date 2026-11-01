@@ -115,6 +115,7 @@ fn main() -> ExitCode {
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([760.0, 480.0])
             .with_icon(app_icon()),
+        wgpu_options: wgpu_options(),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -167,6 +168,21 @@ fn main() -> ExitCode {
         None => ExitCode::SUCCESS,
         Some((error, graphics)) => explain_failure(&error, graphics),
     }
+}
+
+/// 32-bit Windows: DirectX 12 and OpenGL only, unless `WGPU_BACKEND` says otherwise. wgpu's Vulkan backend aborts the
+/// 32-bit program inside its debug-message callback (CI, i686 on the runner's Vulkan driver), and the old Intel
+/// graphics such PCs have ship no 32-bit Vulkan driver anyway. Every other build keeps eframe's default.
+fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    #[allow(unused_mut)]
+    let mut options = eframe::egui_wgpu::WgpuConfiguration::default();
+    #[cfg(all(windows, target_arch = "x86"))]
+    if std::env::var_os(openlaser::WGPU_BACKEND).is_none()
+        && let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup
+    {
+        setup.instance_descriptor.backends = eframe::wgpu::Backends::DX12 | eframe::wgpu::Backends::GL;
+    }
+    options
 }
 
 /// Windows: a release build has no console, so a failed start says why in a message box. When the graphics failed

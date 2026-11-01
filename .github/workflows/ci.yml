@@ -143,7 +143,9 @@ jobs:
             Remove-Item Env:WGPU_BACKEND -ErrorAction SilentlyContinue
             Write-Host "--- $exe, WGPU_BACKEND='$backend': windows [$($windows -join ' | ')], exited: $($p.HasExited)"
             Get-Content $log -ErrorAction SilentlyContinue
-            if ($windows -notcontains 'OpenLaser') { throw "the OpenLaser window did not open (WGPU_BACKEND='$backend')" }
+            if ($windows -notcontains 'OpenLaser') { $script:failed += "WGPU_BACKEND='$backend'" }
           }
+          $failed = @()
           Test-Window (Resolve-Path "target/$env:TARGET/debug/openlaser.exe").Path ''
           Test-Window (Resolve-Path "$env:RUNNER_TEMP/gl/openlaser.exe").Path 'gl'
+          if ($failed.Count -gt 0) { throw "the OpenLaser window did not open: $($failed -join ', ')" }

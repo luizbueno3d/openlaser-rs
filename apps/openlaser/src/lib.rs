@@ -208,7 +208,7 @@ pub fn graphics_failure(error: &str, backend: Option<&std::ffi::OsStr>) -> Graph
         return GraphicsFailure::RetryWithGl;
     }
     GraphicsFailure::Explain(format!(
-        "OpenLaser could not start its graphics (DirectX 12, Vulkan and OpenGL were tried).\n\n{error}\n\n\
+        "OpenLaser could not start its graphics (DirectX 12, Vulkan or OpenGL).\n\n{error}\n\n\
          Install the newest driver for this PC's graphics from its maker (Intel, AMD or NVIDIA), then start OpenLaser \
          again. \"OpenLaser diagnostics\" lists the graphics card and its driver."
     ))
