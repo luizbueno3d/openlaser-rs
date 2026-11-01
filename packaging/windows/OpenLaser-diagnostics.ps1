@@ -104,7 +104,7 @@ Guard 'Windows version' {
     } elseif ($script:exeArch -eq 'x86') {
         Good 'Windows is 32-bit and this is the 32-bit (windows-x86) download of OpenLaser'
     } elseif ($script:exeArch) {
-        Problem "Windows is 32-bit, but these programs are $package: download OpenLaser-...-windows-x86.zip instead"
+        Problem "Windows is 32-bit, but these programs are ${package}: download OpenLaser-...-windows-x86.zip instead"
     } else {
         Problem 'Windows is 32-bit: use the 32-bit download, OpenLaser-...-windows-x86.zip'
     }
