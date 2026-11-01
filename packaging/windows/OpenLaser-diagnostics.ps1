@@ -169,7 +169,7 @@ Guard 'Graphics card' {
             Note 'Windows uses its basic display driver: if the OpenLaser window does not open, install the graphics card driver'
         }
         if ($v.Name -match 'Intel\(R\) HD Graphics$|Intel\(R\) HD Graphics [0-9]{4}$') {
-            Note "older Intel graphics ($($v.Name)): OpenLaser starts on OpenGL if DirectX 12 is not available. If its window does not open, install Intel's newest driver for it"
+            Note "older Intel graphics ($($v.Name)): the 32-bit OpenLaser draws with OpenGL, which it has. If the window does not open, install Intel's newest driver for it"
         }
     }
 }

@@ -35,8 +35,9 @@ There are two Windows downloads. Pick the one for your Windows (Settings > Syste
   OpenLaser-...-windows-x86.zip    32-bit Windows 10 ("32-bit operating system"). It also runs on 64-bit Windows.
 "OpenLaser diagnostics" (step 3) says whether the download fits this PC.
 
-If the OpenLaser window does not open, a message says why. On older graphics without DirectX 12 OpenLaser starts
-again on OpenGL by itself; if that fails too, install the newest driver for the graphics card from its maker.
+If the OpenLaser window does not open, a message says why: install the newest driver for the graphics card from its
+maker. The 32-bit download draws with OpenGL (old Intel HD graphics have it); the 64-bit one with DirectX 12, Vulkan
+or OpenGL, whichever works.
 
 1. Unzip the folder anywhere (for example Documents): right-click the .zip, Extract All. Keep the files together.
 2. If Windows shows "Windows protected your PC", click "More info", then "Run anyway".

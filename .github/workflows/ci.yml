@@ -73,7 +73,8 @@ jobs:
 
   # 32-bit Windows (Luiz, 2026-11-01: a buyer's PC runs 32-bit Windows 10 on old Intel graphics). The tests run as
   # 32-bit programs on the 64-bit runner. Then default-feature (simulator-only) binaries are smoke-tested: the CLI, and
-  # the GUI window on the runner's own graphics and on OpenGL alone (Mesa's software OpenGL, test-only, never shipped).
+  # the GUI window, which on 32-bit Windows runs on OpenGL alone: Mesa's software OpenGL stands in for a graphics driver
+  # (test-only, never shipped; the runner has no OpenGL 3.3 driver of its own).
   # Nothing here is a `hw` build; OPENLASER_NO_HW=1 stays set.
   windows-x86:
     name: test (windows-latest, i686)
@@ -146,6 +147,6 @@ jobs:
             if ($windows -notcontains 'OpenLaser') { $script:failed += "WGPU_BACKEND='$backend'" }
           }
           $failed = @()
-          Test-Window (Resolve-Path "target/$env:TARGET/debug/openlaser.exe").Path ''
+          Test-Window (Resolve-Path "$env:RUNNER_TEMP/gl/openlaser.exe").Path ''
           Test-Window (Resolve-Path "$env:RUNNER_TEMP/gl/openlaser.exe").Path 'gl'
           if ($failed.Count -gt 0) { throw "the OpenLaser window did not open: $($failed -join ', ')" }

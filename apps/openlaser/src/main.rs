@@ -170,9 +170,11 @@ fn main() -> ExitCode {
     }
 }
 
-/// 32-bit Windows: DirectX 12 and OpenGL only, unless `WGPU_BACKEND` says otherwise. wgpu's Vulkan backend aborts the
-/// 32-bit program inside its debug-message callback (CI, i686 on the runner's Vulkan driver), and the old Intel
-/// graphics such PCs have ship no 32-bit Vulkan driver anyway. Every other build keeps eframe's default.
+/// 32-bit Windows: OpenGL (WGL) only, unless `WGPU_BACKEND` says otherwise. CI (i686 on windows-latest) found the other
+/// backends broken in a 32-bit program: Vulkan aborts inside wgpu's debug-message callback, and DirectX 12 (WARP)
+/// fails to compile egui's shader, which wgpu reports as a panic, not an error. OpenGL opened the window. The old
+/// Intel graphics such PCs have ship no 32-bit Vulkan or DirectX 12 driver anyway. Every other build keeps eframe's
+/// default.
 fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     #[allow(unused_mut)]
     let mut options = eframe::egui_wgpu::WgpuConfiguration::default();
@@ -180,7 +182,7 @@ fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     if std::env::var_os(openlaser::WGPU_BACKEND).is_none()
         && let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup
     {
-        setup.instance_descriptor.backends = eframe::wgpu::Backends::DX12 | eframe::wgpu::Backends::GL;
+        setup.instance_descriptor.backends = eframe::wgpu::Backends::GL;
     }
     options
 }
