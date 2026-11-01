@@ -30,14 +30,18 @@ macOS (Apple Silicon and Intel, macOS 11 or later)
 Windows (10 and 11, 64-bit)
 ---------------------------
 
-1. Unzip the folder anywhere (for example Documents). Keep the files together.
+1. Unzip the folder anywhere (for example Documents): right-click the .zip, Extract All. Keep the files together.
 2. If Windows shows "Windows protected your PC", click "More info", then "Run anyway".
-3. One-time driver change, needed for the laser board:
-   a. Download Zadig from https://zadig.akeo.ie and open it, with the laser plugged in and powered.
-   b. Options > List All Devices. Pick the device whose USB ID is 9588 9899.
-   c. Choose WinUSB as the driver and click "Replace Driver" (or "Install Driver").
-   This replaces EZCAD's driver: EZCAD will not see the board on this PC until you reinstall its driver
-   (Device Manager > the device > Update driver).
+3. With the laser plugged in and powered, run "OpenLaser diagnostics". It only reads: it changes nothing on the PC
+   and saves OpenLaser-diagnostics.txt on the Desktop. Its SUMMARY says what the laser board's driver needs:
+   - already WinUSB: change nothing;
+   - no driver: install WinUSB (step 4), nothing to back up;
+   - another driver (EZCAD's): back it up first with the pnputil command the report prints, then step 4.
+4. Only if step 3 says so: download Zadig from https://zadig.akeo.ie and open it. Options > List All Devices, pick the
+   device whose USB ID is 9588 9899, choose WinUSB and click "Install Driver" (or "Replace Driver").
+   EZCAD cannot use the board on this PC while it is on WinUSB. To go back: Device Manager > the device > Update
+   driver > Browse my computer, and pick the backup folder (or install EZCAD's driver from its installer).
+5. Run "OpenLaser diagnostics" again: it should say that OpenLaser sees the board on WinUSB.
 
 
 First time on your laser

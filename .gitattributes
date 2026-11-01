@@ -12,4 +12,5 @@ tests/fixtures/** -text
 
 # Files shipped in the Windows download: CRLF so cmd.exe and old Notepad read them.
 packaging/windows/*.cmd text eol=crlf
+packaging/windows/*.ps1 text eol=crlf
 packaging/README.txt text eol=crlf
