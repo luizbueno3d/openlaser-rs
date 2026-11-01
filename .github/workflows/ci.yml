@@ -70,3 +70,103 @@ jobs:
 
       - name: Golden fixtures
         run: cargo xtask golden-verify
+
+  # 32-bit Windows (Luiz, 2026-11-01: a buyer's PC runs 32-bit Windows 10 on old Intel graphics). The tests run as
+  # 32-bit programs on the 64-bit runner. Then default-feature (simulator-only) binaries are smoke-tested: the CLI, and
+  # the GUI window, which on 32-bit Windows runs on OpenGL alone: Mesa's software OpenGL stands in for a graphics driver
+  # (test-only, never shipped; the runner has no OpenGL 3.3 driver of its own).
+  # Nothing here is a `hw` build; OPENLASER_NO_HW=1 stays set.
+  windows-x86:
+    name: test (windows-latest, i686)
+    runs-on: windows-latest
+    env:
+      TARGET: i686-pc-windows-msvc
+      MESA: "26.2.5"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: i686
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
+      - name: Clippy (i686)
+        run: cargo clippy --workspace --all-targets --locked --target $env:TARGET -- -D warnings
+
+      - name: Test (i686)
+        run: cargo test --workspace --locked --no-fail-fast --target $env:TARGET
+
+  # The 32-bit smoke tests in their own job, so their answer does not wait for the i686 clippy and test run.
+  windows-x86-smoke:
+    name: smoke (windows-latest, i686)
+    runs-on: windows-latest
+    env:
+      TARGET: i686-pc-windows-msvc
+      MESA: "26.2.5"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: i686-smoke
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
+      - name: Build the simulator-only binaries (i686)
+        run: cargo build --locked --target $env:TARGET -p openlaser -p openlaser-hw
+
+      - name: Smoke-test the CLI (simulator only)
+        shell: pwsh
+        run: |
+          $hw = "target/$env:TARGET/debug/openlaser-hw.exe"
+          & $hw --help
+          if ($LASTEXITCODE -ne 0) { throw "openlaser-hw --help exited $LASTEXITCODE" }
+          & $hw status --sim
+          if ($LASTEXITCODE -ne 0) { throw "openlaser-hw status --sim exited $LASTEXITCODE" }
+
+      - name: Get Mesa's software OpenGL (x86, test-only)
+        shell: pwsh
+        run: |
+          $archive = "$env:RUNNER_TEMP/mesa.7z"
+          Invoke-WebRequest "https://github.com/pal1000/mesa-dist-win/releases/download/$env:MESA/mesa3d-$env:MESA-release-msvc.7z" -OutFile $archive
+          (Get-FileHash $archive -Algorithm SHA256).Hash
+          7z x $archive "-o$env:RUNNER_TEMP/mesa" x86 -y | Out-Null
+          $gl = "$env:RUNNER_TEMP/gl"
+          New-Item -ItemType Directory $gl | Out-Null
+          Copy-Item "target/$env:TARGET/debug/openlaser.exe" $gl
+          Copy-Item "$env:RUNNER_TEMP/mesa/x86/*.dll" $gl
+          Get-ChildItem $gl
+
+      - name: Smoke-test the GUI window
+        shell: pwsh
+        run: |
+          # Starts openlaser.exe (simulator only), waits, and checks that its main window (title "OpenLaser") is up.
+          # A failed start shows a message box titled "OpenLaser: cannot start" instead, or the process exits.
+          function Test-Window([string]$exe, [string]$backend) {
+            Get-Process openlaser -ErrorAction SilentlyContinue | Stop-Process -Force
+            if ($backend) { $env:WGPU_BACKEND = $backend } else { Remove-Item Env:WGPU_BACKEND -ErrorAction SilentlyContinue }
+            $name = if ($backend) { $backend } else { 'default' }
+            $log = "$env:RUNNER_TEMP/gui-$name.log"
+            $p = Start-Process $exe -PassThru -RedirectStandardError $log -WorkingDirectory (Split-Path $exe)
+            Start-Sleep -Seconds 20
+            $windows = @(Get-Process openlaser -ErrorAction SilentlyContinue | ForEach-Object { $_.MainWindowTitle })
+            Get-Process openlaser -ErrorAction SilentlyContinue | Stop-Process -Force
+            Remove-Item Env:WGPU_BACKEND -ErrorAction SilentlyContinue
+            Write-Host "--- $exe, WGPU_BACKEND='$backend': windows [$($windows -join ' | ')], exited: $($p.HasExited)"
+            Get-Content $log -ErrorAction SilentlyContinue
+            if ($windows -notcontains 'OpenLaser') { $script:failed += "WGPU_BACKEND='$backend'" }
+          }
+          $failed = @()
+          Test-Window (Resolve-Path "$env:RUNNER_TEMP/gl/openlaser.exe").Path ''
+          Test-Window (Resolve-Path "$env:RUNNER_TEMP/gl/openlaser.exe").Path 'gl'
+          if ($failed.Count -gt 0) { throw "the OpenLaser window did not open: $($failed -join ', ')" }

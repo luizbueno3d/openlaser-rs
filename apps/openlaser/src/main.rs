@@ -115,6 +115,7 @@ fn main() -> ExitCode {
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([760.0, 480.0])
             .with_icon(app_icon()),
+        wgpu_options: wgpu_options(),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -154,18 +155,77 @@ fn main() -> ExitCode {
             }))
         }),
     );
-    let code = match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("openlaser: {error}");
-            ExitCode::FAILURE
-        }
-    };
+    let failure = result.err().map(|error| {
+        eprintln!("openlaser: {error}");
+        let graphics = matches!(error, eframe::Error::Wgpu(_));
+        (error.to_string(), graphics)
+    });
     // Fail-safe stop (UI §7.5): Dock Quit, logout and `terminate:` end the event loop through
     // `applicationWillTerminate`, which bypasses `CloseRequested`, so the close guard never ran.
     // A repeated stop on an already-stopped machine is a no-op.
     let _ = openlaser::stop_all_bounded(&registry, openlaser::STOP_BUDGET);
-    code
+    match failure {
+        None => ExitCode::SUCCESS,
+        Some((error, graphics)) => explain_failure(&error, graphics),
+    }
+}
+
+/// 32-bit Windows: OpenGL (WGL) only, unless `WGPU_BACKEND` says otherwise. CI (i686 on windows-latest) found the other
+/// backends broken in a 32-bit program: Vulkan aborts inside wgpu's debug-message callback, and DirectX 12 (WARP)
+/// fails to compile egui's shader, which wgpu reports as a panic, not an error. OpenGL opened the window. The old
+/// Intel graphics such PCs have ship no 32-bit Vulkan or DirectX 12 driver anyway. Every other build keeps eframe's
+/// default.
+fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    #[allow(unused_mut)]
+    let mut options = eframe::egui_wgpu::WgpuConfiguration::default();
+    #[cfg(all(windows, target_arch = "x86"))]
+    if std::env::var_os(openlaser::WGPU_BACKEND).is_none()
+        && let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup
+    {
+        setup.instance_descriptor.backends = eframe::wgpu::Backends::GL;
+    }
+    options
+}
+
+/// Windows: a release build has no console, so a failed start says why in a message box. When the graphics failed
+/// and nobody chose a wgpu backend, OpenLaser first starts once more on OpenGL alone (old Intel graphics without
+/// DirectX 12 or Vulkan). The window never opened, so no machine was connected.
+#[cfg(windows)]
+fn explain_failure(error: &str, graphics: bool) -> ExitCode {
+    let text = if graphics {
+        match openlaser::graphics_failure(error, std::env::var_os(openlaser::WGPU_BACKEND).as_deref()) {
+            openlaser::GraphicsFailure::RetryWithGl => {
+                if let Some(code) = restart_with_gl() {
+                    return code;
+                }
+                format!("OpenLaser could not start its graphics, and could not start again on OpenGL.\n\n{error}")
+            }
+            openlaser::GraphicsFailure::Explain(text) => text,
+        }
+    } else {
+        format!("OpenLaser could not start.\n\n{error}")
+    };
+    let _ = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("OpenLaser: cannot start")
+        .set_description(text)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+    ExitCode::FAILURE
+}
+
+#[cfg(not(windows))]
+fn explain_failure(_error: &str, _graphics: bool) -> ExitCode {
+    ExitCode::FAILURE
+}
+
+/// Runs this program again with the same arguments and `WGPU_BACKEND=gl`, and returns its exit status.
+#[cfg(windows)]
+fn restart_with_gl() -> Option<ExitCode> {
+    let exe = std::env::current_exe().ok()?;
+    eprintln!("openlaser: starting again with {}=gl", openlaser::WGPU_BACKEND);
+    let status = std::process::Command::new(exe).args(std::env::args_os().skip(1)).env(openlaser::WGPU_BACKEND, "gl").status().ok()?;
+    Some(ExitCode::from(status.code().and_then(|c| u8::try_from(c).ok()).unwrap_or(1)))
 }
 
 struct DesktopApp {

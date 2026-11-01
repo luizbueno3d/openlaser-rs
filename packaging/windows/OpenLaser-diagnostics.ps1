@@ -2,7 +2,7 @@
 # thing it writes is its report, OpenLaser-diagnostics.txt on the Desktop (also copied to the clipboard, so it can be
 # pasted into a chat or a remote-desktop session).
 #
-# It checks Windows, the unzipped OpenLaser files, the Visual C++ runtime, the laser board on USB (9588:9899) and the
+# It checks Windows (and that the download fits it: 64-bit, or the 32-bit windows-x86 package), the unzipped OpenLaser files, the Visual C++ runtime, the laser board on USB (9588:9899) and the
 # driver Windows gave it, and OpenLaser's own folders. It ends with a SUMMARY and the next step.
 #
 # Start it with "OpenLaser diagnostics.cmd" in this folder. Plain ASCII on purpose: Windows PowerShell 5.1 reads a
@@ -68,6 +68,21 @@ function Invoke-Hw([string]$arguments, [bool]$hardware) {
     return @{ Code = $p.ExitCode; Out = $text }
 }
 
+# 'x86', 'x64', 'arm64' or '' : the CPU a Windows program is built for (the Machine field of its PE header).
+function Get-ExeArch([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return '' }
+    $bytes = [System.IO.File]::ReadAllBytes($path)
+    if ($bytes.Length -lt 64) { return '' }
+    $pe = [BitConverter]::ToInt32($bytes, 60)
+    if ($pe -lt 0 -or $pe + 6 -gt $bytes.Length) { return '' }
+    switch ([BitConverter]::ToUInt16($bytes, $pe + 4)) {
+        0x014c { return 'x86' }
+        0x8664 { return 'x64' }
+        0xaa64 { return 'arm64' }
+        default { return '' }
+    }
+}
+
 Say "OpenLaser diagnostics, $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Say "Folder: $here"
 
@@ -79,8 +94,20 @@ Guard 'Windows version' {
     Say "  PowerShell $($PSVersionTable.PSVersion)"
     $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     Say "  Running as administrator: $admin (not needed for this check)"
-    if ([Environment]::Is64BitOperatingSystem) { Good 'Windows is 64-bit' }
-    else { Problem 'Windows is 32-bit: OpenLaser needs 64-bit Windows 10 or 11' }
+    $script:exeArch = Get-ExeArch (Join-Path $here 'openlaser.exe')
+    $bits = if ($script:exeArch -eq 'x86') { '32-bit' } else { '64-bit' }
+    $package = if ($script:exeArch) { "$($script:exeArch) ($bits)" } else { 'unknown' }
+    Say "  These OpenLaser programs are built for: $package"
+    if ([Environment]::Is64BitOperatingSystem) {
+        Good 'Windows is 64-bit'
+        if ($script:exeArch -eq 'x86') { Note 'this is the 32-bit (windows-x86) download: it works here, but the 64-bit OpenLaser-...-windows.zip is the one for 64-bit Windows' }
+    } elseif ($script:exeArch -eq 'x86') {
+        Good 'Windows is 32-bit and this is the 32-bit (windows-x86) download of OpenLaser'
+    } elseif ($script:exeArch) {
+        Problem "Windows is 32-bit, but these programs are ${package}: download OpenLaser-...-windows-x86.zip instead"
+    } else {
+        Problem 'Windows is 32-bit: use the 32-bit download, OpenLaser-...-windows-x86.zip'
+    }
 }
 
 # ---- Files ---------------------------------------------------------------------------------------------------------
@@ -127,7 +154,10 @@ Guard 'Visual C++ runtime' {
     Say "  VCRUNTIME140.dll installed: $present"
     if (-not $script:runtimeNeeded) { Good 'the programs carry their own Visual C++ runtime' }
     elseif ($present) { Good 'the Visual C++ runtime the programs need is installed' }
-    else { Problem 'the Visual C++ runtime is missing: install "Microsoft Visual C++ Redistributable x64" from https://aka.ms/vs/17/release/vc_redist.x64.exe' }
+    else {
+        $vc = if ($script:exeArch -eq 'x86') { 'x86' } else { 'x64' }
+        Problem "the Visual C++ runtime is missing: install `"Microsoft Visual C++ Redistributable $vc`" from https://aka.ms/vs/17/release/vc_redist.$vc.exe"
+    }
 }
 
 # ---- Graphics ------------------------------------------------------------------------------------------------------
@@ -137,6 +167,9 @@ Guard 'Graphics card' {
         Say "  $($v.Name), driver $($v.DriverVersion)"
         if ($v.Name -match 'Basic Display|Basic Render') {
             Note 'Windows uses its basic display driver: if the OpenLaser window does not open, install the graphics card driver'
+        }
+        if ($v.Name -match 'Intel\(R\) HD Graphics$|Intel\(R\) HD Graphics [0-9]{4}$') {
+            Note "older Intel graphics ($($v.Name)): the 32-bit OpenLaser draws with OpenGL, which it has. If the window does not open, install Intel's newest driver for it"
         }
     }
 }
