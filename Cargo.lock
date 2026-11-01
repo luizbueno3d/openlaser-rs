@@ -3602,6 +3602,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "openlaser-arm",
+ "openlaser-engine",
  "openlaser-testkit",
  "openlaser-types",
  "openlaser-ui-egui",

@@ -1080,11 +1080,54 @@ impl OpenLaserApp {
         }
         for event in self.session.poll() {
             match event {
+                openlaser_engine::Event::FootSwitch(press) => self.foot_switch_pressed(press),
                 openlaser_engine::Event::Status(message) => self.set_status(message),
                 openlaser_engine::Event::ArmVoided { reason } => self.set_status(crate::tf!("ARM dialog closed: {reason}", "Janela de ARM fechada: {reason}")),
                 _ => {}
             }
         }
+    }
+
+    /// A foot-switch press (SPEC M3). Inside an open ARM dialog it is the dialog's (it replaces typing ARM once every
+    /// item is ticked). Otherwise it is Start: only when Start itself would be enabled, for the active machine; the
+    /// ARM that follows mints from it only with a standing confirmation, else the dialog opens as for a click.
+    pub(crate) fn foot_switch_pressed(&mut self, press: openlaser_engine::PedalPress) {
+        if self.arm_dialog_open() {
+            self.services.human.foot_switch(press);
+            return;
+        }
+        if self.active_machine().map(|m| &m.id) != Some(press.machine()) {
+            self.set_status(crate::i18n::t(
+                "Foot switch ignored: it belongs to a machine that is not the selected one.",
+                "Pedal ignorado: ele pertence a uma máquina que não é a selecionada.",
+            ));
+            return;
+        }
+        if let Err(reason) = self.start_gate_now() {
+            self.set_status(crate::tf!("Foot switch: {reason}", "Pedal: {reason}"));
+            return;
+        }
+        self.services.human.foot_switch(press);
+        if let Err(e) = self.session.request_arm(openlaser_engine::Origin::Human) {
+            self.set_status(crate::tf!("Foot switch: {e}", "Pedal: {e}"));
+        }
+    }
+
+    /// What the Start button's gate says now (the Laser panel draws the same).
+    pub(crate) fn start_gate_now(&self) -> Result<(), String> {
+        let plan = self.plan().cloned();
+        let active = self.ui.machine_active;
+        if self.session.frame_required() {
+            let receipt = plan.as_ref().and_then(PlanView::summary).and_then(|s| self.receipt_for(&s.machine));
+            crate::panels::start_gate(plan.as_ref(), receipt.as_ref(), self.session.id(), self.services.clock.now(), active)
+        } else {
+            crate::panels::frame_gate(plan.as_ref(), active)
+        }
+    }
+
+    /// Some machine's driver reads a foot switch: the app keeps polling so a press is seen while the window is idle.
+    pub(crate) fn watching_foot_switch(&self) -> bool {
+        self.session.machines().iter().any(|m| self.session.status(&m.id).is_some_and(|s| s.connected && s.inputs.is_some()))
     }
 
     fn poll_dialogs(&mut self) {
@@ -1309,6 +1352,9 @@ impl eframe::App for OpenLaserApp {
         self.ui.machine_active = self.safety_active();
         if self.ui.machine_active {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        if self.watching_foot_switch() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
         }
         self.answer_screenshots(ctx);
         self.persist_ui_settings();

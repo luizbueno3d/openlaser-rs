@@ -30,6 +30,10 @@ schemars = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 
+[features]
+# Test-only (SPEC §2.3 rule 10): reachable only through dev-dependencies; refuses to build without debug assertions.
+test-pedal = []
+
 [dev-dependencies]
 openlaser-arm = { workspace = true, features = ["test-witness"] }
 openlaser-lmc-sim = { workspace = true }

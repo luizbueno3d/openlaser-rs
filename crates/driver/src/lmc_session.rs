@@ -464,6 +464,14 @@ impl<W: Wire> Session<W> {
         }
     }
 
+    /// `ReadPort` (0x0025), all four reply words (`Backend::read_inputs`). Reads only; ignores the latch.
+    pub(crate) fn read_port(&mut self, cx: &Cx) -> Result<[u16; 4], Halt> {
+        match self.single(lmc_ops::single(openlaser_lmc::op::READ_PORT, 0), cx, Mode::Plain)? {
+            Some(r) => Ok(r),
+            None => Err(Halt::Fault(DriverError::Protocol("ReadPort returned no reply".to_owned()))),
+        }
+    }
+
     /// A status read that ignores the latch (`Backend::status`).
     pub(crate) fn read_status(&mut self, cx: &Cx) -> Result<StatusWord, Halt> {
         self.status_word(cx, Mode::Plain)

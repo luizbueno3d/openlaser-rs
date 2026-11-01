@@ -67,6 +67,13 @@ pub struct CachedStatus {
     pub last_stop: Option<StopReport>,
     pub receipt: Option<FrameReceipt>,
     pub trace_tail: VecDeque<TraceLine>,
+    /// The last input-port words the idle driver read (only while the profile sets a foot switch).
+    pub inputs: Option<[u16; 4]>,
+    /// Whether the foot switch reads pressed in [`CachedStatus::inputs`].
+    pub pedal_down: Option<bool>,
+    /// After a stop or a fault the foot switch does nothing until a person clicks Frame or Start (SPEC M3: the
+    /// pedal never restarts a job someone just stopped).
+    pub pedal_blocked: bool,
 }
 
 impl CachedStatus {
@@ -81,6 +88,9 @@ impl CachedStatus {
             last_stop: None,
             receipt: None,
             trace_tail: VecDeque::new(),
+            inputs: None,
+            pedal_down: None,
+            pedal_blocked: false,
         }
     }
 
@@ -166,13 +176,58 @@ impl StopRegistry {
     }
 }
 
+/// A debounced foot-switch press the driver read from the board, on a machine whose pedal is not blocked by a stop
+/// (SPEC M3). Only the engine builds one, from its driver's events; the ARM dialog turns it into the foot-switch
+/// confirmation (`openlaser-human`'s `pedal.rs`), and `mint` still checks the frame, the checklist and the age.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PedalPress {
+    machine: MachineId,
+    at: MonoTime,
+}
+
+impl PedalPress {
+    pub fn machine(&self) -> &MachineId {
+        &self.machine
+    }
+
+    /// When the press completed (the debounced edge), on the session clock.
+    pub fn at(&self) -> MonoTime {
+        self.at
+    }
+}
+
+/// Dev-dependency only (feature `test-pedal`; `compile_error!` without debug assertions): a press for the ARM
+/// dialog's tests, which have no board to press.
+#[cfg(feature = "test-pedal")]
+pub mod testing {
+    use super::*;
+
+    pub fn pedal_press_for_tests(machine: MachineId, at: MonoTime) -> PedalPress {
+        PedalPress { machine, at }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    DocChanged { index: usize, revision: u64 },
+    /// The foot switch was pressed (and is not blocked): the GUI treats it as Start, and inside an open ARM dialog as
+    /// the confirmation.
+    FootSwitch(PedalPress),
+    DocChanged {
+        index: usize,
+        revision: u64,
+    },
     ArmRequested,
-    ArmVoided { reason: String },
-    Driver { machine: MachineId, event: DriverEvent },
-    Request { id: RequestId, state: String },
+    ArmVoided {
+        reason: String,
+    },
+    Driver {
+        machine: MachineId,
+        event: DriverEvent,
+    },
+    Request {
+        id: RequestId,
+        state: String,
+    },
     Status(String),
 }
 
@@ -323,6 +378,13 @@ impl Session {
         }
     }
 
+    /// A person clicked Frame or Start: the foot switch works again on every machine.
+    fn unblock_pedals(&mut self) {
+        for s in &mut self.hub {
+            s.status.pedal_blocked = false;
+        }
+    }
+
     pub(crate) fn slot(&self, m: &MachineId) -> Option<&Slot> {
         self.hub.iter().find(|s| &s.machine == m)
     }
@@ -411,6 +473,7 @@ impl Session {
         expect: Option<Fingerprint>,
     ) -> Result<Fingerprint, EngineError> {
         require_human(origin, "laser.frame")?;
+        self.unblock_pedals();
         self.provider()?;
         let idx = self.doc_index()?;
         let (project, selection, machine) = {
@@ -476,6 +539,7 @@ impl Session {
     /// approved submission arms exactly the job the agent submitted).
     pub(crate) fn request_arm_of(&mut self, origin: Origin, expect: Option<Fingerprint>) -> Result<&PendingArm, EngineError> {
         require_human(origin, "laser.start")?;
+        self.unblock_pedals();
         let provider = self.provider()?;
         let idx = self.doc_index()?;
         self.void_pending_arm("Start was pressed again");
@@ -757,8 +821,20 @@ impl Session {
         };
         let mut request_moves = Vec::new();
         let mut void = None;
+        let mut pedal = None;
         if let Some(slot) = self.hub.iter_mut().find(|s| &s.machine == machine) {
             match &ev {
+                DriverEvent::Inputs { words, pedal_down } => {
+                    slot.status.inputs = Some(*words);
+                    slot.status.pedal_down = Some(*pedal_down);
+                }
+                DriverEvent::FootSwitch { at } => {
+                    pedal = Some(if slot.status.pedal_blocked || !matches!(slot.status.state, MachineState::Idle | MachineState::Stopped) {
+                        Err(())
+                    } else {
+                        Ok(PedalPress { machine: machine.clone(), at: *at })
+                    });
+                }
                 DriverEvent::Connected(info) => {
                     slot.status.connected = true;
                     slot.status.provider = Some(info.provider.clone());
@@ -813,6 +889,7 @@ impl Session {
                             }
                         }
                         Outcome::Stopped(report) => {
+                            slot.status.pedal_blocked = true;
                             slot.status.last_stop = Some(report.clone());
                             if report.confirmed {
                                 slot.status.settle(MachineState::Stopped);
@@ -825,6 +902,7 @@ impl Session {
                     request_moves.extend(self.requests.finished(machine, outcome));
                 }
                 DriverEvent::Stopped(report) => {
+                    slot.status.pedal_blocked = true;
                     slot.op = None;
                     slot.status.progress = None;
                     if report.confirmed {
@@ -837,6 +915,7 @@ impl Session {
                     request_moves.extend(self.requests.stopped(machine, Some(report.clone())));
                 }
                 DriverEvent::Fault(e) => {
+                    slot.status.pedal_blocked = true;
                     slot.op = None;
                     slot.status.progress = None;
                     slot.status.state = MachineState::Fault;
@@ -858,7 +937,14 @@ impl Session {
         for (id, state) in request_moves {
             self.push_event(Event::Request { id, state });
         }
-        if !matches!(ev, DriverEvent::Trace(_)) {
+        match pedal {
+            Some(Ok(press)) => self.push_event(Event::FootSwitch(press)),
+            Some(Err(())) => self
+                .push_event(Event::Status("Foot switch ignored: after a stop or a fault, click Frame or Start once before the pedal works again".to_owned())),
+            None => {}
+        }
+        // The raw press is not forwarded: only the gated `Event::FootSwitch` above may start anything.
+        if !matches!(ev, DriverEvent::Trace(_) | DriverEvent::FootSwitch { .. }) {
             self.push_event(Event::Driver { machine: machine.clone(), event: ev });
         }
     }

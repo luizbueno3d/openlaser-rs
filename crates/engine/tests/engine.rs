@@ -1345,3 +1345,119 @@ mod lbrn2 {
         assert_eq!(p.layers.order, vec![openlaser_types::LayerKey::Color(6), openlaser_types::LayerKey::Color(2), openlaser_types::LayerKey::Color(9)]);
     }
 }
+
+// ---- the foot switch (SPEC M3) on the simulator ------------------------------------------------------------------
+
+mod foot_switch {
+    use std::time::Instant;
+
+    use openlaser_engine::{Event, MachineState};
+    use openlaser_lmc_sim::{SimConfig, SimInputs, SimProvider};
+    use openlaser_machine::{FootSwitchCfg, Kinematics};
+
+    use super::*;
+
+    fn session(foot: Option<FootSwitchCfg>) -> (Session, SimInputs) {
+        let mut m = jpt_m7_200_sim();
+        if let Kinematics::Galvo(g) = &mut m.kind {
+            g.ports.foot_switch = foot;
+        }
+        let cfg =
+            SimConfig { buffer_depth: 3, transfer_latency: Duration::ZERO, status_extra_bits: 0, pid: 0x9899, faults: Vec::new(), emission_cap_pct: None };
+        let inputs = SimInputs::default();
+        let provider: Arc<dyn openlaser_driver::DeviceProvider> = Arc::new(SimProvider::new(cfg).with_inputs(inputs.clone()));
+        let mut c = config(Origin::Human, true, DeviceAccess::Provider(provider), Arc::new(openlaser_types::SystemClock::new()));
+        c.machines = vec![m.clone()];
+        let mut s = Session::new(c);
+        s.open_project(full_project(&m), None, Some(m.id.clone())).unwrap();
+        (s, inputs)
+    }
+
+    /// Polls for `d` and returns every event.
+    fn poll_for(s: &mut Session, d: Duration) -> Vec<Event> {
+        let end = Instant::now() + d;
+        let mut out = Vec::new();
+        while Instant::now() < end {
+            out.extend(s.poll());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        out
+    }
+
+    fn press(s: &mut Session, inputs: &SimInputs) -> Vec<Event> {
+        inputs.set_bit(15, true);
+        let mut evs = poll_for(s, Duration::from_millis(200));
+        inputs.set_bit(15, false);
+        evs.extend(poll_for(s, Duration::from_millis(300)));
+        evs
+    }
+
+    fn presses(evs: &[Event]) -> usize {
+        evs.iter().filter(|e| matches!(e, Event::FootSwitch(_))).count()
+    }
+
+    fn connect(s: &mut Session) {
+        s.execute("device.connect", json!({})).unwrap();
+        let m = s.active().unwrap().machine.clone();
+        let end = Instant::now() + Duration::from_secs(10);
+        while !s.status(&m).is_some_and(|st| st.connected && matches!(st.state, MachineState::Idle)) {
+            assert!(Instant::now() < end, "connect");
+            s.poll();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn a_press_reaches_the_session_with_the_input_state_and_arms_nothing() {
+        let (mut s, inputs) = session(Some(FootSwitchCfg::new(1, 15)));
+        connect(&mut s);
+        poll_for(&mut s, Duration::from_millis(100));
+        let m = s.active().unwrap().machine.clone();
+        assert_eq!(s.status(&m).unwrap().pedal_down, Some(false));
+        let evs = press(&mut s, &inputs);
+        assert_eq!(presses(&evs), 1, "{evs:?}");
+        let Some(Event::FootSwitch(p)) = evs.iter().find(|e| matches!(e, Event::FootSwitch(_))) else { panic!("press") };
+        assert_eq!(p.machine(), &m);
+        assert!(!evs.iter().any(|e| matches!(e, Event::Driver { event: openlaser_engine::DriverEvent::FootSwitch { .. }, .. })), "only the gated event");
+        assert!(s.pending_arm().is_none(), "a press alone never requests or mints an ARM");
+        assert!(matches!(s.status(&m).unwrap().state, MachineState::Idle));
+    }
+
+    #[test]
+    fn after_a_stop_the_pedal_waits_for_a_person_to_click_frame_or_start() {
+        let (mut s, inputs) = session(Some(FootSwitchCfg::new(1, 15)));
+        connect(&mut s);
+        poll_for(&mut s, Duration::from_millis(100));
+        s.stop_all();
+        poll_for(&mut s, Duration::from_millis(200));
+        let evs = press(&mut s, &inputs);
+        assert_eq!(presses(&evs), 0, "{evs:?}");
+        assert!(evs.iter().any(|e| matches!(e, Event::Status(m) if m.contains("Foot switch ignored"))), "{evs:?}");
+        // A person's Frame (here refused or not, the click itself) unblocks it.
+        let _ = s.start_frame(Origin::Human, openlaser_engine::FrameMode::Once, None, None);
+        let m = s.active().unwrap().machine.clone();
+        let end = Instant::now() + Duration::from_secs(10);
+        while s.status(&m).is_some_and(|st| st.busy()) {
+            assert!(Instant::now() < end);
+            s.poll();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        poll_for(&mut s, Duration::from_millis(100));
+        assert_eq!(presses(&press(&mut s, &inputs)), 1);
+        // An agent's frame never unblocks it.
+        s.stop_all();
+        poll_for(&mut s, Duration::from_millis(200));
+        assert!(s.start_frame(Origin::Synthetic, openlaser_engine::FrameMode::Once, None, None).is_err());
+        assert_eq!(presses(&press(&mut s, &inputs)), 0);
+    }
+
+    #[test]
+    fn without_a_foot_switch_in_the_profile_nothing_is_read() {
+        let (mut s, inputs) = session(None);
+        connect(&mut s);
+        let evs = press(&mut s, &inputs);
+        assert_eq!(presses(&evs), 0);
+        let m = s.active().unwrap().machine.clone();
+        assert_eq!(s.status(&m).unwrap().inputs, None);
+    }
+}

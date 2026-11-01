@@ -9,8 +9,9 @@ mod profile;
 
 pub use builtin::{jpt_m7_200, jpt_m7_200_sim, om_gantries};
 pub use profile::{
-    FieldCalibration, FieldRect, FirstJump, GalvoLink, GalvoMachine, GalvoTimingDefaults, GantryLink, GantryMachine, GantryTool, JobLimits, Kinematics,
-    LaserSource, LmcBoardFilter, MachineProfile, PortMap, ProfileStore, RedDotCal, RotaryAxis, RotaryCfg, RotaryKind, RunAhead, SourceKind, validate_profile,
+    FieldCalibration, FieldRect, FirstJump, FootSwitchCfg, GalvoLink, GalvoMachine, GalvoTimingDefaults, GantryLink, GantryMachine, GantryTool, JobLimits,
+    Kinematics, LaserSource, LmcBoardFilter, MachineProfile, PortMap, ProfileStore, RedDotCal, RotaryAxis, RotaryCfg, RotaryKind, RunAhead, SourceKind,
+    validate_profile,
 };
 
 // Re-exports for callers that name these through the profile (SPEC §3.0).
@@ -198,5 +199,50 @@ mod rotary_tests {
                 .validate(area)
                 .is_ok()
         );
+    }
+}
+
+#[cfg(test)]
+mod foot_switch_tests {
+    use super::*;
+
+    #[test]
+    fn foot_switch_is_unset_by_default_and_not_serialized() {
+        let p = jpt_m7_200();
+        let Kinematics::Galvo(g) = &p.kind else { panic!("galvo") };
+        assert_eq!(g.ports.foot_switch, None, "the pedal does nothing until a person sets the measured pin");
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("footSwitch"), "{json}");
+    }
+
+    #[test]
+    fn foot_switch_levels_and_polarity() {
+        let high = FootSwitchCfg::new(1, 15);
+        assert!(high.pressed([0, 0x8000, 0, 0x20]));
+        assert!(!high.pressed([0xffff, 0x7fff, 0xffff, 0xffff]), "only its own word and bit count");
+        let low = FootSwitchCfg { active_low: true, ..FootSwitchCfg::new(2, 3) };
+        assert!(low.pressed([0, 0, 0, 0]));
+        assert!(!low.pressed([0, 0, 0x0008, 0]));
+    }
+
+    #[test]
+    fn foot_switch_out_of_range_is_refused_by_profile_validation() {
+        for bad in [
+            FootSwitchCfg::new(3, 0),
+            FootSwitchCfg::new(1, 16),
+            FootSwitchCfg { debounce_ms: 5, ..FootSwitchCfg::new(1, 15) },
+            FootSwitchCfg { debounce_ms: 2000, ..FootSwitchCfg::new(1, 15) },
+        ] {
+            let mut p = jpt_m7_200();
+            let Kinematics::Galvo(g) = &mut p.kind else { panic!("galvo") };
+            g.ports.foot_switch = Some(bad.clone());
+            assert!(validate_profile(&p).is_err(), "{bad:?}");
+        }
+        let mut p = jpt_m7_200();
+        let Kinematics::Galvo(g) = &mut p.kind else { panic!("galvo") };
+        g.ports.foot_switch = Some(FootSwitchCfg::new(1, 15));
+        assert!(validate_profile(&p).is_ok());
+        let back: MachineProfile = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
     }
 }

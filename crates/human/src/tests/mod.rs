@@ -13,6 +13,7 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use openlaser_arm::HumanConfirm;
 use openlaser_arm::testing::token_for_tests;
+use openlaser_types::Clock;
 use openlaser_types::{
     ARM_TOKEN_TTL, ArmToken, Bounds, EmissionSummary, Fingerprint, FrameOrigin, FrameReceipt, FrameSource, FrameStyle, GalvoWords, LayerKey, MachineId,
     MonoTime, Notice, NoticeCode, PassRow, Refusal, RefusalCode, SectionMode, SessionId, VirtualClock,
@@ -110,6 +111,7 @@ fn model(fp: u8, cap: Option<f64>) -> ArmModel {
         now: MonoTime::default(),
         thumbnail: DisplayList::default(),
         emission_cap_pct: cap,
+        foot_switch: false,
     }
 }
 
@@ -737,4 +739,125 @@ fn human_click_after_300ms_mints_token_with_real_mint() {
     assert_eq!(h.state().armed.len(), 1);
     let token = h.state().armed.first().map(|t| (t.fingerprint().to_owned(), t.bytes().to_owned()));
     assert_eq!(token, Some((Fingerprint([7; 32]), Fingerprint([107; 32]))));
+}
+
+// ---- the foot switch (SPEC M3, design C3.8) ----------------------------------------------------------------------
+
+fn pedal_model() -> ArmModel {
+    ArmModel { foot_switch: true, ..model(7, None) }
+}
+
+fn press_pedal(h: &mut Harness<'_, Rig>, clock: &VirtualClock) {
+    let m = h.state().model.summary.machine.clone();
+    let press = openlaser_engine::testing::pedal_press_for_tests(m, clock.now());
+    h.state_mut().human.foot_switch(press);
+    h.run();
+}
+
+fn tick_all(h: &mut Harness<'_, Rig>) {
+    for item in CHECKLIST {
+        h.get_by_label(item).click();
+        h.run();
+    }
+}
+
+#[test]
+fn foot_switch_in_the_open_dialog_replaces_typing_arm_once_every_item_is_ticked() {
+    let (mut h, clock) = harness_with(Some(recording_mint), pedal_model());
+    h.run();
+    assert!(shows(&h, crate::arm_dialog::PEDAL_HINT));
+    clock.advance(Duration::from_millis(500));
+    // Nothing ticked: the press is refused with a reason and mints nothing.
+    press_pedal(&mut h, &clock);
+    assert_eq!(mints(), 0);
+    assert!(shows(&h, "Tick every item, then press the foot switch."));
+    tick_all(&mut h);
+    assert_eq!(field_value(&h), "", "nothing typed");
+    clock.advance(Duration::from_millis(100));
+    press_pedal(&mut h, &clock);
+    assert_eq!(mints(), 1);
+    assert_eq!(h.state().armed.len(), 1);
+    assert!(!h.state().human.surface_open());
+}
+
+#[test]
+fn foot_switch_press_from_before_the_dialog_or_for_another_machine_never_arms() {
+    let (mut h, clock) = harness_with(Some(recording_mint), pedal_model());
+    // A press stamped before the dialog was first drawn (the press that opened it, say).
+    let early = openlaser_engine::testing::pedal_press_for_tests(h.state().model.summary.machine.clone(), clock.now());
+    clock.advance(Duration::from_millis(100));
+    h.run();
+    tick_all(&mut h);
+    h.state_mut().human.foot_switch(early);
+    h.run();
+    assert_eq!(mints(), 0, "a press older than the dialog is not its confirmation");
+    clock.advance(Duration::from_millis(100));
+    let other = openlaser_engine::testing::pedal_press_for_tests(MachineId("another".into()), clock.now());
+    h.state_mut().human.foot_switch(other);
+    h.run();
+    assert_eq!(mints(), 0);
+    assert!(h.state().armed.is_empty());
+}
+
+#[test]
+fn foot_switch_counts_only_within_30_s_of_the_dialog_opening() {
+    let (mut h, clock) = harness_with(Some(recording_mint), pedal_model());
+    h.run();
+    tick_all(&mut h);
+    clock.advance(crate::arm_dialog::PEDAL_WINDOW + Duration::from_millis(1));
+    press_pedal(&mut h, &clock);
+    assert_eq!(mints(), 0);
+    assert!(h.query_by_label_contains("within 30 s").is_some());
+}
+
+#[test]
+fn foot_switch_does_nothing_when_the_profile_sets_none() {
+    let (mut h, clock) = harness_with(Some(recording_mint), model(7, None));
+    h.run();
+    assert!(!shows(&h, crate::arm_dialog::PEDAL_HINT));
+    tick_all(&mut h);
+    clock.advance(Duration::from_millis(500));
+    press_pedal(&mut h, &clock);
+    assert_eq!(mints(), 0);
+}
+
+#[test]
+fn foot_switch_as_start_arms_at_once_only_with_a_standing_confirmation() {
+    let (mut h, clock) = harness_with(Some(recording_mint), pedal_model());
+    // First job of the session: the press that started it opens the dialog and does not arm.
+    press_pedal(&mut h, &clock);
+    assert_eq!(mints(), 0);
+    assert!(h.state().human.surface_open(), "the dialog opened instead");
+    // The person ticks and presses again: armed, and the confirmation is remembered for the session.
+    tick_all(&mut h);
+    clock.advance(Duration::from_millis(100));
+    press_pedal(&mut h, &clock);
+    assert_eq!(mints(), 1);
+    // Next job: the pedal alone starts it (like a Start click with the standing confirmation).
+    h.state_mut().show = true;
+    h.state_mut().model = ArmModel { foot_switch: true, ..model(8, None) };
+    clock.advance(Duration::from_millis(100));
+    let press = openlaser_engine::testing::pedal_press_for_tests(h.state().model.summary.machine.clone(), clock.now());
+    h.state_mut().human.foot_switch(press);
+    h.run();
+    assert_eq!(mints(), 2);
+    assert_eq!(h.state().armed.len(), 2);
+    // A press older than 2 s does not.
+    h.state_mut().show = true;
+    h.state_mut().model = ArmModel { foot_switch: true, ..model(9, None) };
+    let stale = openlaser_engine::testing::pedal_press_for_tests(h.state().model.summary.machine.clone(), clock.now());
+    clock.advance(Duration::from_secs(3));
+    h.state_mut().human.foot_switch(stale);
+    h.run();
+    assert_eq!(mints(), 2, "a stale press opens the dialog, never arms");
+}
+
+#[test]
+fn foot_switch_confirmation_passes_the_real_mint() {
+    let (mut h, clock) = harness_with(None, pedal_model());
+    h.run();
+    tick_all(&mut h);
+    clock.advance(Duration::from_millis(500));
+    press_pedal(&mut h, &clock);
+    assert_eq!(h.state().armed.len(), 1, "openlaser_arm::mint accepts the foot-switch confirmation");
 }

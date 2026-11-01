@@ -21,6 +21,7 @@ mod approval;
 mod arm_dialog;
 pub mod format;
 mod gesture;
+mod pedal;
 mod taint;
 
 use std::cell::Cell;
@@ -30,7 +31,7 @@ pub use approval::{ApprovalAction, ApprovalCard};
 pub use arm_dialog::{AUTOMATION_IGNORED, CANCEL_LABEL, CONFIRM_LABEL, TITLE as ARM_DIALOG_TITLE};
 pub use gesture::{HumanGesture, MIN_VISIBLE, gesture};
 use openlaser_types::{ArmToken, Clock, EmissionSummary, FrameReceipt, MonoTime, Refusal, SessionId};
-use openlaser_ui_egui::{ArmModel, ArmOutcome, HumanSurfaces};
+use openlaser_ui_egui::{ArmModel, ArmOutcome, HumanSurfaces, PedalPress};
 pub use taint::{TAINT_HOLD, TAINT_PASSES};
 
 use crate::arm_dialog::ArmDialogState;
@@ -52,6 +53,8 @@ pub struct Human {
     pub(crate) arm: ArmDialogState,
     /// The last real click on Start and when it happened (`start_click`); used once, by the ARM that follows it.
     pub(crate) start: Option<(HumanGesture, MonoTime)>,
+    /// The last foot-switch press (`foot_switch`); used once, by the ARM that follows it.
+    pub(crate) pedal: Option<PedalPress>,
     /// What the person typed and ticked the last time they armed in this session (ARM once per session).
     pub(crate) remembered: Option<arm_dialog::Remembered>,
     /// Settings ▸ Laser: no ARM confirmation at all.
@@ -69,6 +72,7 @@ impl Human {
             surfaces: Cell::new(Surfaces::default()),
             arm: ArmDialogState::default(),
             start: None,
+            pedal: None,
             remembered: None,
             skip_arm: false,
             #[cfg(test)]
@@ -209,6 +213,10 @@ impl HumanSurfaces for Human {
 
     fn set_skip_arm(&mut self, skip: bool) {
         self.skip_arm = skip;
+    }
+
+    fn foot_switch(&mut self, press: PedalPress) {
+        self.pedal = Some(press);
     }
 
     fn arm_dialog(&mut self, ctx: &egui::Context, model: &ArmModel) -> ArmOutcome {

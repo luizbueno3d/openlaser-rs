@@ -141,6 +141,10 @@ pub trait HumanSurfaces: Send {
     }
     /// Settings ▸ Laser ▸ skip the ARM confirmation.
     fn set_skip_arm(&mut self, _skip: bool) {}
+    /// The foot switch was pressed (SPEC M3; only the engine builds a `PedalPress`, from the board's input port). It
+    /// is kept, once, for the ARM that follows: like a Start click with a standing confirmation, or, inside an open
+    /// ARM dialog with every item ticked, instead of typing ARM.
+    fn foot_switch(&mut self, _press: openlaser_engine::PedalPress) {}
     /// Draws the ARM confirmation as a Modal (STOP stays above). Mints inside; returns the token once.
     fn arm_dialog(&mut self, ctx: &egui::Context, model: &ArmModel) -> ArmOutcome;
     /// Any human-only surface open: the dispatcher refuses mutating control methods (human_confirmation_open).
@@ -156,6 +160,8 @@ pub struct ArmModel {
     pub thumbnail: DisplayList,
     /// S23, from the provider.
     pub emission_cap_pct: Option<f64>,
+    /// The machine profile sets a foot switch: the dialog offers "press the foot switch to ARM" (SPEC M3).
+    pub foot_switch: bool,
 }
 
 pub enum ArmOutcome {
