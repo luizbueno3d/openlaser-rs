@@ -80,17 +80,38 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
+        # Static C runtime: the .exe files run on a PC without the Visual C++ Redistributable.
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --release --locked -p openlaser -p openlaser-hw --features openlaser/hw,openlaser-hw/hw
 
+      - name: Check the .exe files need no Visual C++ runtime
+        shell: pwsh
+        run: |
+          foreach ($f in 'target/release/openlaser.exe', 'target/release/openlaser-hw.exe') {
+            $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($f))
+            if ($text.IndexOf('VCRUNTIME140.dll', [StringComparison]::OrdinalIgnoreCase) -ge 0) { throw "$f still needs VCRUNTIME140.dll" }
+          }
+
       - name: Make the .zip
+        id: zip
         shell: pwsh
         run: |
           $version = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq 'openlaser').version
           $dir = "OpenLaser-$version-windows"
           New-Item -ItemType Directory $dir | Out-Null
           Copy-Item target/release/openlaser.exe, target/release/openlaser-hw.exe, packaging/README.txt $dir
-          Copy-Item "packaging/windows/Start OpenLaser with laser.cmd" $dir
+          Copy-Item "packaging/windows/Start OpenLaser with laser.cmd", "packaging/windows/OpenLaser diagnostics.cmd", packaging/windows/OpenLaser-diagnostics.ps1 $dir
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          "dir=$dir" >> $env:GITHUB_OUTPUT
+
+      - name: Run the diagnostics script (read-only; it does not start the programs)
+        shell: cmd
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File "${{ steps.zip.outputs.dir }}\OpenLaser-diagnostics.ps1" -SkipPrograms -Quiet -OutFile diagnostics.txt || exit /b 1
+          type diagnostics.txt
+          findstr /c:"SUMMARY" diagnostics.txt || exit /b 1
+          findstr /c:"carry their own Visual C++ runtime" diagnostics.txt || exit /b 1
 
       - uses: actions/upload-artifact@v4
         with:

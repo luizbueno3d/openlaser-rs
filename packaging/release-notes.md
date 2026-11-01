@@ -5,8 +5,10 @@ not a safety system: wear goggles rated for your laser and keep the E-stop and t
 
 - **macOS** (Apple Silicon and Intel, macOS 11+): `OpenLaser-…-macos.dmg`. Drag OpenLaser into Applications. It is not
   signed by Apple yet: the first time, open System Settings › Privacy & Security and click **Open Anyway**.
-- **Windows** (10/11, 64-bit): `OpenLaser-…-windows.zip`. Unzip it and keep the files together. The laser board needs
-  the WinUSB driver once, via [Zadig](https://zadig.akeo.ie) (USB ID `9588 9899`). This replaces EZCAD's driver on that PC.
+- **Windows** (10/11, 64-bit): `OpenLaser-…-windows.zip`. Unzip it and keep the files together; nothing else to
+  install for the program itself. Run **OpenLaser diagnostics** first: it only reads, and says whether the laser board
+  already uses WinUSB (then change nothing) or needs it once via [Zadig](https://zadig.akeo.ie) (USB ID `9588 9899`).
+  WinUSB replaces EZCAD's driver on that PC.
 
 `README.txt` inside each download has the step-by-step guide.
 
