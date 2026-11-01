@@ -27,8 +27,16 @@ macOS (Apple Silicon and Intel, macOS 11 or later)
 3. No driver is needed for the laser board.
 
 
-Windows (10 and 11, 64-bit)
----------------------------
+Windows (10 and 11)
+-------------------
+
+There are two Windows downloads. Pick the one for your Windows (Settings > System > About > System type):
+  OpenLaser-...-windows.zip        64-bit Windows 10 or 11 (most PCs)
+  OpenLaser-...-windows-x86.zip    32-bit Windows 10 ("32-bit operating system"). It also runs on 64-bit Windows.
+"OpenLaser diagnostics" (step 3) says whether the download fits this PC.
+
+If the OpenLaser window does not open, a message says why. On older graphics without DirectX 12 OpenLaser starts
+again on OpenGL by itself; if that fails too, install the newest driver for the graphics card from its maker.
 
 1. Unzip the folder anywhere (for example Documents): right-click the .zip, Extract All. Keep the files together.
 2. If Windows shows "Windows protected your PC", click "More info", then "Run anyway".

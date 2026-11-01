@@ -188,6 +188,32 @@ pub fn install_signal_watcher(stop: impl FnOnce(Duration) + Send + 'static, exit
     }
 }
 
+/// The variable wgpu reads to pick its graphics backends (`dx12`, `vulkan`, `gl`, ...).
+pub const WGPU_BACKEND: &str = "WGPU_BACKEND";
+
+/// What the app does after `run_native` failed to bring up its graphics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphicsFailure {
+    /// Start once more with `WGPU_BACKEND=gl`: wgpu may have picked a DirectX 12 or Vulkan adapter that then failed,
+    /// while plain OpenGL (WGL) works on old Intel graphics.
+    RetryWithGl,
+    /// Show this text in a message box: a release build on Windows has no console for stderr.
+    Explain(String),
+}
+
+/// Decides what follows a graphics failure. `backend` is the `WGPU_BACKEND` this process ran with: the OpenGL retry
+/// happens only once, when nobody chose a backend.
+pub fn graphics_failure(error: &str, backend: Option<&std::ffi::OsStr>) -> GraphicsFailure {
+    if backend.is_none() {
+        return GraphicsFailure::RetryWithGl;
+    }
+    GraphicsFailure::Explain(format!(
+        "OpenLaser could not start its graphics (DirectX 12, Vulkan and OpenGL were tried).\n\n{error}\n\n\
+         Install the newest driver for this PC's graphics from its maker (Intel, AMD or NVIDIA), then start OpenLaser \
+         again. \"OpenLaser diagnostics\" lists the graphics card and its driver."
+    ))
+}
+
 /// Small executor for native async file sheets. Runs on the dialog worker, never the UI thread.
 pub fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     struct ThreadWake(std::thread::Thread);
@@ -369,5 +395,16 @@ mod tests {
             }
         }
         assert_eq!(block_on(Yield(false)), 42);
+    }
+
+    #[test]
+    fn a_graphics_failure_retries_with_opengl_once_then_explains() {
+        assert_eq!(graphics_failure("no adapter", None), GraphicsFailure::RetryWithGl);
+        match graphics_failure("no adapter", Some(std::ffi::OsStr::new("gl"))) {
+            GraphicsFailure::Explain(text) => assert!(text.contains("no adapter") && text.contains("driver")),
+            other => panic!("expected an explanation, got {other:?}"),
+        }
+        // A backend the person chose is not overridden either.
+        assert!(matches!(graphics_failure("x", Some(std::ffi::OsStr::new("dx12"))), GraphicsFailure::Explain(_)));
     }
 }

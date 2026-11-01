@@ -1,4 +1,4 @@
-# Downloads (Luiz, 2026-10-30): OpenLaser for macOS (universal .dmg) and Windows (.zip). A `v*` tag publishes them
+# Downloads (Luiz, 2026-10-30): OpenLaser for macOS (universal .dmg) and Windows (.zip: 64-bit, and -x86 for 32-bit). A `v*` tag publishes them
 # as a GitHub Release; a pull request touching packaging builds them as workflow artifacts only.
 #
 # Laser safety (AGENTS.md §1): this workflow compiles the `hw` feature so the downloads can drive a real laser, but it
@@ -71,26 +71,53 @@ jobs:
           if-no-files-found: error
 
   windows:
+    name: windows (${{ matrix.arch }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 64-bit Windows 10/11: OpenLaser-<ver>-windows.zip.
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+            suffix: ""
+            rustflags: -C target-feature=+crt-static
+          # 32-bit Windows 10 (Luiz, 2026-11-01): OpenLaser-<ver>-windows-x86.zip. rustc links i686 programs
+          # large-address-aware already; 32-bit Windows still gives a process only 2 GB.
+          - arch: x86
+            target: i686-pc-windows-msvc
+            suffix: "-x86"
+            rustflags: -C target-feature=+crt-static
+    env:
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Build
         # Static C runtime: the .exe files run on a PC without the Visual C++ Redistributable.
         env:
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo build --release --locked -p openlaser -p openlaser-hw --features openlaser/hw,openlaser-hw/hw
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo build --release --locked --target ${{ matrix.target }} -p openlaser -p openlaser-hw --features openlaser/hw,openlaser-hw/hw
 
-      - name: Check the .exe files need no Visual C++ runtime
+      - name: Check the .exe files need no Visual C++ runtime and are built for ${{ matrix.arch }}
         shell: pwsh
         run: |
-          foreach ($f in 'target/release/openlaser.exe', 'target/release/openlaser-hw.exe') {
-            $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($f))
+          $machine = @{ x64 = 0x8664; x86 = 0x014c }['${{ matrix.arch }}']
+          foreach ($f in "target/$env:TARGET/release/openlaser.exe", "target/$env:TARGET/release/openlaser-hw.exe") {
+            $bytes = [System.IO.File]::ReadAllBytes($f)
+            $text = [System.Text.Encoding]::ASCII.GetString($bytes)
             if ($text.IndexOf('VCRUNTIME140.dll', [StringComparison]::OrdinalIgnoreCase) -ge 0) { throw "$f still needs VCRUNTIME140.dll" }
+            $pe = [BitConverter]::ToInt32($bytes, 60)
+            $got = [BitConverter]::ToUInt16($bytes, $pe + 4)
+            if ($got -ne $machine) { throw ("{0} is built for machine 0x{1:x4}, expected 0x{2:x4}" -f $f, $got, $machine) }
           }
 
       - name: Make the .zip
@@ -98,9 +125,9 @@ jobs:
         shell: pwsh
         run: |
           $version = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq 'openlaser').version
-          $dir = "OpenLaser-$version-windows"
+          $dir = "OpenLaser-$version-windows${{ matrix.suffix }}"
           New-Item -ItemType Directory $dir | Out-Null
-          Copy-Item target/release/openlaser.exe, target/release/openlaser-hw.exe, packaging/README.txt $dir
+          Copy-Item "target/$env:TARGET/release/openlaser.exe", "target/$env:TARGET/release/openlaser-hw.exe", packaging/README.txt $dir
           Copy-Item "packaging/windows/Start OpenLaser with laser.cmd", "packaging/windows/OpenLaser diagnostics.cmd", packaging/windows/OpenLaser-diagnostics.ps1 $dir
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
           "dir=$dir" >> $env:GITHUB_OUTPUT
@@ -112,11 +139,12 @@ jobs:
           type diagnostics.txt
           findstr /c:"SUMMARY" diagnostics.txt || exit /b 1
           findstr /c:"carry their own Visual C++ runtime" diagnostics.txt || exit /b 1
+          findstr /c:"These OpenLaser programs are built for: ${{ matrix.arch }}" diagnostics.txt || exit /b 1
 
       - uses: actions/upload-artifact@v4
         with:
-          name: windows
-          path: OpenLaser-*-windows.zip
+          name: windows-${{ matrix.arch }}
+          path: OpenLaser-*-windows${{ matrix.suffix }}.zip
           if-no-files-found: error
 
   release:
