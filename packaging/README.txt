@@ -53,8 +53,8 @@ or OpenGL, whichever works.
 5. Run "OpenLaser diagnostics" again: it should say that OpenLaser sees the board on WinUSB.
 
 If OpenLaser closes by itself: it keeps a log in %LOCALAPPDATA%\OpenLaser\logs (openlaser.log, session.txt). After an
-unexpected close it says so in a message box. Check the machine first (E-stop, key switch), then run "OpenLaser
-diagnostics": its report includes how OpenLaser ended and what Windows recorded about it.
+unexpected close it says so in a message box; a job the laser board already received may still be running. Then run
+"OpenLaser diagnostics": its report includes how OpenLaser ended and what Windows recorded about it.
 
 
 First time on your laser

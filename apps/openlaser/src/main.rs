@@ -228,8 +228,8 @@ fn main() -> ExitCode {
 }
 
 /// The supervisor (Windows): this process opens no window and no device. It starts itself again as the window
-/// process, with stderr into the log, waits, and records how it ended; after a death it says so in a message box,
-/// because the machine may have been framing or marking. `None` when the child could not start (then this process
+/// process, with stderr into the log, waits, and records how it ended; after a death it says so in a message box.
+/// It never touches a machine: it opens no device and stops nothing. `None` when the child could not start (then this process
 /// opens the window itself, as before).
 fn supervise(dir: &std::path::Path) -> Option<ExitCode> {
     let logger = diagnostics::install(dir, true);
@@ -258,7 +258,8 @@ fn died_message(what: &str, log: Option<&std::path::Path>) {
         .set_level(rfd::MessageLevel::Error)
         .set_title("OpenLaser closed unexpectedly")
         .set_description(format!(
-            "OpenLaser closed unexpectedly ({what}).\n\nIf the laser was framing or marking, check the machine now:              use the E-stop or the key switch.\n\nThe details are in {log}. Run \"OpenLaser diagnostics\" and send its report."
+            "OpenLaser closed unexpectedly ({what}).\n\nA job the laser board had already received may still be running on the machine. \
+             The details are in {log}. Run \"OpenLaser diagnostics\" and send its report."
         ))
         .set_buttons(rfd::MessageButtons::Ok)
         .show();

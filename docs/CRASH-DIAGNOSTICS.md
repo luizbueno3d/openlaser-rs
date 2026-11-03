@@ -1,4 +1,4 @@
-# Unexpected closes of the GUI: findings, diagnostics and the host-death safety question
+# Unexpected closes of the GUI: findings, diagnostics and the controller's execution model
 
 Started 2026-11-03 for Alexandre's report on OpenLaser 0.1.3 x86. His PC runs Windows 10 Pro 32-bit with Intel HD
 graphics, driver 10.18.10.4358, and OpenGL-only wgpu. The GUI closes by itself every few minutes:
@@ -86,7 +86,7 @@ Labels used below:
 | Change | Where | Covers |
 |---|---|---|
 | A file logger with UTC timestamps, version, pid and thread on every start record. It folds repeats, rotates at 4 MiB to `openlaser.old.log`, and caps each process at 32 MiB. It writes to `%LOCALAPPDATA%\OpenLaser\logs\openlaser.log` (other OSes: `<data dir>/OpenLaser/logs`; or `OPENLASER_LOG_DIR`). | `apps/openlaser/src/diagnostics.rs` | everything below lands here |
-| **Supervisor (Windows default).** `openlaser.exe` starts itself again as the window process and appends the child's stderr to the log (panic text, `memory allocation of N bytes failed`, `has overflowed its stack`). It waits and names the exit status: 0, 143, 101 panic, `0xC0000005`, `0xC0000409`, `0xC00000FD`, … After a death it shows a box: "OpenLaser closed unexpectedly … check the machine now: use the E-stop or the key switch". `OPENLASER_SUPERVISOR=0` turns it off; `=1` turns it on elsewhere. | `diagnostics::supervise`, `main.rs` | native crash, OOM abort, stack overflow, kill, panic |
+| **Supervisor (Windows default).** `openlaser.exe` starts itself again as the window process and appends the child's stderr to the log (panic text, `memory allocation of N bytes failed`, `has overflowed its stack`). It waits and names the exit status: 0, 143, 101 panic, `0xC0000005`, `0xC0000409`, `0xC00000FD`, … After a death it shows a box: "OpenLaser closed unexpectedly (…). A job the laser board had already received may still be running". It opens no device and stops nothing. `OPENLASER_SUPERVISOR=0` turns it off; `=1` turns it on elsewhere. | `diagnostics::supervise`, `main.rs` | native crash, OOM abort, stack overflow, kill, panic |
 | **Session marker** `session.txt`: `state=running`, then `ended` with the reason, or `died` with the status. The next start logs "THE PREVIOUS RUN DID NOT END CLEANLY" or "DIED". | `diagnostics.rs` | also a supervisor that was itself killed, and power loss |
 | Exit reasons, logged under `openlaser::exit`: window close request (X, Alt+F4, Cmd+Q), File › Exit, the close guard (stop confirmed or not), agent `app.quit`, the signal watcher (exit 143), a `run_native` error, and "event loop ended with no close request" (macOS Dock Quit). | `ui-egui/src/app.rs`, `control/mod.rs`, `lib.rs`, `main.rs` | intentional ends |
 | The panic hook stops the machines first, as before. It then logs the message, place, thread and a backtrace. | `lib.rs` `install_panic_hook`, `panic_record` | Rust panics, including caught ones |
@@ -125,96 +125,137 @@ needs Luiz's approval and is not done by the script.
   - checks the death record and `state=died`;
   - starts again and checks "THE PREVIOUS RUN DIED".
 
-## 3. Safety: what the machine does when the GUI dies
+## 3. The USBLMCV4 execution model: what happens to a submitted job in each failure
 
-All claims below were checked in code unless they are marked HARDWARE.
+Luiz's direction (2026-11-03) is production reliability. A GUI failure should not needlessly interrupt a job the
+controller is running on its own. **This branch changes no stop or shutdown behaviour.** The panic hook stop,
+`stop_all_bounded`, the close guard, ARM, Stop, the driver's fault handling and the watchdog are untouched. The new
+supervisor opens no device and stops nothing.
 
-- **Who sends the stop bytes.** Always the driver thread (`openlaser-driver <id>`).
-  - The panic hook, the signal watcher and the close guard only trip latches (atomic) and wait at most 500 ms.
-  - The driver thread holds no UI lock, so a UI-thread panic still gets a full stop.
-  - The stop is `StopExecute`, `MO(0)`, `ResetList`, `MO(0)`, `WritePort(0)`, then a confirming read.
-- **What nothing in the process can cover**, because the driver thread dies with the process:
-  - an access violation in the GL driver;
-  - an alloc-error abort (it skips the panic hook);
-  - a stack overflow;
-  - `TerminateProcess` (`taskkill /F`, Task Manager);
-  - power loss;
-  - a USB unplug.
-- **USB close sends nothing.**
-  - The transport has no `Drop` impl that writes anything.
-  - `disconnect` parks (`MO(0) · WritePort(0)`) only on a clean driver exit.
-  - When the OS closes the WinUSB handle on process death, no bytes are written. Whether the firmware reacts to that
-    is HARDWARE.
-  - galvoplotter's `device.reset()` on close was deliberately not ported.
-- **Framing after a death.**
-  - The loop is host-driven, so at most the current pass list finishes (`lmc_session.rs` `frame`).
-  - Lighting lists can express only jumps, delays and `WritePort` of the red bit. The encoder and the driver both
-    refuse MarkTo, LaserOnPoint and the laser bit.
-  - **But a pass list does not end with `Port(0)`** (`lmc/src/encode.rs` lighting packets). Only Frame Once and a
-    clean stop send `WritePort(0)` afterwards.
-  - So after a death the red pointer may stay on as a still dot. That is an aiming-beam hazard, not a fire hazard.
-  - Whether the board clears its ports at the end of a list is HARDWARE.
-- **Marking after a death.**
-  - The prelude opens MO (`Fiber_SetMo(1)`) and sets the laser bit before any list.
-  - The run-ahead window is at most 3 packets and 2 s by estimate (`builtin.rs` `max_packets` 3, `max_emission_s`
-    2.0). One packet longer than 2 s is still sent alone.
-  - So after a death the board marks what it holds, max(about 2 s, the longest packet), and **MO is never closed**.
-  - Whether an open MO with no list running can emit, and how long the board really keeps going, is HARDWARE.
-- **No heartbeat or watchdog reaches the board.**
-  - The host watchdog (no progress for 1.5 × estimate + 2 s) and the 250 ms transfer timeout live in the process that
-    dies.
-  - No board-side timeout is documented in SPEC, HARDWARE.md, docs/research or the golden notes.
+This section is read-only analysis, with no recommendations. **CONFIRMED** means read in the code, at the place
+named. **HARDWARE** means only a bench test can answer it.
 
-### Options so the machine cannot keep running unattended (proposals; none is implemented here)
+### The model, common to every case (CONFIRMED)
 
-1. **Out-of-process driver** (PLAN.md's `ol-driverd`). A child process with no GPU code owns the USB board and runs
-   the existing driver runtime. The GUI talks to it over a pipe, and a closed pipe trips the latch, so today's
-   emergency stop runs.
-   - Covers GL crashes, OOM, stack overflow and a kill of the GUI.
-   - Does not cover the daemon itself dying, power loss, or an unplug.
-   - Biggest change: the provider in `main.rs`, `DeviceAccess` in the engine, the driver control source, and the
-     board lock.
-2. **Watchdog that re-opens USB.** The supervisor added here already waits on the window process. In a `hw` build
-   it could, after a death, open the board and send the emergency sequence (`MO(0) · WritePort(0) · StopExecute`).
-   - Smaller than option 1.
-   - Needs on HARDWARE: re-open latency, whether WinUSB allows it at once, and whether the board accepts
-     `StopExecute` from a fresh session without the init sequence (`connect` today refuses an empty init).
-   - It only helps if it acts before the buffered 2 s run out, so the bench numbers below decide whether it is worth
-     having.
-3. **End every lighting list with `Port(0)`.** The red dot cannot then stay lit after a death. This changes golden
-   bytes, so it needs a `DIVERGENCES.md` entry. Cheap; recommended once H-CRASH-1 confirms the dot stays.
-4. **Tighter marking run-ahead.** Split packets so none is longer than about 0.5 s, and/or lower `max_emission_s`.
-   This shrinks the post-death bound. Better still, open MO inside the list rather than in the prelude, if the board
-   has such an opcode (HARDWARE / research).
-5. **Board-side timeout.** None is known. It would need firmware research (H15, `StopList` / `RestartList`).
-6. **Hardware.** The E-stop and key switch remain the primary stop (AGENTS.md §1.5). A USB-power-sensing relay on
-   the laser enable would be independent of all software.
+- **The driver runs inside `openlaser.exe`.** It is a thread of the GUI process (`main.rs` `device_provider` →
+  `DeviceAccess::Provider`; thread `openlaser-driver <id>`, `driver/src/runtime.rs`). No other process talks to the
+  board.
+- **A job is streamed, never stored whole on the board.**
+  - `lmc_session.rs` `may_send` sends the next packet only while fewer than `max_packets` packets are unexecuted and
+    the queued time estimate stays within `max_emission`.
+  - The built-in profile sets 3 packets and 2.0 s (`machine/src/builtin.rs`).
+  - A single packet longer than 2 s is still sent on its own.
+  - So the board holds at most about 3 packets / 2 s, or one longer packet. The rest of the job exists only in the
+    host process.
+  - Exception: a job small enough to fit inside that window is entirely on the board once `ExecuteList` is sent.
+- **Before and after a list.**
+  - Before each list the prelude is `ResetList · WritePort(laser bit) · Fiber_SetMo(1) · GetVersion`
+    (`lmc/src/encode.rs`).
+  - After the list, and only once the host has seen !BUSY, the postlude is `MO(0) · WritePort(0) · GetMarkTime`.
+  - The host sends the postlude: the board does not close MO on its own (as far as the code tells).
+- **Framing.**
+  - Frame Loop is host-driven. Each pass is a separate list, sent after the previous pass finished executing.
+  - The board has no repeat count (`lmc_session.rs` `frame`).
+  - Lighting lists can express only jumps, delays and `WritePort` of the red bit.
+  - A pass list does not end with `Port(0)`. Frame Once and a clean stop send `MO(0) · WritePort(0)` afterwards.
+- **What the host reads.** The status word has `BUSY` 0x04, `READY` 0x20 and `AXIS` 0x40
+  (`lmc/src/packet.rs`). Nothing else is read: no laser-source alarm, no galvo error, no input pins. Inputs are
+  only probed by PR #13's `ports`.
 
-### Bench test plan H-CRASH (for Luiz at the machine; agents never run it)
+### (a) GUI process crash
 
-Have the E-stop in reach, goggles on, and a scrap plate in place. Use a `hw` build from Luiz's lane or the diagnostic
-zip. Film the work area and the controller LEDs at 60 fps with a visible clock.
+There are two sub-cases, and they behave differently.
 
-1. **Frame Loop, then kill.** Frame Loop a 50 mm square. In a second window run `taskkill /F /IM openlaser.exe`.
-   Record whether the dot keeps tracing, stops dead, stays lit as a still dot, or goes dark, and for how long.
-2. Repeat step 1 with a large slow shape, where one pass takes several seconds. This measures "finishes the current
-   pass".
-3. Repeat step 1 with Frame Once on a long shape (more than 8 s).
-4. Repeat steps 1–3 with a USB cable pull instead of the kill.
-5. After each kill: start OpenLaser again and connect. Record whether connect works and whether the first status
-   shows BUSY. Power-cycle the board if it is stuck.
-6. **Marking at the lowest power**, inside the 10 % first-emission cap, on scrap:
-   - Start a job of about 30 s with several layers. Kill the app about 10 s in.
-   - Measure from the kill until marking stops, and note whether the fiber source still shows ready or MO open.
-   - **Hit the E-stop if marking goes on for more than about 5 s.**
-7. Repeat step 6, killing between two layers. This shows whether an open MO with no list emits.
-8. Repeat step 6 with a slow raster, where one packet is long. This checks the max(2 s, longest packet) bound.
-9. Repeat step 6 with a cable pull.
-10. Write every result in HARDWARE.md and compare it with the crash bound the Start confirmation showed.
+- **(a1) A Rust panic on any thread.** This includes one the engine catches (`session.rs` `catch_unwind`).
+  - The panic hook trips every stop latch and waits ≤ 500 ms (`apps/openlaser/src/lib.rs` `install_panic_hook`).
+  - The driver thread is still alive, so it runs the full stop sequence: `StopExecute · MO(0) · ResetList · … ·
+    WritePort(0)`, then a confirming read.
+  - **The job is aborted by design.** It does not finish.
+  - Changed by this branch: a wgpu error used to become such a panic, so it stopped the job and closed the window.
+    It is now logged instead (`install_gpu_error_handlers`), and the job and window continue. **No stop code was
+    changed, but the outcome of that one cause did change. This is Luiz's decision to keep or revert.**
+- **(a2) A native crash, OOM abort, stack overflow, `taskkill /F` or power loss of the PC.**
+  - The driver thread dies with the process. No stop and no postlude are sent. Releasing the USB handle writes no
+    bytes (the transport has no `Drop` that writes).
+  - **Can the controller finish the job? No, except for a job that fit entirely inside the run-ahead window.** The
+    board can execute only what it already holds (≤ about 3 packets / 2 s, or one longer packet). The remainder
+    was never sent.
+  - The job therefore ends partway through, and MO is left open (no postlude).
+  - A Frame Loop finishes its current pass, possibly leaving the red pointer lit.
+  - HARDWARE:
+    - whether the board executes the held packets to the end;
+    - whether it closes MO or clears the ports by itself when the list ends;
+    - whether it reacts to the USB handle closing;
+    - what a later connect finds.
 
-    If any case runs longer than that bound, or the red dot or MO stays on, do two things:
-    - implement option 3 (Port(0));
-    - plan option 1 or option 2 before more unattended framing.
+### (b) Hardware communication failure (USB error, timeout, cable pulled, board unpowered)
+
+- A transfer that fails or exceeds `transfer_timeout_ms` (250 ms) is never retried. It becomes a sticky fault
+  (`lmc_session.rs` `xfer_fault`, the "not retried" errors).
+- `runtime.rs` `fault` follows every fault with the emergency stop, over the same link. If the link is gone, the
+  stop report says **STOP NOT CONFIRMED** (`post_report`).
+- **Can the controller finish the job? No.** The host stops streaming at the fault, and also tries to stop.
+  - If the link is truly gone, the board is left with what it holds, as in (a2).
+  - If the link still works (a transient error), the board receives the stop and the job is aborted.
+- HARDWARE:
+  - what the board does with its held packets when USB is pulled;
+  - whether the board is powered from USB or on its own;
+  - how often transient transfer errors occur on this PC's USB.
+
+### (c) Controller or job execution failure
+
+- **Host watchdog.** Progress means a READY/BUSY change or a completed transfer. If there is none for 1.5 × the
+  queued estimate + 2 s, the host faults (`lmc_session.rs` `Watchdog`). A missing status reply is a protocol fault.
+  Both are followed by the emergency stop (`runtime.rs` `fault`).
+- **Can the controller finish the job? No.** The host aborts it by design once the board stops making progress.
+- **Board-side failures.** A laser-source alarm, a galvo error or a board reset are **not visible** to the
+  software: nothing reads them (see the model). They would appear only as a watchdog or transfer fault.
+- HARDWARE:
+  - which board or source failures exist, and how they show in the status word;
+  - whether a slow but healthy board can trip the watchdog. The run-ahead estimate is the input to that.
+
+### (d) Explicit operator Stop
+
+- The Stop button and `laser.stop` / `laser.frameStop` trip the latch. The driver checks it between ≤ 20 ms slices
+  and runs the emergency sequence, ending with a confirming read (`runtime.rs` `service_stop`, `stop_now`;
+  `lmc_session.rs` `emergency`).
+- The stop reports **Stopped**, or **STOP NOT CONFIRMED** (sticky fault).
+- **Can the controller finish the job? No, by design: Stop aborts it.**
+- HARDWARE: the time from the click to the beam off. The bench sessions measured parts of this; see HARDWARE.md.
+
+### (e) Emergency Stop (the machine's E-stop / key switch)
+
+- **The software has no E-stop input.** "E-stop" appears in the code only in messages that tell the operator to use
+  it. The software learns of it only indirectly: a watchdog or transfer fault if the E-stop also removes the
+  board's power or stops it answering.
+- **Can the controller finish the job?** That depends only on the machine's wiring (what the E-stop cuts: the laser
+  source, the galvos, the board). This is HARDWARE, not software.
+- HARDWARE:
+  - what this JPT M7 cabinet's E-stop and key switch cut;
+  - what the software then reports (fault, watchdog, nothing).
+
+### Hardware tests that would settle the HARDWARE items (for Luiz at the machine; agents never run them)
+
+These measurements describe the model; they do not change anything. Have the E-stop in reach, goggles on and a scrap
+plate in place. Use the lowest power, inside the 10 % first-emission cap. Film the work area and the controller LEDs
+at 60 fps with a visible clock.
+
+1. **(a2) during framing.** Frame Loop a 50 mm square, then run `taskkill /F /IM openlaser.exe`. Record whether the
+   dot finishes the pass, then goes dark or stays lit as a still dot.
+2. **(a2) during marking.**
+   - Run a job of about 30 s and kill the app 10 s in. Record:
+     - how long marking continues;
+     - whether it ends at a packet boundary;
+     - whether the fiber source still shows MO open or ready afterwards.
+   - Repeat the kill between two layers.
+   - Repeat with one long slow packet.
+3. **(b).** Repeat steps 1 and 2 with the USB cable pulled instead of the kill.
+4. **After each of steps 1–3.** Start OpenLaser again and connect. Record whether connect works and what the first
+   status word shows (BUSY or READY).
+5. **(e).** With the board idle and then framing, press the E-stop and turn the key switch. Record:
+   - what goes dark (source, galvos, board LEDs);
+   - what OpenLaser reports.
+6. **Write the results in HARDWARE.md.**
 
 ## 4. Collecting evidence on Alexandre's PC (needs Luiz's approval for each step)
 
@@ -230,6 +271,5 @@ zip. Film the work area and the controller LEDs at 60 fps with a visible clock.
 
 - Bound the simulator's `Recording` (CONFIRMED 7), or drop it in the GUI.
 - Move `refresh_plan` off the UI thread, or cap it for 32-bit, if H-C is confirmed.
-- Options 1–4 of §3, decided by H-CRASH.
 - The camera panel's `ColorImage::from_rgba_unmultiplied` length assert (`ui-egui/src/panels.rs`, camera frames).
   It applies only with a camera.
