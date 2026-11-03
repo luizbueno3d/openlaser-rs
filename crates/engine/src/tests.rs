@@ -1995,3 +1995,23 @@ fn agents_cannot_change_rotary_settings() {
     }
     assert_eq!(s.machines(), before);
 }
+
+/// The diagnostics log lists device, file, settings and request commands, never per-frame edits, views or queries,
+/// and keeps long params short.
+#[test]
+fn the_operations_record_lists_device_and_io_commands_only() {
+    use crate::command::DeviceClass;
+    use crate::session::{log_operation, param_summary};
+    for kind in [Kind::Io, Kind::Settings, Kind::Request, Kind::Device(DeviceClass::Light), Kind::Device(DeviceClass::Connect), Kind::Device(DeviceClass::Emit)]
+    {
+        assert!(log_operation(kind), "{kind:?}");
+    }
+    for kind in [Kind::Edit, Kind::View, Kind::Query] {
+        assert!(!log_operation(kind), "{kind:?}");
+    }
+    assert_eq!(param_summary(&Value::Null), "{}");
+    assert_eq!(param_summary(&json!({ "looping": true })), r#"{"looping":true}"#);
+    let long = param_summary(&json!({ "path": "é".repeat(500) }));
+    assert_eq!(long.chars().count(), 201);
+    assert!(long.ends_with('…'));
+}

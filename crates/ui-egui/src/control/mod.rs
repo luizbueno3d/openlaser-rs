@@ -247,6 +247,7 @@ pub fn handle(app: &mut OpenLaserApp, ctx: &egui::Context, req: ControlRequest) 
         }
         "ui.resize" => resize_window(ctx, params),
         "app.quit" => {
+            log::info!(target: "openlaser::exit", "agent control: app.quit");
             (app.services.quit)();
             Ok(serde_json::json!({ "closing": true }))
         }
