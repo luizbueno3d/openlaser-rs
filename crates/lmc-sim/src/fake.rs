@@ -1,5 +1,6 @@
 //! The fake LMC board and its emission recorder.
 
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -80,6 +81,7 @@ pub struct FakeLmc {
     axis_until: Option<MonoTime>,
     axis_max_speed: u16,
     single_opcode: u16,
+    inputs: SimInputs,
 }
 
 struct Active {
@@ -94,6 +96,31 @@ struct Active {
 }
 
 pub type WireHook = Box<dyn FnMut(&SimWire, MonoTime) + Send>;
+
+/// The board's input port word, as `ReadPort` (0x0025) answers it in reply word 1 (a MODEL until H11 measures the
+/// real board). Shared, so a test can press a simulated foot switch while a driver or the port probe polls.
+#[derive(Debug, Clone, Default)]
+pub struct SimInputs(Arc<AtomicU16>);
+
+impl SimInputs {
+    pub fn get(&self) -> u16 {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    pub fn set(&self, word: u16) {
+        self.0.store(word, Ordering::SeqCst);
+    }
+
+    /// Sets (`true`) or clears input `bit` (0..=15; higher bits are ignored).
+    pub fn set_bit(&self, bit: u8, on: bool) {
+        let Some(mask) = 1u16.checked_shl(u32::from(bit)) else { return };
+        if on {
+            self.0.fetch_or(mask, Ordering::SeqCst);
+        } else {
+            self.0.fetch_and(!mask, Ordering::SeqCst);
+        }
+    }
+}
 
 impl FakeLmc {
     pub fn new(cfg: SimConfig, clock: Arc<dyn Clock>) -> Self {
@@ -133,7 +160,12 @@ impl FakeLmc {
             axis_until: None,
             axis_max_speed: 1,
             single_opcode: 0,
+            inputs: SimInputs::default(),
         }
+    }
+    /// The input word `ReadPort` reports (shared with whoever pressed the simulated inputs).
+    pub fn set_inputs(&mut self, inputs: SimInputs) {
+        self.inputs = inputs;
     }
     pub fn recorder(&self) -> Arc<Recorder> {
         Arc::clone(&self.recorder)
@@ -458,6 +490,8 @@ impl LmcTransport for FakeLmc {
             let word = self.axis_position.unsigned_abs() | if self.axis_position < 0 { 0x8000_0000 } else { 0 };
             let [a, b, c, d] = word.to_le_bytes();
             [0, u16::from_le_bytes([a, b]), u16::from_le_bytes([c, d]), status]
+        } else if self.single_opcode == op::READ_PORT {
+            [0, self.inputs.get(), 0, status]
         } else {
             [0, 0, 0, status]
         };

@@ -128,6 +128,7 @@ struct Options {
     ppp: f32,
     human: Box<dyn crate::HumanSurfaces>,
     machines: Vec<openlaser_engine::MachineProfile>,
+    devices: Option<Arc<dyn openlaser_engine::DeviceProvider>>,
     settings: UiSettings,
     files: Files,
     quit: Box<dyn Fn() + Send>,
@@ -140,6 +141,7 @@ impl Default for Options {
             ppp: 1.0,
             human: Box::new(crate::NoHuman),
             machines: vec![openlaser_machine::jpt_m7_200_sim()],
+            devices: None,
             settings: UiSettings { in_window_menus: true, ..UiSettings::default() },
             files: Files::default(),
             quit: Box::new(|| {}),
@@ -152,7 +154,7 @@ fn harness_with(options: Options) -> H {
     let session = Session::new(SessionConfig {
         origin: Origin::Human,
         window: true,
-        devices: DeviceAccess::None,
+        devices: options.devices.map_or(DeviceAccess::None, DeviceAccess::Provider),
         machines: options.machines,
         profiles: None,
         camera_store: None,
@@ -453,6 +455,31 @@ fn kittest_lightburn_regions_present() {
     }
     assert!(has_text(&h, "agent: none"), "status bar agent indicator");
     assert!(has_text(&h, "JPT M7"), "machine chip");
+}
+
+#[test]
+fn simulator_is_named_when_it_drives_a_real_machine_profile() {
+    let sim = || {
+        let cfg = openlaser_lmc_sim::SimConfig {
+            buffer_depth: 3,
+            transfer_latency: std::time::Duration::ZERO,
+            status_extra_bits: 0,
+            pid: 0x9899,
+            faults: Vec::new(),
+            emission_cap_pct: None,
+        };
+        Some(Arc::new(openlaser_lmc_sim::SimProvider::new(cfg)) as Arc<dyn openlaser_engine::DeviceProvider>)
+    };
+    // The USB profile on the simulator (a laser build started without the hardware variable): chip and notice say so.
+    let mut h = harness_with(Options { machines: vec![openlaser_machine::jpt_m7_200()], devices: sim(), ..Options::default() });
+    h.run();
+    assert!(has_text(&h, "JPT M7 · USB · SIMULATOR, no laser: Disconnected"), "chip names the simulator");
+    assert!(has_text(&h, "Start OpenLaser with laser"), "the Laser panel says how to reach the laser");
+    // The simulator's own profile already says Simulator: no notice.
+    let mut h = harness_with(Options { devices: sim(), ..Options::default() });
+    h.run();
+    assert!(has_text(&h, "JPT M7 · Simulator: Disconnected"));
+    assert!(!has_text(&h, "SIMULATOR, no laser") && !has_text(&h, "Start OpenLaser with laser"));
 }
 
 #[test]

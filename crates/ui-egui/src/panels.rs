@@ -12,6 +12,8 @@ use crate::tf;
 
 /// STOP's colours are fixed and theme-independent (UI §9.1): white on saturated red.
 pub(crate) const STOP_RED: egui::Color32 = egui::Color32::from_rgb(196, 18, 28);
+/// The chip and notice of a real machine driven by the simulator (violet: no machine state uses it).
+pub(crate) const SIMULATOR_COLOR: egui::Color32 = egui::Color32::from_rgb(150, 90, 220);
 
 pub(crate) fn not_yet() -> &'static str {
     t("Not in OpenLaser yet", "Ainda não disponível no OpenLaser")
@@ -437,7 +439,22 @@ impl OpenLaserApp {
             .or_else(|| states.iter().find(|(_, s)| state_requires_stop(s)))
             .map(|(_, s)| s.clone());
         let (text, color) = state_text(state.as_ref(), self.arm_dialog_open());
+        if self.simulating_real_machine() {
+            // A real machine's profile driven by the simulator: never let it read as the laser (UI §4.3).
+            return (tf!("{name} · SIMULATOR, no laser: {text}", "{name} · SIMULADOR, sem laser: {text}"), SIMULATOR_COLOR);
+        }
         (format!("{name}: {text}"), color)
+    }
+
+    /// The active machine's profile names a real link (USB, serial, network), but this window's device provider is
+    /// the simulator: nothing it frames or marks reaches a laser.
+    pub(crate) fn simulating_real_machine(&self) -> bool {
+        use openlaser_machine::{GalvoLink, GantryLink, Kinematics};
+        self.session.device_provider_name() == Some("sim")
+            && self.active_machine().is_some_and(|m| match &m.kind {
+                Kinematics::Galvo(g) => g.link != GalvoLink::Sim,
+                Kinematics::Gantry(g) => !matches!(g.link, GantryLink::Sim | GantryLink::ExportOnly),
+            })
     }
 
     // ---- numeric edits ------------------------------------------------------------------------------------------------
@@ -1352,6 +1369,16 @@ impl OpenLaserApp {
                 self.execute_widget("device.select", serde_json::json!({ "device": id.0 }));
             }
         });
+        if self.simulating_real_machine() {
+            let note = ui.colored_label(
+                SIMULATOR_COLOR,
+                t(
+                    "Simulator: this window cannot reach the laser. Frame, Start and ARM here move nothing. To use the laser, close OpenLaser and open it with “Start OpenLaser with laser”.",
+                    "Simulador: esta janela não alcança o laser. Enquadrar, Iniciar e ARMAR aqui não movem nada. Para usar o laser, feche o OpenLaser e abra-o com “Start OpenLaser with laser”.",
+                ),
+            );
+            self.track(&note, "status", "Simulator notice", false);
+        }
         ui.horizontal(|ui| {
             let (text, color) = self.chip();
             ui.colored_label(color, text);

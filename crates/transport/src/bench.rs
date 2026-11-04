@@ -1,5 +1,5 @@
 //! The bench session (S17, S23): a human at the laser starts it at a TTY (`openlaser-hw bench start`); every real
-//! open needs one ≤ 2 h old, and the first emission of each session is capped at 10 % power.
+//! open needs one ≤ 2 h old. It no longer caps the first emission (`emission_cap_pct_at` is always None).
 //!
 //! `<data_dir>/OpenLaser/bench-session.json` = `{createdUnix, pid, emissions}`. Wall clock, because the file
 //! crosses processes. No tty name is stored: reading it needs `ttyname(3)` (unsafe); `IsTerminal` is enough.
