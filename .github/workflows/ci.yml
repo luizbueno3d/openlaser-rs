@@ -170,3 +170,32 @@ jobs:
           Test-Window (Resolve-Path "$env:RUNNER_TEMP/gl/openlaser.exe").Path ''
           Test-Window (Resolve-Path "$env:RUNNER_TEMP/gl/openlaser.exe").Path 'gl'
           if ($failed.Count -gt 0) { throw "the OpenLaser window did not open: $($failed -join ', ')" }
+
+      - name: Smoke-test the diagnostics log (supervisor, a killed window process, the next start)
+        shell: pwsh
+        run: |
+          # The window process is killed the way a crash ends it; the supervisor must record the death, the marker must
+          # say died, and the next start must report it. The supervisor's "closed unexpectedly" box is then closed by
+          # stopping every openlaser process.
+          $logs = "$env:LOCALAPPDATA/OpenLaser/logs"
+          Remove-Item $logs -Recurse -Force -ErrorAction SilentlyContinue
+          $exe = (Resolve-Path "$env:RUNNER_TEMP/gl/openlaser.exe").Path
+          $supervisor = Start-Process $exe -PassThru -WorkingDirectory (Split-Path $exe)
+          Start-Sleep -Seconds 20
+          $window = Get-Process openlaser -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq 'OpenLaser' } | Select-Object -First 1
+          if (-not $window) { throw 'no OpenLaser window' }
+          if ($window.Id -eq $supervisor.Id) { throw 'the window opened in the supervisor process' }
+          Stop-Process -Id $window.Id -Force
+          Start-Sleep -Seconds 3
+          Get-Process openlaser -ErrorAction SilentlyContinue | Stop-Process -Force
+          $marker = Get-Content "$logs/session.txt" -Raw
+          Write-Host $marker
+          if ($marker -notmatch 'state=died') { throw 'session.txt does not say died' }
+          $p = Start-Process $exe -PassThru -WorkingDirectory (Split-Path $exe)
+          Start-Sleep -Seconds 15
+          Get-Process openlaser -ErrorAction SilentlyContinue | Stop-Process -Force
+          $text = Get-Content "$logs/openlaser.log" -Raw
+          Write-Host $text
+          foreach ($want in @('supervisor', 'started the window process', 'graphics: ', 'machines: simulator', 'THE WINDOW PROCESS', 'DIED', 'THE PREVIOUS RUN DIED')) {
+            if ($text -notmatch [regex]::Escape($want)) { throw "the log lacks '$want'" }
+          }

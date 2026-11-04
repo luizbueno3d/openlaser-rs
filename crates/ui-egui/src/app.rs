@@ -697,7 +697,16 @@ impl OpenLaserApp {
     /// Close guard (UI §7.5): a close while a machine is active is cancelled, STOP is tripped, and the window closes
     /// only after the StopReport confirms the stop. Runs in `logic`; the app calls `craft_quit::on_close_request` after.
     pub(crate) fn guard_close(&mut self, ctx: &egui::Context) {
-        if ctx.input(|i| i.viewport().close_requested()) && !self.close.authorized && (self.close.after_stop || self.safety_active()) {
+        let requested = ctx.input(|i| i.viewport().close_requested());
+        if requested {
+            log::info!(
+                target: "openlaser::exit",
+                "window close requested (title-bar X, Alt+F4/Cmd+Q, File > Exit or agent quit); machine active: {}, stop confirmed: {}",
+                self.safety_active(),
+                self.close.authorized
+            );
+        }
+        if requested && !self.close.authorized && (self.close.after_stop || self.safety_active()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if !self.close.after_stop {
                 self.close.after_stop = true;
@@ -709,10 +718,12 @@ impl OpenLaserApp {
                 Some(true) => {
                     self.close.after_stop = false;
                     self.close.authorized = true;
+                    log::info!(target: "openlaser::exit", "close guard: the stop was confirmed; closing");
                     self.set_status(crate::i18n::t("Stop confirmed; closing", "Parada confirmada; fechando"));
                     (self.services.quit)();
                 }
                 Some(false) => {
+                    log::warn!(target: "openlaser::exit", "close guard: STOP NOT CONFIRMED; the window stays open");
                     self.close.after_stop = false;
                     self.set_status(crate::i18n::t(
                         "STOP NOT CONFIRMED: the window stays open. Use the E-stop or the key switch.",
@@ -788,7 +799,10 @@ impl OpenLaserApp {
                     self.set_status(e);
                 }
             }
-            "file.exit" => (self.services.quit)(),
+            "file.exit" => {
+                log::info!(target: "openlaser::exit", "File > Exit");
+                (self.services.quit)()
+            }
             "file.open" | "file.import" => {
                 let kind = if id == "file.open" { DialogKind::OpenProject } else { DialogKind::Import };
                 let ticket = self.services.files.open(kind);

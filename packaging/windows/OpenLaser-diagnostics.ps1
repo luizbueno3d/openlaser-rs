@@ -2,6 +2,9 @@
 # thing it writes is its report, OpenLaser-diagnostics.txt on the Desktop (also copied to the clipboard, so it can be
 # pasted into a chat or a remote-desktop session).
 #
+# It also prints how OpenLaser ended (its log, crash markers and the Windows Event Log entries for openlaser.exe;
+# reading the Event Log changes nothing).
+#
 # It checks Windows (and that the download fits it: 64-bit, or the 32-bit windows-x86 package), the unzipped OpenLaser files, the Visual C++ runtime, the laser board on USB (9588:9899) and the
 # driver Windows gave it, and OpenLaser's own folders. It ends with a SUMMARY and the next step.
 #
@@ -259,6 +262,69 @@ Guard 'OpenLaser folders' {
     }
     $bench = Join-Path $env:LOCALAPPDATA 'OpenLaser\bench-session.json'
     if (Test-Path -LiteralPath $bench) { Say "  bench session file: $(Get-Content -LiteralPath $bench -Raw)" }
+}
+
+# ---- How OpenLaser ended (crash records) ------------------------------------------------------------------------------
+Section 'How OpenLaser ended (log and crash records)'
+Guard 'OpenLaser log' {
+    $offset = [TimeZoneInfo]::Local.GetUtcOffset((Get-Date))
+    Say "  The log's times are UTC (Z). This PC is UTC$(if ($offset -lt [TimeSpan]::Zero) { '-' } else { '+' })$($offset.ToString('hh\:mm'))."
+    $logs = Join-Path $env:LOCALAPPDATA 'OpenLaser\logs'
+    $marker = Join-Path $logs 'session.txt'
+    if (Test-Path -LiteralPath $marker) {
+        Say '  Last session (session.txt):'
+        foreach ($line in @(Get-Content -LiteralPath $marker)) { Say "    $line" }
+        $text = Get-Content -LiteralPath $marker -Raw
+        if ($text -match 'state=died') { Problem 'the last OpenLaser run died (see "How OpenLaser ended" in the details)' }
+        elseif ($text -match 'state=running') {
+            if (@(Get-Process -Name openlaser -ErrorAction SilentlyContinue).Count -gt 0) { Note 'OpenLaser is running now' }
+            else { Problem 'the last OpenLaser run did not end cleanly (killed, power loss or a crash)' }
+        }
+    } else {
+        Say "  $marker does not exist (an OpenLaser without the diagnostics log, or it never started)"
+    }
+    $log = Join-Path $logs 'openlaser.log'
+    if (Test-Path -LiteralPath $log) {
+        $all = @(Get-Content -LiteralPath $log -ErrorAction SilentlyContinue)
+        $old = Join-Path $logs 'openlaser.old.log'
+        if (Test-Path -LiteralPath $old) { $all = @(Get-Content -LiteralPath $old -ErrorAction SilentlyContinue) + $all }
+        $pattern = 'DIED|DID NOT END CLEANLY|PANIC|panicked|wgpu .*error|graphics device was lost|memory allocation of|overflowed its stack|clean end:|openlaser::exit|started the window process'
+        $marks = @($all | Select-String -Pattern $pattern | Select-Object -Last 40)
+        Say ''
+        Say "  Crash markers and ends in the log (the last $($marks.Count)):"
+        foreach ($m in $marks) { Say "    $($m.Line)" }
+        $deaths = @($all | Select-String -Pattern 'DIED|DID NOT END CLEANLY').Count
+        $panics = @($all | Select-String -Pattern 'PANIC on thread').Count
+        $gpu = @($all | Select-String -Pattern 'openlaser::gpu').Count
+        if ($deaths -gt 0) { Note "the log holds $deaths unexpected end(s), $panics panic(s) and $gpu graphics error(s)" }
+        Say ''
+        Say "  The last 120 lines of $log :"
+        foreach ($line in @($all | Select-Object -Last 120)) { Say "    $line" }
+    } else {
+        Say "  $log does not exist yet"
+    }
+}
+
+# ---- Windows Event Log ------------------------------------------------------------------------------------------------
+Section 'Windows Event Log (Application Error / Windows Error Reporting for openlaser.exe, last 30 days)'
+Guard 'Event Log' {
+    $since = (Get-Date).AddDays(-30)
+    $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000, 1001, 1002; StartTime = $since } -ErrorAction SilentlyContinue |
+        Where-Object { $_.Message -match 'openlaser' } | Select-Object -First 15)
+    if ($events.Count -eq 0) { Say '  none' }
+    foreach ($e in $events) {
+        Say "  $($e.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')) (local)  event $($e.Id)  $($e.ProviderName)"
+        foreach ($line in @(($e.Message -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -First 12)) { Say "      $($line.Trim())" }
+    }
+    $crashes = @($events | Where-Object { $_.Id -eq 1000 })
+    if ($crashes.Count -gt 0) {
+        # Event 1000's fields, whatever the Windows language: 3 faulting module, 6 exception code, 7 offset.
+        $p = $crashes[0].Properties
+        $module = if ($p.Count -gt 7) { "$($p[3].Value), exception code 0x$($p[6].Value), offset 0x$($p[7].Value)" } else { 'see the details' }
+        Problem "Windows recorded $($crashes.Count) crash(es) of openlaser.exe (Application Error 1000); the newest: $module"
+    }
+    $hangs = @($events | Where-Object { $_.Id -eq 1002 })
+    if ($hangs.Count -gt 0) { Note "Windows recorded $($hangs.Count) hang(s) of openlaser.exe (Application Hang 1002)" }
 }
 
 # ---- Other laser programs ---------------------------------------------------------------------------------------------
