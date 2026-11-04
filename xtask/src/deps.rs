@@ -88,18 +88,22 @@ const SERVER_OWNERS: &[&str] = &["openlaser-automation", APP_CLI];
 /// Rule 6.
 const NO_SERVER_OR_SCRIPTING: &[&str] = &["rmcp", "tokio", "hyper", "axum", "tungstenite", "rhai", "extism", "pyo3"];
 /// Rule 10: test-only features, and where they live.
-const TEST_FEATURES: &[(&str, &str)] = &[("openlaser-safety", "unchecked-for-tests"), ("openlaser-lmc", "py-compat"), (ARM, "test-witness")];
+const TEST_FEATURES: &[(&str, &str)] =
+    &[("openlaser-safety", "unchecked-for-tests"), ("openlaser-lmc", "py-compat"), (ARM, "test-witness"), ("openlaser-engine", "test-pedal")];
 /// Rule 10: dev-dependency edges that would otherwise be cycles, used only from integration tests in `tests/`:
 /// driver's T6 runs on FakeLmc (§6.2, §6.3); `types/tests/arm_*.rs` get tokens from `arm::testing` (§3.9, §7.12).
 const DEV_CYCLE_EXCEPTIONS: &[(&str, &str)] = &[("openlaser-driver", LMC_SIM), ("openlaser-types", ARM)];
 /// Rule 11: the only files that may allow clippy::disallowed_methods.
-const DISALLOWED_ALLOWED_IN: &[&str] = &["crates/arm/src/mint.rs", "crates/human/src/gesture.rs", "apps/openlaser-hw/src/tty_arm.rs"];
+const DISALLOWED_ALLOWED_IN: &[&str] =
+    &["crates/arm/src/mint.rs", "crates/human/src/gesture.rs", "crates/human/src/pedal.rs", "apps/openlaser-hw/src/tty_arm.rs"];
 const DISALLOWED_PATHS: &[&str] = &[
     "openlaser_types::arm::ArmToken::issue",
     "openlaser_arm::HumanConfirm::from_gui_gesture",
     "openlaser_arm::GuiGestureWitness::new",
     "openlaser_arm::HumanConfirm::from_tty",
     "openlaser_arm::TtyWitness::new",
+    "openlaser_arm::HumanConfirm::from_foot_switch",
+    "openlaser_arm::FootSwitchWitness::new",
 ];
 
 #[derive(Debug, Clone)]

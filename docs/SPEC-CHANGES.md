@@ -116,3 +116,24 @@ summarised per crate. Fold into SPEC revision 3.
 - I2: **camera phase 6a**. New `openlaser-camera` crate (nokhwa `=0.10.11`, `default-features = false` + `input-native` + `camera-sync-impl`: AVFoundation/MSMF/v4l, no `decoding` so no C toolchain; `camera-sync-impl` makes `nokhwa::Camera` `Send` for the pump thread). `list_devices`, `Capture::open/start/stop/latest_frame` (latest-wins pump, RGBA `Frame` via `decode_image::<RgbAFormat>` — YUYV/NV12/GRAY/raw; an MJPEG-only camera refuses `Error::UnsupportedFormat`), `SyntheticSource` behind feature `synthetic`. `engine` gained the `camera` internal edge and owns the one `Capture` (`Session::camera_*` + `EngineError::Camera`, code `camera`): `camera.list`, `camera.status`, `camera.start {index?}`, `camera.stop` — all `Access::Agent` `Query`/`View` commands (view state, never laser state). `ui-egui`: `camera` joins `dock::PANELS`, `laserTools.cameras` is a shell row opening the Camera Control panel (device dropdown, Start/Stop, `TextureHandle` feed repainting ~33 ms while streaming, lazy enumeration). CI's Linux job installs `libclang-dev` (v4l2-sys-mit's bindgen; Linux only — no C toolchain on Windows).
 
 - I2: **camera phase 6b** (guided placement). `camera` gained `serde` for `calibrate`: `Pair` (cam px ↔ bed mm), `fit` (exact affine at 3 pairs; Hartley-normalised DLT homography at ≥4 — smallest eigenvector of AᵀA by inverse iteration over a safe-Rust Gaussian solve; a spanning 4-subset with no 3 collinear is required on each side, so collinear triples inside a larger set are fine but all-on-a-line is refused), `Calibration::{bed_to_px, px_to_bed, rms_error_px, kind}` (the inverse is the analytic inverse of the fit), `StoredCalibration` and the `CalibrationStore` trait (ProfileStore-style). `format` gained the `camera` internal edge for `camera_cal::{calibration_path, DirCalibrationStore}` — `<data_dir>/camera-calibration.json`, atomic, corrupt files load as `None`; `openlaser` and `openlaser-hw` inject it into `SessionConfig.camera_store` (None keeps calibration session-local, e.g. automation). Engine: `camera.calibrate.addPair/removeLast/fit/clear` and `camera.map.bedToPx/pxToBed` (all `Access::Agent` view state; `camera.status` reports a `calibration` block; `map.*` is disabled until calibrated); `view.cameraBackground` is a `Ui` command the shell toggles (persisted `UiSettings.camera_background`, Window ▸ View Style row shows ✓). `ui-egui`: the Camera Control panel's Calibrate mode (click the feed → enter bed mm → Add; numbered pair dots, Undo/Clear/Fit, persisted RMS shown) and the canvas underlay (tessellated textured mesh through `px_to_bed`, ~60 % alpha under the grid/design, only while streaming+calibrated — no stale frame or map).
+
+- M3 / H11: **foot switch.** `openlaser-hw ports [--watch]` reads `ReadPort` (0x0025) only and prints which input
+  bit moves and its rest level. `machine::PortMap.foot_switch: Option<FootSwitchCfg>` (`ports.footSwitch` = word
+  0..=2, bit 0..=15, `activeLow`, `fullPulse` default true, `debounceMs` 10..=1000 default 30). It is unset by
+  default and not serialised while unset, and it is set only through `openlaser-hw profile set footSwitch.*`.
+  - Driver: `Backend::{foot_switch, read_inputs}` (LMC: `ReadPort`, `Capabilities.inputs = true`). While connected,
+    idle and unfaulted, and only when the profile sets a pedal, the driver thread reads the inputs every 15 ms.
+    `PedalDetector` turns the reads into presses: released → pressed (→ released with full pulse), each level held
+    for the debounce time. Any state change resets it. New events `DriverEvent::Inputs { words, pedal_down }` (on
+    change) and `DriverEvent::FootSwitch { at }`.
+  - Engine: `CachedStatus::{inputs, pedal_down, pedal_blocked}`. A stop or a fault blocks the pedal until a human
+    `laser.frame` or `laser.start`. The engine emits the gated `Event::FootSwitch(PedalPress)` and never forwards
+    the raw press. Only the engine builds a `PedalPress`; the `test-pedal` feature (test-only, rule 10) adds
+    `engine::testing::pedal_press_for_tests`.
+  - ARM: new `ConfirmKind::FootSwitch` with `FootSwitchWitness` and `HumanConfirm::from_foot_switch`, both
+    disallowed-methods outside `crates/human/src/pedal.rs` (rule 11). `mint` ignores the text for it but requires
+    every tick, and keeps all frame, age and bytes rules.
+  - GUI: `HumanSurfaces::foot_switch` and `ArmModel.foot_switch`. A press is Start through the Start button's own
+    gate (`start_gate_now`), and it arms at once only with a standing confirmation (≤ 2 s old). Inside an open
+    dialog, with every item ticked, a press made after the dialog opened (≤ 30 s, design C3.8) replaces typing ARM.
+    The Laser panel shows the pedal line.

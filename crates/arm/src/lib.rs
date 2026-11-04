@@ -26,11 +26,17 @@ pub struct HumanConfirm {
 
 pub enum ConfirmKind {
     GuiGesture,
-    Tty { nonce: u64 },
+    Tty {
+        nonce: u64,
+    },
+    /// The foot switch (SPEC M3, design C3.8): a debounced press of the physical pedal, read from the board by the
+    /// driver thread, replaces the typed `ARM`. Every checklist box must still be ticked.
+    FootSwitch,
 }
 
 pub struct GuiGestureWitness(());
 pub struct TtyWitness(());
+pub struct FootSwitchWitness(());
 
 // No `Default`: that would be a second, unpoliced way to build a witness.
 #[allow(clippy::new_without_default)]
@@ -50,7 +56,22 @@ impl TtyWitness {
     }
 }
 
+// No `Default`: that would be a second, unpoliced way to build a witness.
+#[allow(clippy::new_without_default)]
+impl FootSwitchWitness {
+    /// Only crates/human/src/pedal.rs.
+    pub fn new() -> Self {
+        FootSwitchWitness(())
+    }
+}
+
 impl HumanConfirm {
+    /// Only crates/human/src/pedal.rs. `at` is when the pedal press completed (its debounced edge).
+    pub fn from_foot_switch(w: FootSwitchWitness, ticked: Vec<bool>, at: MonoTime) -> Self {
+        let FootSwitchWitness(()) = w;
+        HumanConfirm { kind: ConfirmKind::FootSwitch, typed: String::new(), ticked, at }
+    }
+
     /// Only crates/human/src/gesture.rs.
     pub fn from_gui_gesture(w: GuiGestureWitness, typed: &str, ticked: Vec<bool>, at: MonoTime) -> Self {
         let GuiGestureWitness(()) = w;

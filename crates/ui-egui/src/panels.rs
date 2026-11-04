@@ -446,6 +446,42 @@ impl OpenLaserApp {
         (format!("{name}: {text}"), color)
     }
 
+    /// The Laser panel's foot-switch line (SPEC M3, UI "IO ports"): where it is read and what it reads now.
+    fn foot_switch_row(&mut self, ui: &mut egui::Ui) {
+        let Some(m) = self.active_machine() else { return };
+        let openlaser_machine::Kinematics::Galvo(g) = &m.kind else { return };
+        let status = self.session.status(&m.id);
+        let text = match &g.ports.foot_switch {
+            None => t(
+                "Foot switch: not set. Measure its input with `openlaser-hw ports --watch`, then set it with `openlaser-hw profile set footSwitch.bit <bit>`.",
+                "Pedal: não definido. Meça a entrada com `openlaser-hw ports --watch` e defina com `openlaser-hw profile set footSwitch.bit <bit>`.",
+            )
+            .to_owned(),
+            Some(f) => {
+                let at = tf!("word {} bit {}", "palavra {} bit {}", f.word, f.bit);
+                let state = match status {
+                    Some(s) if s.connected && s.pedal_blocked => {
+                        t("blocked after a stop: click Frame or Start once", "bloqueado após uma parada: clique em Enquadrar ou Iniciar uma vez").to_owned()
+                    }
+                    Some(s) if s.connected => match s.pedal_down {
+                        Some(true) => t("pressed", "pressionado").to_owned(),
+                        Some(false) => t("released", "solto").to_owned(),
+                        None => t("reading…", "lendo…").to_owned(),
+                    },
+                    _ => t("connect to read it", "conecte para ler").to_owned(),
+                };
+                tf!("Foot switch ({at}): {state}", "Pedal ({at}): {state}")
+            }
+        };
+        let words = status.and_then(|s| s.inputs).map(|w| format!("ReadPort: {:04x} {:04x} {:04x} {:04x}", w[0], w[1], w[2], w[3]));
+        let label = ui.label(text);
+        let label = match words {
+            Some(w) => label.on_hover_text(w),
+            None => label,
+        };
+        self.track(&label, "status", "Foot switch", false);
+    }
+
     /// The active machine's profile names a real link (USB, serial, network), but this window's device provider is
     /// the simulator: nothing it frames or marks reaches a laser.
     pub(crate) fn simulating_real_machine(&self) -> bool {
@@ -1369,6 +1405,7 @@ impl OpenLaserApp {
                 self.execute_widget("device.select", serde_json::json!({ "device": id.0 }));
             }
         });
+        self.foot_switch_row(ui);
         if self.simulating_real_machine() {
             let note = ui.colored_label(
                 SIMULATOR_COLOR,
@@ -1413,12 +1450,9 @@ impl OpenLaserApp {
         // 2. Job buttons: Pause, Stop, Start; Frame, Send, Home, Go to Origin.
         let plan = self.plan().cloned();
         let receipt = plan.as_ref().and_then(PlanView::summary).and_then(|s| self.receipt_for(&s.machine));
-        let start = if self.session.frame_required() {
-            start_gate(plan.as_ref(), receipt.as_ref(), self.session.id(), self.services.clock.now(), active)
-        } else {
-            // Framing is optional (Settings): Start needs only a plannable job and an idle machine.
-            frame_gate(plan.as_ref(), active)
-        };
+        // Framing is optional (Settings): then Start needs only a plannable job and an idle machine. The foot switch
+        // goes through the same gate (`start_gate_now`).
+        let start = self.start_gate_now();
         let frame = frame_gate(plan.as_ref(), active);
         ui.horizontal(|ui| {
             self.disabled_button(

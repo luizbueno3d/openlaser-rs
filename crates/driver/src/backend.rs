@@ -51,6 +51,14 @@ pub trait Backend: Send + 'static {
     /// A failed read is Err, never bits.
     fn status(&mut self, cx: &mut Cx) -> Result<MachineStatus, DriverError>;
     fn disconnect(&mut self, cx: &mut Cx);
+    /// The foot switch of the machine profile (SPEC M3), when one is set and this backend can read inputs.
+    fn foot_switch(&self) -> Option<openlaser_machine::FootSwitchCfg> {
+        None
+    }
+    /// One read of the input port (LMC: the four `ReadPort` reply words). Reads only. A failed read is Err.
+    fn read_inputs(&mut self, _cx: &mut Cx) -> Result<[u16; 4], DriverError> {
+        Err(DriverError::NotImplemented("input port"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -150,6 +158,17 @@ pub enum DriverEvent {
     /// Sticky until acknowledged.
     Fault(DriverError),
     Trace(TraceLine),
+    /// The input port changed (the idle driver reads it while a foot switch is set): the four `ReadPort` words and
+    /// whether the foot switch reads pressed in them.
+    Inputs {
+        words: [u16; 4],
+        pedal_down: bool,
+    },
+    /// A debounced foot-switch press completed at `at` (released → pressed → released with full pulse). It only
+    /// reports: it never starts or arms anything in the driver.
+    FootSwitch {
+        at: MonoTime,
+    },
 }
 
 /// Disassembled, for the Console panel.

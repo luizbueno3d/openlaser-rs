@@ -36,7 +36,7 @@ pub use services::{
 // Re-exports so callers can name these without a direct dependency (SPEC §3.0).
 pub use openlaser_control::server::ControlRequest;
 pub use openlaser_control::wire::Reply;
-pub use openlaser_engine::{Registry, Session};
+pub use openlaser_engine::{PedalPress, Registry, Session};
 pub use openlaser_render::DisplayList;
 pub use openlaser_types::{ArmToken, EmissionSummary, FrameReceipt, MonoTime, SessionId};
 pub use {eframe, egui, serde_json};

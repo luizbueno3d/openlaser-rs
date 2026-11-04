@@ -483,6 +483,96 @@ fn simulator_is_named_when_it_drives_a_real_machine_profile() {
 }
 
 #[test]
+fn laser_panel_shows_the_foot_switch_and_a_press_opens_the_arm_request() {
+    use openlaser_machine::{FootSwitchCfg, Kinematics};
+    // Not set: the panel says how to measure and set it.
+    let mut h = harness();
+    h.run();
+    assert!(has_text(&h, "Foot switch: not set"));
+    // Set (bit 15) and connected on the simulator: the line follows the pedal.
+    let mut m = openlaser_machine::jpt_m7_200_sim();
+    if let Kinematics::Galvo(g) = &mut m.kind {
+        g.ports.foot_switch = Some(FootSwitchCfg::new(1, 15));
+    }
+    let inputs = openlaser_lmc_sim::SimInputs::default();
+    let cfg = openlaser_lmc_sim::SimConfig {
+        buffer_depth: 3,
+        transfer_latency: std::time::Duration::ZERO,
+        status_extra_bits: 0,
+        pid: 0x9899,
+        faults: Vec::new(),
+        emission_cap_pct: None,
+    };
+    let provider = Arc::new(openlaser_lmc_sim::SimProvider::new(cfg).with_inputs(inputs.clone())) as Arc<dyn openlaser_engine::DeviceProvider>;
+    let mut h = harness_with(Options { machines: vec![m], devices: Some(provider), ..Options::default() });
+    h.run();
+    assert!(has_text(&h, "Foot switch (word 1 bit 15): connect to read it"));
+    h.state_mut().session.execute_as(Origin::Human, "device.connect", serde_json::json!({})).unwrap();
+    let wait = |h: &mut H, text: &str| {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !has_text(h, text) {
+            assert!(std::time::Instant::now() < end, "never showed {text}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            h.step();
+        }
+    };
+    wait(&mut h, "Foot switch (word 1 bit 15): released");
+    // Seen released for longer than the debounce first (a pedal already down at connect never counts).
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.step();
+    }
+    inputs.set_bit(15, true);
+    wait(&mut h, "Foot switch (word 1 bit 15): pressed");
+    // Held past the debounce, then released (full pulse).
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.step();
+    }
+    inputs.set_bit(15, false);
+    // The press reaches the app, which refuses it exactly as the Start button's gate does, and nothing is armed.
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !h.state().log.iter().any(|l| l.contains("Foot switch")) {
+        assert!(std::time::Instant::now() < end, "the press never reached the app: {:?}", h.state().log);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.step();
+    }
+    let gate = h.state().start_gate_now().unwrap_err();
+    assert!(h.state().log.iter().any(|l| *l == format!("Foot switch: {gate}")), "{:?}", h.state().log);
+    assert!(h.state().session.pending_arm().is_none());
+    // With a job framed by a person, a press is Start: it requests the ARM (the dialog then decides), and the machine
+    // stays idle: nothing is armed or sent.
+    h.state_mut().session.execute_as(Origin::Synthetic, "file.new", serde_json::json!({})).unwrap();
+    h.state_mut().session.execute_as(Origin::Synthetic, "tools.rectangle", serde_json::json!({ "xMm": 0, "yMm": 0, "wMm": 10, "hMm": 10 })).unwrap();
+    h.state_mut().session.start_frame(Origin::Human, openlaser_engine::FrameMode::Once, None, None).unwrap();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while h.state().start_gate_now().is_err() {
+        assert!(std::time::Instant::now() < end, "the frame never cleared Start: {:?}", h.state().start_gate_now());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.step();
+    }
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.step();
+    }
+    inputs.set_bit(15, true);
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.step();
+    }
+    inputs.set_bit(15, false);
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // NoHuman (fail closed) cancels every ARM dialog it is shown: the cancel is the proof the request was made.
+    while !h.state().log.iter().any(|l| l == "ARM dialog closed: cancelled") {
+        assert!(std::time::Instant::now() < end, "the press never requested the ARM: {:?}", h.state().log);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.step();
+    }
+    let m = h.state().session.machines()[0].id.clone();
+    assert!(matches!(h.state().session.status(&m).unwrap().state, openlaser_engine::MachineState::Idle));
+}
+
+#[test]
 fn kittest_palette_has_30_plus_tools() {
     for width in [1440.0, 1024.0, 760.0] {
         let mut h = harness_with(Options { size: egui::vec2(width, 700.0), ..Options::default() });

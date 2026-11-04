@@ -136,7 +136,7 @@ fn jpt_m7(id: MachineId, name: &str, link: GalvoLink) -> MachineProfile {
         light_speed: lit!(MmPerS, 3000.0),
         max_speed: lit!(MmPerS, 6000.0),
         mo_settle: lit!(Us, 8000.0),
-        ports: PortMap { laser_bit: 0, red_bit: 8 },
+        ports: PortMap { laser_bit: 0, red_bit: 8, foot_switch: None },
         run_ahead: RunAhead { max_packets: 3, max_emission_s: 2.0, watchdog_factor: 1.5, watchdog_slack_s: 2.0 },
         transfer_timeout_ms: 250,
         usb_set_configuration: false,
