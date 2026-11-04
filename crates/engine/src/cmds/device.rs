@@ -176,6 +176,9 @@ pub struct SettingsParams {
     pub red_dot: Option<serde_json::Value>,
     #[serde(default)]
     pub rotary: Option<serde_json::Value>,
+    /// The cut settings every new design and import starts from (the profile's `layerDefaults`, whole).
+    #[serde(default)]
+    pub layer_defaults: Option<serde_json::Value>,
     /// Profile id. Default: the active document's machine.
     #[serde(default)]
     pub device: Option<String>,
@@ -289,6 +292,9 @@ fn apply_settings(id: &str, p: SettingsParams, m: &mut MachineProfile) -> Result
             return Err(EngineError::bad(id, "/checklist", "the checklist has 1..=32 items"));
         }
         m.checklist = list.iter().enumerate().map(|(i, t)| name(id, &format!("/checklist/{i}"), t.trim(), 200)).collect::<Result<_, _>>()?;
+    }
+    if let Some(v) = p.layer_defaults {
+        m.layer_defaults = serde_json::from_value(v).map_err(|e| EngineError::bad(id, "/layerDefaults", e.to_string()))?;
     }
     let galvo_keys = p.work_area.is_some()
         || p.cal.is_some()

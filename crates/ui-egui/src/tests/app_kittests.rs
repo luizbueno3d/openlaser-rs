@@ -753,6 +753,27 @@ fn kittest_cut_settings_ok_is_one_command() {
     assert!(h.state().ui.status_message.contains("no document open"), "{}", h.state().ui.status_message);
 }
 
+/// "OK and use as default for new designs" saves the layer's settings as the machine's layer defaults (a
+/// device.settings.set with layerDefaults) and applies them to the layer (layer.cutSettings.set).
+#[test]
+fn kittest_cut_settings_can_become_the_default_for_new_designs() {
+    let mut h = harness();
+    h.state_mut().seam.project = Some(used_project());
+    h.state_mut().ui.cut_settings_open = true;
+    h.run();
+    for (field, value) in [("powerPct", serde_json::json!(100)), ("frequencyKhz", serde_json::json!(50))] {
+        h.state_mut().cut_draft.as_mut().unwrap().set_field(field, &value).unwrap();
+    }
+    let before = h.state().seam.dispatched.len();
+    h.get_by_label("OK and use as default for new designs").click();
+    h.run();
+    let new: Vec<_> = h.state().seam.dispatched[before..].to_vec();
+    let ids: Vec<&str> = new.iter().map(|(_, id, _)| id.as_str()).collect();
+    assert_eq!(ids, ["device.settings.set", "layer.cutSettings.set"], "{new:?}");
+    assert_eq!(new[0].2["layerDefaults"]["galvo"]["power"], 100.0);
+    assert_eq!(new[0].2["layerDefaults"]["galvo"]["frequency"], 50_000);
+}
+
 #[test]
 fn kittest_cut_settings_ok_is_one_undo_step() {
     let mut h = harness();

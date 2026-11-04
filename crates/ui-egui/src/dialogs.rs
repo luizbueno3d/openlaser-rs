@@ -159,6 +159,7 @@ impl OpenLaserApp {
         let actual = self.actual_speed(self.ui.active_layer);
         let read_only = self.ui.machine_active;
         let mut ok = false;
+        let mut save_default = false;
         let mut cancel = false;
         let mut tracked = Vec::new();
         let modal = egui::Modal::new(egui::Id::new("cut-settings-modal")).show(ctx, |ui| {
@@ -226,6 +227,14 @@ impl OpenLaserApp {
                     Ok(()) => o.on_hover_text(t("Apply every change as one undo step", "Aplica todas as alterações como uma única etapa de desfazer")),
                 };
                 tracked.push((o, "OK".into()));
+                let d =
+                    ui.add_enabled(valid.is_ok(), egui::Button::new(t("OK and use as default for new designs", "OK e usar como padrão para novos projetos")));
+                save_default = d.clicked();
+                let d = d.on_hover_text(t(
+                    "Applies these settings and saves them in the machine profile: new designs and imports start from them.",
+                    "Aplica estas configurações e as salva no perfil da máquina: novos projetos e importações começam com elas.",
+                ));
+                tracked.push((d, "OK and use as default for new designs".into()));
             });
             if let Err(reason) = &valid {
                 ui.weak(reason.as_str());
@@ -234,6 +243,10 @@ impl OpenLaserApp {
         });
         for (response, label) in &tracked {
             self.track(response, "input", label.clone(), false);
+        }
+        if save_default && let Some(draft) = self.cut_draft.clone() {
+            self.save_layer_defaults(ctx, &draft);
+            ok = true;
         }
         if ok && let Some(draft) = &self.cut_draft {
             let params = draft.params();
@@ -253,6 +266,24 @@ impl OpenLaserApp {
         if cancel || (modal.should_close() && !ok) {
             self.ui.cut_settings_open = false;
             self.cut_draft = None;
+        }
+    }
+
+    /// Saves `draft`'s galvo and fill values as the active machine's layer defaults (human-only Device Settings save,
+    /// S24). New designs and imports start from them, so a fresh file does not fall back to the built-in 30 %.
+    fn save_layer_defaults(&mut self, ctx: &egui::Context, draft: &crate::cut_editor::Draft) {
+        let Some(machine) = self.active_machine().map(|m| (m.id.0.clone(), serde_json::to_value(&m.layer_defaults))) else {
+            return;
+        };
+        let (id, Ok(base)) = machine else { return };
+        let params = serde_json::json!({ "device": id, "layerDefaults": draft.as_layer_defaults(base) });
+        self.frame_synthetic = self.services.human.frame_is_synthetic(ctx);
+        let origin = self.origin();
+        #[cfg(test)]
+        self.seam.dispatched.push((origin, "device.settings.set".into(), params.clone()));
+        match self.session.execute_as(origin, "device.settings.set", params) {
+            Ok(_) => self.set_status(t("Saved as the default for new designs", "Salvo como padrão para novos projetos")),
+            Err(e) => self.set_status(e.to_string()),
         }
     }
 
