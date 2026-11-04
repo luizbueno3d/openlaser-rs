@@ -123,6 +123,8 @@ pub fn mint(
                 return refuse(RefusalCode::ArmTextMismatch, format!("type {ARM_TEXT} followed by the {}-digit number shown to arm", nonce.to_string().len()));
             }
         }
+        // The pedal press is the confirmation: nothing is typed.
+        ConfirmKind::FootSwitch => {}
     }
     if checklist_len == 0 {
         return refuse(
@@ -130,7 +132,7 @@ pub fn mint(
             "the machine profile has no safety checklist, so there is nothing to confirm; add a checklist to the profile",
         );
     }
-    if let ConfirmKind::GuiGesture = kind {
+    if let ConfirmKind::GuiGesture | ConfirmKind::FootSwitch = kind {
         let done = ticked.iter().filter(|t| **t).count();
         if ticked.len() != checklist_len || done != checklist_len {
             return refuse(RefusalCode::ChecklistIncomplete, format!("{done} of {checklist_len} checklist items are ticked; tick every item to arm"));
@@ -178,6 +180,11 @@ pub mod testing {
 
     pub fn confirm_for_tests(typed: &str, ticked: Vec<bool>, at: MonoTime) -> HumanConfirm {
         HumanConfirm { kind: ConfirmKind::GuiGesture, typed: typed.to_owned(), ticked, at }
+    }
+
+    /// A foot-switch confirmation (nothing typed).
+    pub fn foot_switch_for_tests(ticked: Vec<bool>, at: MonoTime) -> HumanConfirm {
+        HumanConfirm { kind: ConfirmKind::FootSwitch, typed: String::new(), ticked, at }
     }
 
     /// Lets driver/engine tests (WP5, WP6) run before WP3's `mint` lands.

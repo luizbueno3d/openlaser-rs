@@ -136,6 +136,32 @@ MO and ports with the unchanged emergency sequence, but **the rotary axis may fi
 StopReport confirms laser-off/list-idle, not motor-stopped; the report notes this explicitly. Keep hands clear
 and use the physical E-stop/key switch. Never attempt a rotary bench move while any machine is active.
 
+## 7. Foot switch (H11, SPEC M3)
+
+The pedal does nothing until the profile names its input. Nothing assumes `foot_pin = 15`: the probe decides.
+
+- [ ] **F0: measure (key switch OFF is fine: nothing moves or fires).** `olhw ports --watch`. Press and hold the
+      pedal about 1 s, then release it, three or four times; Esc ends. The summary names the bit that moved and its
+      rest level (active high or low), and prints the `profile set` lines to use. If two bits moved, watch again
+      pressing only the pedal. If nothing moved, check which input connector the pedal uses (EZCAD's "Start
+      Marking" port setting shows the pin).
+- [ ] **F1: set it.** `olhw profile set footSwitch.bit <bit>` (plus `footSwitch.word <w>` if it was not word 1, and
+      `footSwitch.activeLow true` if it rests at 1); `SAVE <id>`. Optional: `footSwitch.fullPulse false` (count on
+      the press instead of press + release; default true, LightBurn's "Require full pulse"),
+      `footSwitch.debounceMs <10..1000>` (default 30). `footSwitch.bit none` turns the pedal off again.
+- [ ] **F2: GUI, red light.** Start the GUI with "Start OpenLaser with laser", Connect. The Laser panel shows
+      "Foot switch (word w bit b): released"; pressing it shows "pressed". With no job, a press only prints why Start
+      is not available.
+- [ ] **F3: GUI, first burn (scrap, 1 %).** Frame the job, press the pedal: the ARM dialog opens (the first ARM of
+      the session is never skipped). Tick every item, press the pedal again: it arms instead of typing ARM. After
+      that, in the same session, a press on a framed job arms at once (like Start with "ARM once per session").
+- [ ] **F4: stop wins.** During a job, press Stop (or Esc): the job stops and the pedal is blocked until you click
+      Frame or Start once. A pedal held through the stop does nothing when released.
+
+The pedal never bypasses anything: the job still has to pass every safety check, the frame rules of `mint` still
+apply, the checklist still has to be ticked, and Stop, Esc and the E-stop always win. The CLI's `run` still arms
+only on the typed `ARM <challenge>`.
+
 ## Stop the session if
 
 - Any stop prints `MO closed: false` or `ports at 0: false`, or "no StopReport … use the key switch / E-stop". Key off

@@ -31,8 +31,13 @@ pub use command::{
     Access, AgentClass, CommandRow, CommandSpec, DeviceClass, Disabled, EngineError, Kind, ListFilter, Origin, Registry, RunFn, params_schema, registry,
     run_typed,
 };
+#[cfg(feature = "test-pedal")]
+pub use devices::testing;
 pub use devices::{PENDING_ARM_TTL, STOP_WAIT};
-pub use devices::{PendingArm, StopRegistry};
+pub use devices::{PedalPress, PendingArm, StopRegistry};
+
+#[cfg(all(feature = "test-pedal", not(debug_assertions)))]
+compile_error!("openlaser-engine: the `test-pedal` feature is test-only (dev-dependencies) and needs debug assertions");
 pub use files::FsAuthority;
 pub use files::MAX_READ_BYTES;
 pub use inspect::INSPECT_OBJECTS;

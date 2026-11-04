@@ -122,10 +122,20 @@ fn summarize(term: &mut dyn Terminal, seen: &[Seen], poll: Duration) {
             let kind = if s.rest { "rests at 1, so pressing pulls it to 0 (active low)" } else { "rests at 0, so pressing sets it to 1 (active high)" };
             term.write(&format!("  word {} bit {:>2}: {} change(s); {kind}\n", s.word, s.bit, s.changes));
         }
-        term.write(&format!(
-            "Changes shorter than {} ms between two reads can be missed; report the word, bit and level to the developers.\n",
-            poll.as_millis()
-        ));
+        term.write(&format!("Changes shorter than {} ms between two reads can be missed.\n", poll.as_millis()));
+        if let [s] = inputs.as_slice() {
+            // One input moved: that is the pedal. The profile commands that make it the foot switch (SPEC M3).
+            term.write("If that was the foot switch, make it the profile's foot switch with:\n");
+            term.write(&format!("  openlaser-hw profile set footSwitch.bit {}\n", s.bit));
+            if s.word != 1 {
+                term.write(&format!("  openlaser-hw profile set footSwitch.word {}\n", s.word));
+            }
+            if s.rest {
+                term.write("  openlaser-hw profile set footSwitch.activeLow true\n");
+            }
+        } else {
+            term.write("More than one input changed: watch again pressing only the foot switch.\n");
+        }
     }
     let status: Vec<&Seen> = seen.iter().filter(|s| s.word == STATUS_WORD).collect();
     for s in status {
