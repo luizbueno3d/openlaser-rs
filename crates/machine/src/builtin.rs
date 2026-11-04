@@ -94,7 +94,7 @@ fn gantry(
             home_on_connect: false,
             link: GantryLink::ExportOnly,
         }),
-        limits: JobLimits { max_paths: 3000, max_points_per_path: 2000, max_points_per_pass: 20000 },
+        limits: JobLimits::DEFAULT,
         layer_defaults: LayerDefaults {
             galvo: GalvoParams {
                 speed: lit!(MmPerS, 1000.0),
@@ -158,7 +158,7 @@ fn jpt_m7(id: MachineId, name: &str, link: GalvoLink) -> MachineProfile {
         id,
         name: name.to_owned(),
         kind: Kinematics::Galvo(galvo),
-        limits: JobLimits { max_paths: 3000, max_points_per_path: 2000, max_points_per_pass: 20000 },
+        limits: JobLimits::DEFAULT,
         layer_defaults,
         checklist: vec![
             "Key switch and E-stop within reach".to_owned(),

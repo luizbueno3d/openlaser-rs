@@ -540,6 +540,14 @@ fn laser_panel_shows_the_foot_switch_and_a_press_opens_the_arm_request() {
     let gate = h.state().start_gate_now().unwrap_err();
     assert!(h.state().log.iter().any(|l| *l == format!("Foot switch: {gate}")), "{:?}", h.state().log);
     assert!(h.state().session.pending_arm().is_none());
+    // Regression (Alexandre, 2026-11-04): the refusal was only in the status line, which nobody at the machine saw.
+    // A popup now names it and says to frame first, until the person closes it.
+    h.run_steps(3);
+    assert!(has_text(&h, "The foot switch did not start the job"), "no popup");
+    assert!(has_text(&h, "Click Frame and let the red light trace the job once. Then press the foot switch."));
+    h.get_by_label("OK").click();
+    h.run_steps(3);
+    assert!(!has_text(&h, "The foot switch did not start the job"), "OK closes it");
     // With a job framed by a person, a press is Start: it requests the ARM (the dialog then decides), and the machine
     // stays idle: nothing is armed or sent.
     h.state_mut().session.execute_as(Origin::Synthetic, "file.new", serde_json::json!({})).unwrap();

@@ -366,13 +366,37 @@ pub enum GantryLink {
     Sim,
 }
 
-/// 3000 / 2000 / 20000.
+/// How big one layer-pass (one LMC list) and one path may be. Defensive host bounds, not controller limits: the
+/// encoder packetises a list into 256-command packets and the driver streams them under the run-ahead window, so a
+/// path or a pass of any length reaches the board in the same way. `max_points_per_pass` stays at the size the
+/// Python prototype ran on the board (about 79 packets); the other two follow from it (a fill segment is a 2-point
+/// path, a spline outline is one long path). See docs/SPEC-CHANGES.md (2026-11-04).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobLimits {
     pub max_paths: u32,
     pub max_points_per_path: u32,
     pub max_points_per_pass: u32,
+}
+
+impl JobLimits {
+    /// The defaults of every built-in profile.
+    pub const DEFAULT: JobLimits = JobLimits { max_paths: 10_000, max_points_per_path: 20_000, max_points_per_pass: 20_000 };
+    /// The prototype's numbers (3000 / 2000 / 20000), which every profile saved before 2026-11-04 carries. They refused
+    /// ordinary fills (one path per scan segment: a 150 x 40 mm logo at 0.1 mm is 3083) and smooth DXF outlines.
+    pub const LEGACY: JobLimits = JobLimits { max_paths: 3000, max_points_per_path: 2000, max_points_per_pass: 20_000 };
+    /// The most a profile may set: 10 x the defaults, so a typo cannot ask the host for an unbounded job.
+    pub const CEILING: JobLimits = JobLimits { max_paths: 100_000, max_points_per_path: 200_000, max_points_per_pass: 200_000 };
+
+    /// A saved profile still on [`JobLimits::LEGACY`] moves to [`JobLimits::DEFAULT`]; any other value is the
+    /// person's own choice and stays. True when it changed.
+    pub fn upgrade_legacy(&mut self) -> bool {
+        if *self == Self::LEGACY {
+            *self = Self::DEFAULT;
+            return true;
+        }
+        false
+    }
 }
 
 impl GalvoMachine {
@@ -413,6 +437,16 @@ pub fn validate_profile(p: &MachineProfile) -> Result<(), Vec<String>> {
     }
     if p.limits.max_paths == 0 || p.limits.max_points_per_path == 0 || p.limits.max_points_per_pass == 0 {
         problems.push("job limits must all be at least 1".to_owned());
+    }
+    let ceiling = JobLimits::CEILING;
+    if p.limits.max_paths > ceiling.max_paths
+        || p.limits.max_points_per_path > ceiling.max_points_per_path
+        || p.limits.max_points_per_pass > ceiling.max_points_per_pass
+    {
+        problems.push(format!(
+            "job limits must stay at or under {} paths, {} points per path and {} points per pass",
+            ceiling.max_paths, ceiling.max_points_per_path, ceiling.max_points_per_pass
+        ));
     }
     match &p.kind {
         Kinematics::Galvo(g) => validate_galvo(g, &mut problems),
