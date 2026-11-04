@@ -344,6 +344,7 @@ impl Session {
     // ---- devices: the human path (Access::Human / Stop commands call these) -----------------------------------
     pub fn connect(&mut self, origin: Origin, machine: &MachineId) -> Result<(), EngineError> {
         require_human(origin, "device.connect")?;
+        log::info!(target: crate::session::OPS_TARGET, "device.connect {} ({origin:?})", machine.0);
         let provider = self.provider()?;
         let profile =
             self.profile(machine).cloned().ok_or_else(|| EngineError::refused(RefusalCode::NoDevice, format!("no machine profile `{}`", machine.0)))?;
@@ -375,6 +376,7 @@ impl Session {
 
     pub fn disconnect(&mut self, origin: Origin, machine: &MachineId) -> Result<(), EngineError> {
         require_human(origin, "device.disconnect")?;
+        log::info!(target: crate::session::OPS_TARGET, "device.disconnect {} ({origin:?})", machine.0);
         self.provider()?;
         let Some(pos) = self.hub.iter().position(|s| &s.machine == machine) else { return Err(not_connected(machine)) };
         if self.hub.get(pos).is_some_and(|s| s.status.busy()) {
@@ -751,6 +753,12 @@ impl Session {
 
     /// One driver event → cached status, receipts, requests and the pending ARM.
     pub(crate) fn fold_driver_event(&mut self, machine: &MachineId, ev: DriverEvent) {
+        // The diagnostics log: state changes, ends and faults; never the per-pass, per-packet or trace events.
+        match &ev {
+            DriverEvent::Trace(_) | DriverEvent::Progress { .. } | DriverEvent::FrameCompleted(_) => {}
+            DriverEvent::Fault(e) => log::warn!(target: "openlaser::machine", "{}: fault: {e}", machine.0),
+            other => log::info!(target: "openlaser::machine", "{}: {other:?}", machine.0),
+        }
         let provider = match &self.cfg.devices {
             DeviceAccess::Provider(p) => Some(Arc::clone(p)),
             DeviceAccess::None => None,

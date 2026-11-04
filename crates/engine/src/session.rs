@@ -226,6 +226,7 @@ impl Session {
         let journal_params = (spec.kind.journaled() && !dry_run).then(|| params.clone());
         let snapshot = (dry_run || !matches!(spec.kind, Kind::Query | Kind::Device(_))).then(|| self.snapshot());
         // 5–7 run inside `run` (decode, enabled, busy); 8: catch_unwind.
+        let logged = log_operation(spec.kind, spec.id).then(|| (std::time::Instant::now(), param_summary(&params)));
         let prev = self.ctx.replace(Ctx { origin, effective, coalesce, dry_run });
         let run = spec.run;
         let outcome = catch_unwind(AssertUnwindSafe(|| run(self, params)));
@@ -245,6 +246,13 @@ impl Session {
                 Err(EngineError::Internal(spec.id.to_owned()))
             }
         };
+        if let Some((started, params)) = logged {
+            let ms = started.elapsed().as_millis();
+            match &result {
+                Ok(_) => log::info!(target: OPS_TARGET, "{} ({origin:?}) {params}: ok, {ms} ms", spec.id),
+                Err(e) => log::warn!(target: OPS_TARGET, "{} ({origin:?}) {params}: {e}, {ms} ms", spec.id),
+            }
+        }
         // 9. journal (Edit/Io only; never Device). Revision bumps and events happen in `edit` and friends.
         if result.is_ok()
             && let Some(p) = journal_params
@@ -261,6 +269,7 @@ impl Session {
     /// universal keys, no decode here. Its `run` gets the raw params and trips the latches before it looks at them.
     /// If it panics anyway, every latch is tripped before the error is returned.
     fn run_stop_spec(&mut self, spec: crate::command::CommandSpec, origin: Origin, effective: Origin, params: Value) -> Result<Value, EngineError> {
+        log::info!(target: OPS_TARGET, "{} ({origin:?})", spec.id);
         let prev = self.ctx.replace(Ctx { origin, effective, coalesce: None, dry_run: false });
         let run = spec.run;
         let outcome = catch_unwind(AssertUnwindSafe(|| run(self, params)));
@@ -1013,5 +1022,27 @@ impl std::fmt::Display for Label {
             Some(v) => f.write_str(&self.wording.replace("{name}", v)),
             None => f.write_str(self.wording),
         }
+    }
+}
+
+/// The `log` target of the operations record (the app's diagnostics log: connect, frame, start, import, settings).
+pub const OPS_TARGET: &str = "openlaser::ops";
+
+/// Which commands the operations record lists: everything but views, queries and edits (those run per keystroke and
+/// per frame), except the edits that load files or change cut settings.
+pub(crate) fn log_operation(kind: Kind, id: &str) -> bool {
+    match kind {
+        Kind::View | Kind::Query => false,
+        Kind::Edit => id.starts_with("file.") || id.starts_with("layer.cutSettings"),
+        _ => true,
+    }
+}
+
+/// The params of a logged command, at most 200 characters.
+pub(crate) fn param_summary(params: &Value) -> String {
+    let text = if params.is_null() { "{}".to_owned() } else { params.to_string() };
+    match text.char_indices().nth(200) {
+        Some((cut, _)) => format!("{}…", text.get(..cut).unwrap_or("")),
+        None => text,
     }
 }

@@ -9,6 +9,7 @@ use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use std::sync::mpsc;
 
+use openlaser::diagnostics;
 use openlaser_engine::{DeviceAccess, DeviceProvider, FsAuthority, Origin, Session, SessionConfig};
 use openlaser_format::machines;
 use openlaser_lmc_sim::{SimConfig, SimProvider};
@@ -53,6 +54,31 @@ fn main() -> ExitCode {
         Ok(args) => args,
         Err(code) => return ExitCode::from(code),
     };
+    let log_dir = diagnostics::log_dir();
+    let supervised = std::env::var_os(diagnostics::SUPERVISED_VAR);
+    if diagnostics::supervisor_wanted(supervised.as_deref(), std::env::var_os(diagnostics::SUPERVISOR_VAR).as_deref())
+        && let Some(dir) = &log_dir
+        && let Some(code) = supervise(dir)
+    {
+        return code;
+    }
+    // The window process: its own log records (the supervisor already rotated the log), and the session marker.
+    if let Some(dir) = &log_dir
+        && diagnostics::install(dir, supervised.is_none()).is_some()
+    {
+        log::info!(target: "openlaser::start", "{}{}", diagnostics::build_line(), if supervised.is_some() { ", supervised" } else { "" });
+        if let Some(text) = diagnostics::describe_previous(&diagnostics::begin_session(dir)) {
+            log::warn!(target: "openlaser::start", "{text}");
+        }
+        log::info!(
+            target: "openlaser::start",
+            "{}={:?}, {} file argument(s)",
+            openlaser::WGPU_BACKEND,
+            std::env::var_os(openlaser::WGPU_BACKEND).unwrap_or_default(),
+            args.files.len()
+        );
+        diagnostics::start_heartbeat();
+    }
     let (mut profiles, profile_messages) = machines::load_all(machines::profiles_dir().as_deref());
     let simulator = openlaser_ui_egui::simulator_profile();
     if !profiles.iter().any(|p| p.id == simulator.id) {
@@ -84,6 +110,7 @@ fn main() -> ExitCode {
     let camera_store = openlaser_format::camera_cal::calibration_path()
         .map(|path| Arc::new(openlaser_format::camera_cal::DirCalibrationStore::new(path)) as Arc<dyn openlaser_engine::CameraCalibrationStore>);
     let (provider, real_laser) = device_provider();
+    log::info!(target: "openlaser::start", "machines: {}", if real_laser { "REAL LASER (USB)" } else { "simulator" });
     if real_laser {
         eprintln!("openlaser: REAL LASER: this window drives the USB board (hw build, OPENLASER_HW_PRESENT=1)");
     }
@@ -100,7 +127,13 @@ fn main() -> ExitCode {
     // §3.21: before run_native, a panic hook and a signal watcher that stop every machine first.
     let registry = session.stop_registry();
     openlaser::install_panic_hook(openlaser::registry_stop(Arc::clone(&registry)));
-    let _signals = match openlaser::install_signal_watcher(openlaser::registry_stop(Arc::clone(&registry)), |code| std::process::exit(code)) {
+    let exit_dir = log_dir.clone();
+    let _signals = match openlaser::install_signal_watcher(openlaser::registry_stop(Arc::clone(&registry)), move |code| {
+        if let Some(dir) = &exit_dir {
+            diagnostics::end_session(dir, "signal watcher (exit 143)");
+        }
+        std::process::exit(code)
+    }) {
         Ok(watcher) => watcher,
         Err(error) => {
             eprintln!("openlaser: cannot install the signal watcher: {error}");
@@ -127,6 +160,20 @@ fn main() -> ExitCode {
         "OpenLaser",
         options,
         Box::new(move |cc| {
+            if let Some(render) = &cc.wgpu_render_state {
+                openlaser::install_gpu_error_handlers(&render.device);
+                let info = render.adapter.get_info();
+                log::info!(
+                    target: "openlaser::start",
+                    "graphics: {} ({:?}, {:?}), driver {} {}, max texture {}",
+                    info.name,
+                    info.backend,
+                    info.device_type,
+                    info.driver,
+                    info.driver_info,
+                    render.device.limits().max_texture_dimension_2d
+                );
+            }
             let settings = PersistentSettings::open();
             let in_window_menus = args.in_window_menus || settings.load().in_window_menus;
             // Before the native menu is built: its labels are fixed until the next start.
@@ -157,11 +204,14 @@ fn main() -> ExitCode {
                 menu,
                 #[cfg(target_os = "macos")]
                 commands,
+                beat: std::time::Instant::now(),
+                frames: 0,
             }))
         }),
     );
     let failure = result.err().map(|error| {
         eprintln!("openlaser: {error}");
+        log::error!(target: diagnostics::EXIT_TARGET, "the window could not run: {error}");
         let graphics = matches!(error, eframe::Error::Wgpu(_));
         (error.to_string(), graphics)
     });
@@ -169,20 +219,75 @@ fn main() -> ExitCode {
     // `applicationWillTerminate`, which bypasses `CloseRequested`, so the close guard never ran.
     // A repeated stop on an already-stopped machine is a no-op.
     let _ = openlaser::stop_all_bounded(&registry, openlaser::STOP_BUDGET);
+    if let Some(dir) = &log_dir {
+        let reason = diagnostics::logger()
+            .and_then(diagnostics::FileLogger::exit_reason)
+            .unwrap_or_else(|| "the event loop ended with no close request (Dock Quit, logout, or the system ended it)".to_owned());
+        log::info!(target: "openlaser::start", "clean end: {reason}");
+        diagnostics::end_session(dir, &reason);
+    }
     match failure {
         None => ExitCode::SUCCESS,
         Some((error, graphics)) => explain_failure(&error, graphics),
     }
 }
 
+/// The supervisor (Windows): this process opens no window and no device. It starts itself again as the window
+/// process, with stderr into the log, waits, and records how it ended; after a death it says so in a message box.
+/// It never touches a machine: it opens no device and stops nothing. `None` when the child could not start (then this process
+/// opens the window itself, as before).
+fn supervise(dir: &std::path::Path) -> Option<ExitCode> {
+    let logger = diagnostics::install(dir, true);
+    log::info!(target: "openlaser::supervisor", "{}, supervisor", diagnostics::build_line());
+    let exe = std::env::current_exe().ok()?;
+    let mut child = std::process::Command::new(exe);
+    child.args(std::env::args_os().skip(1));
+    match diagnostics::supervise(child, dir) {
+        Ok(seen) => {
+            if !seen.exit.clean {
+                died_message(&seen.exit.text, logger.map(diagnostics::FileLogger::path));
+            }
+            Some(ExitCode::from(u8::try_from(seen.code).unwrap_or(1)))
+        }
+        Err(error) => {
+            log::error!(target: "openlaser::supervisor", "could not start the window process ({error}); opening the window in this process");
+            None
+        }
+    }
+}
+
+#[cfg(windows)]
+fn died_message(what: &str, log: Option<&std::path::Path>) {
+    let log = log.map(|p| p.display().to_string()).unwrap_or_default();
+    let _ = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("OpenLaser closed unexpectedly")
+        .set_description(format!(
+            "OpenLaser closed unexpectedly ({what}).\n\nA job the laser board had already received may still be running on the machine. \
+             The details are in {log}. Run \"OpenLaser diagnostics\" and send its report."
+        ))
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+}
+
+#[cfg(not(windows))]
+fn died_message(what: &str, _log: Option<&std::path::Path>) {
+    eprintln!("openlaser: the window process died ({what})");
+}
+
 /// 32-bit Windows: OpenGL (WGL) only, unless `WGPU_BACKEND` says otherwise. CI (i686 on windows-latest) found the other
 /// backends broken in a 32-bit program: Vulkan aborts inside wgpu's debug-message callback, and DirectX 12 (WARP)
 /// fails to compile egui's shader, which wgpu reports as a panic, not an error. OpenGL opened the window. The old
 /// Intel graphics such PCs have ship no 32-bit Vulkan or DirectX 12 driver anyway. Every other build keeps eframe's
-/// default.
+/// default backends. Every build sets the OpenGL fence behaviour ([`openlaser::gl_fence_behavior`]), which only the
+/// OpenGL backend reads.
 fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
-    #[allow(unused_mut)]
     let mut options = eframe::egui_wgpu::WgpuConfiguration::default();
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup {
+        let fence = openlaser::gl_fence_behavior(std::env::var_os(openlaser::GL_FENCE_VAR).as_deref());
+        log::info!(target: "openlaser::start", "OpenGL fences (used only on the OpenGL backend): {fence:?}");
+        setup.instance_descriptor.backend_options.gl.fence_behavior = fence;
+    }
     #[cfg(all(windows, target_arch = "x86"))]
     if std::env::var_os(openlaser::WGPU_BACKEND).is_none()
         && let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup
@@ -239,6 +344,9 @@ struct DesktopApp {
     menu: muda::Menu,
     #[cfg(target_os = "macos")]
     commands: mpsc::Receiver<String>,
+    /// The UI heartbeat: frames drawn and textures held, once per `diagnostics::HEARTBEAT`.
+    beat: std::time::Instant,
+    frames: u64,
 }
 
 impl eframe::App for DesktopApp {
@@ -253,6 +361,20 @@ impl eframe::App for DesktopApp {
             for id in self.commands.try_iter() {
                 self.app.invoke_menu_command(ctx, &id);
             }
+        }
+        self.frames = self.frames.saturating_add(1);
+        if self.beat.elapsed() >= diagnostics::HEARTBEAT {
+            let secs = self.beat.elapsed().as_secs_f64();
+            log::info!(
+                target: "openlaser::heartbeat",
+                "ui: {} frames in {secs:.0} s ({:.1} per s), {} textures, {} graphics errors so far",
+                self.frames,
+                self.frames as f64 / secs,
+                ctx.tex_manager().read().num_allocated(),
+                openlaser::GPU_ERRORS.load(std::sync::atomic::Ordering::Relaxed)
+            );
+            self.beat = std::time::Instant::now();
+            self.frames = 0;
         }
         // The app's close guard runs inside: while a machine is active it cancels the close and stops first.
         self.app.logic(ctx, frame);

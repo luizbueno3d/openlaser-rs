@@ -16,6 +16,7 @@ use std::time::Duration;
 use openlaser_engine::{MachineId, StopAck, StopRegistry};
 
 pub mod control_runtime;
+pub mod diagnostics;
 pub mod native_files;
 #[cfg(target_os = "macos")]
 pub mod native_menu;
@@ -108,13 +109,31 @@ pub fn registry_stop(registry: Arc<StopRegistry>) -> impl Fn(Duration) + Send + 
     }
 }
 
-/// Installs a panic hook that runs `stop(STOP_BUDGET)` first and then the previously installed (default) hook.
+/// Installs a panic hook that runs `stop(STOP_BUDGET)` first, then records the panic in the log (message, place,
+/// thread, backtrace), then runs the previously installed (default) hook.
 pub fn install_panic_hook(stop: impl Fn(Duration) + Send + Sync + 'static) {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         stop(STOP_BUDGET);
+        log::error!(target: PANIC_TARGET, "{}", panic_record(info, &std::backtrace::Backtrace::force_capture()));
         default(info);
     }));
+}
+
+/// The `log` target of a panic record.
+pub const PANIC_TARGET: &str = "openlaser::panic";
+
+/// `PANIC on thread 'main' at src/x.rs:1:2: message`, then the backtrace.
+pub fn panic_record(info: &std::panic::PanicHookInfo<'_>, backtrace: &std::backtrace::Backtrace) -> String {
+    let thread = std::thread::current();
+    let message = info
+        .payload()
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| info.payload().downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "(no message)".to_owned());
+    let place = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_else(|| "?".to_owned());
+    format!("PANIC on thread '{}' at {place}: {message}\n{backtrace}", thread.name().unwrap_or("?"))
 }
 
 /// The signals the watcher handles on unix (Windows: ctrlc with `termination`: Ctrl-C, Ctrl-Break, console close).
@@ -139,6 +158,7 @@ fn watch(flag: &AtomicBool, shutdown: &AtomicBool, stop: impl FnOnce(Duration), 
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+    log::warn!(target: diagnostics::EXIT_TARGET, "signal watcher: a terminating signal or console close; stopping every machine, then exit {EXIT_SIGNAL}");
     stop(STOP_BUDGET);
     exit(EXIT_SIGNAL);
 }
@@ -185,6 +205,57 @@ pub fn install_signal_watcher(stop: impl FnOnce(Duration) + Send + 'static, exit
     #[cfg(not(any(unix, windows)))]
     {
         spawn_watcher(Arc::new(AtomicBool::new(false)), stop, exit)
+    }
+}
+
+/// The `log` target of graphics errors.
+pub const GPU_TARGET: &str = "openlaser::gpu";
+
+/// Graphics errors since the start (the UI heartbeat reports the count).
+pub static GPU_ERRORS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The text a graphics error is logged with.
+pub fn gpu_error_record(error: &eframe::wgpu::Error) -> String {
+    let kind = match error {
+        eframe::wgpu::Error::OutOfMemory { .. } => "OUT OF MEMORY",
+        eframe::wgpu::Error::Validation { .. } => "validation",
+        eframe::wgpu::Error::Internal { .. } => "internal",
+    };
+    format!("wgpu {kind} error (OpenLaser keeps running; the frame may be skipped): {error}")
+}
+
+/// wgpu turns every error nobody captures into a `panic!` ("Handling wgpu errors as fatal by default", wgpu 30
+/// `default_error_handler`), and egui-wgpu 0.36 installs no handler. On OpenGL (WGL) a failed `SwapBuffers`,
+/// `GetDC` or `wglMakeCurrent` during a present is such an error (wgpu-core `SurfaceError::Invalid`), so one hiccup
+/// of an old graphics driver closed the window. This handler logs the error and counts it instead.
+pub fn gpu_error_handler() -> impl Fn(eframe::wgpu::Error) + Send + Sync + 'static {
+    |error| {
+        let n = GPU_ERRORS.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+        log::error!(target: GPU_TARGET, "#{n}: {}", gpu_error_record(&error));
+    }
+}
+
+/// Installs [`gpu_error_handler`] and a device-lost logger on the window's graphics device.
+pub fn install_gpu_error_handlers(device: &eframe::wgpu::Device) {
+    device.on_uncaptured_error(Arc::new(gpu_error_handler()));
+    device.set_device_lost_callback(|reason, message| log::error!(target: GPU_TARGET, "the graphics device was lost ({reason:?}): {message}"));
+}
+
+/// `normal` keeps wgpu's own OpenGL fence handling; anything else (or unset) gives [`gl_fence_behavior`]'s default.
+pub const GL_FENCE_VAR: &str = "OPENLASER_GL_FENCE";
+
+/// OpenGL fences: `AutoFinish` unless `OPENLASER_GL_FENCE=normal`.
+///
+/// On OpenGL, wgpu frees each frame's upload buffers (egui's vertices, about 1.3 MB a frame for a detailed drawing)
+/// only once a GL fence says the GPU finished that frame. Alexandre's Intel HD 2500 (driver 10.18.10.4358, 32-bit)
+/// logged a fence wait that timed out ("Failed to wait for GPU to come idle") two seconds after start, then 803 MB
+/// private memory after 667 frames, then "device lost" and egui-wgpu's panic. `AutoFinish` treats a submission as
+/// done once it was issued, which OpenGL itself makes safe: the driver keeps a buffer alive while queued commands
+/// still use it (WebGL works this way). Other backends ignore the setting.
+pub fn gl_fence_behavior(setting: Option<&std::ffi::OsStr>) -> eframe::wgpu::GlFenceBehavior {
+    match setting.and_then(|s| s.to_str()) {
+        Some(s) if s.eq_ignore_ascii_case("normal") => eframe::wgpu::GlFenceBehavior::Normal,
+        _ => eframe::wgpu::GlFenceBehavior::AutoFinish,
     }
 }
 
@@ -395,6 +466,49 @@ mod tests {
             }
         }
         assert_eq!(block_on(Yield(false)), 42);
+    }
+
+    /// Regression (Alexandre's closes): a wgpu error must be logged, never panic. Without the handler, wgpu's
+    /// default handler panics with "wgpu error: ...".
+    #[test]
+    fn a_wgpu_error_is_logged_and_does_not_panic() {
+        let handler = gpu_error_handler();
+        let before = GPU_ERRORS.load(Ordering::Relaxed);
+        let present =
+            || eframe::wgpu::Error::Validation { source: Box::new(std::io::Error::other("SwapBuffers failed")), description: "Queue::present".to_owned() };
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(present()))).is_ok());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(eframe::wgpu::Error::OutOfMemory {
+                source: Box::new(std::io::Error::other("oom"))
+            })))
+            .is_ok()
+        );
+        assert!(GPU_ERRORS.load(Ordering::Relaxed) >= before + 2);
+        let text = gpu_error_record(&present());
+        assert!(text.contains("validation") && text.contains("Queue::present") && text.contains("keeps running"), "{text}");
+    }
+
+    #[test]
+    fn a_panic_record_names_the_thread_place_and_message() {
+        let _guard = HOOK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::panic::take_hook();
+        let seen: Arc<Mutex<String>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        std::panic::set_hook(Box::new(move |info| *sink.lock().unwrap() = panic_record(info, &std::backtrace::Backtrace::disabled())));
+        let result = std::panic::catch_unwind(|| std::panic::panic_any(String::from("wgpu error: Validation Error")));
+        std::panic::set_hook(previous);
+        assert!(result.is_err());
+        let text = seen.lock().unwrap().clone();
+        assert!(text.starts_with("PANIC on thread '") && text.contains("lib.rs:") && text.contains("wgpu error: Validation Error"), "{text}");
+    }
+
+    #[test]
+    fn opengl_fences_auto_finish_unless_asked_for_normal() {
+        use eframe::wgpu::GlFenceBehavior;
+        assert_eq!(gl_fence_behavior(None), GlFenceBehavior::AutoFinish);
+        assert_eq!(gl_fence_behavior(Some(std::ffi::OsStr::new("normal"))), GlFenceBehavior::Normal);
+        assert_eq!(gl_fence_behavior(Some(std::ffi::OsStr::new("NORMAL"))), GlFenceBehavior::Normal);
+        assert_eq!(gl_fence_behavior(Some(std::ffi::OsStr::new("auto"))), GlFenceBehavior::AutoFinish);
     }
 
     #[test]
