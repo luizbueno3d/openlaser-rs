@@ -852,6 +852,42 @@ fn foot_switch_as_start_arms_at_once_only_with_a_standing_confirmation() {
     assert_eq!(mints(), 2, "a stale press opens the dialog, never arms");
 }
 
+/// Regression (Alexandre's PC, 2026-11-04): with framing off and the ARM confirmation skipped (Settings), every pedal
+/// press opened the dialog. The engine stands in a receipt stamped when it handled the request the press made, a
+/// moment after the press, and the press was stamped earlier, so the real `mint` refused it ("stamped before the
+/// frame"). Start clicks were unaffected.
+#[test]
+fn foot_switch_arms_at_once_when_framing_is_off_and_arm_is_skipped() {
+    let (mut h, clock) = harness_with(None, pedal_model());
+    h.state_mut().human.set_skip_arm(true);
+    // The harness drew its first frame with the old model; as in the app, a new PendingArm starts with no dialog.
+    h.state_mut().human.arm.forget();
+    let press = openlaser_engine::testing::pedal_press_for_tests(h.state().model.summary.machine.clone(), clock.now());
+    clock.advance(Duration::from_millis(40));
+    // The request this press made: the stand-in receipt and the model are stamped after the press.
+    let s = summary(7);
+    let r = receipt(&s, clock.now());
+    h.state_mut().model = ArmModel { summary: s, receipt: r, now: clock.now(), foot_switch: true, ..model(7, None) };
+    h.state_mut().show = true;
+    h.state_mut().human.foot_switch(press);
+    h.run();
+    assert_eq!(h.state().armed.len(), 1, "the press arms through the real mint without the dialog");
+    // A receipt more than 2 s newer than the press is not this press's: the dialog opens, nothing arms.
+    let (mut h, clock) = harness_with(None, pedal_model());
+    h.state_mut().human.set_skip_arm(true);
+    // The harness drew its first frame with the old model; as in the app, a new PendingArm starts with no dialog.
+    h.state_mut().human.arm.forget();
+    let press = openlaser_engine::testing::pedal_press_for_tests(h.state().model.summary.machine.clone(), clock.now());
+    clock.advance(Duration::from_millis(2100));
+    let s = summary(7);
+    let r = receipt(&s, clock.now());
+    h.state_mut().model = ArmModel { summary: s, receipt: r, now: clock.now(), foot_switch: true, ..model(7, None) };
+    h.state_mut().show = true;
+    h.state_mut().human.foot_switch(press);
+    h.run();
+    assert!(h.state().armed.is_empty());
+}
+
 #[test]
 fn foot_switch_confirmation_passes_the_real_mint() {
     let (mut h, clock) = harness_with(None, pedal_model());

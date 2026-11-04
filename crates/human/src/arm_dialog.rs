@@ -175,7 +175,13 @@ impl Human {
             return None;
         }
         let (_, ticked) = self.standing_confirmation(model)?;
-        let confirmation = crate::pedal::confirm(&press, ticked);
+        // With framing off (Settings), the engine stands in a receipt stamped when it handled the request this press
+        // made, so a moment after the press; `mint` wants the confirmation no older than the frame. The press then
+        // counts at that receipt, but only when the receipt is at most START_CLICK_WINDOW newer than the press: a real
+        // frame traced before the press is older, and nothing else moves.
+        let at =
+            if model.receipt.at > press.at() && model.receipt.at.saturating_since(press.at()) <= START_CLICK_WINDOW { model.receipt.at } else { press.at() };
+        let confirmation = crate::pedal::confirm(&press, ticked, at);
         self.mint(&model.summary, &model.receipt, confirmation, model.checklist.len(), model.session, latest(now, model.now)).ok()
     }
 
@@ -308,7 +314,7 @@ impl Human {
                 return ArmOutcome::Open;
             }
             let ticked = self.arm.ticked.clone();
-            let confirmation = crate::pedal::confirm(&press, ticked.clone());
+            let confirmation = crate::pedal::confirm(&press, ticked.clone(), press.at());
             return match self.mint(&model.summary, &model.receipt, confirmation, model.checklist.len(), model.session, latest(now, model.now)) {
                 Ok(token) => {
                     self.remembered =
