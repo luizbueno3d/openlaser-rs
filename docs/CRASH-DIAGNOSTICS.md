@@ -81,6 +81,53 @@ Labels used below:
 4. **H-D: the process is killed from outside**, for example by antivirus or a logoff.
    - **Proof:** exit code 1 or a Ctrl-C status, with no panic record and no Event 1000.
 
+## 1b. Field evidence: the first diagnostic build on Alexandre's PC (2026-11-04)
+
+The diagnostic build was installed in `C:\OpenLaser-diag`, with Luiz's approval. Alexandre imported a 150 × 40 mm
+outlined logo (DXF, one 5,817-point path), connected, and changed the layer to fill at 0.1 mm. 92 s after start the
+window died. The log, in UTC, shows:
+
+```
+14:41:49 graphics: Intel(R) HD Graphics 2500 (Gl, IntegratedGpu), driver 4.0.0 - Build 10.18.10.4358
+14:41:51 openlaser::gpu #1: wgpu validation error ... In Surface::configure: Failed to wait for GPU to come idle
+14:42:49 heartbeat ui: 667 frames in 60 s (11.1 per s), 75 textures
+14:42:49 heartbeat memory: virtual 1091 MB, private 803 MB, working set 804 MB, handles 1975, threads 26
+14:43:20 openlaser::gpu: the graphics device was lost (Unknown): Device is lost
+14:43:21 PANIC on thread 'main' at egui-wgpu-0.36.2/src/renderer.rs:1030: Failed to create staging buffer for
+         vertex data. Vertex count: 67442. Required vertex buffer size: 1348840
+14:43:21 supervisor: THE WINDOW PROCESS (pid 6196) DIED: exit code 101
+```
+
+### What is confirmed
+
+- **The crash is a device loss, then a panic in egui-wgpu.**
+  - After the device is lost, `queue.write_buffer_with` returns `None`, and egui-wgpu `panic!`s (`renderer.rs:1029`).
+  - No handler we install can catch this.
+- **The 14:41:51 fence-wait error would have closed v0.1.3.**
+  - It is `ConfigureSurfaceError::GpuWaitTimeout`, a Validation error, so the default handler panics on it.
+  - The new handler logged it and the app kept running.
+- **The engine is not where the memory goes.**
+  - The CLI imports a synthetic DXF with the same shape (one 5,817-point outline and 16 letter contours).
+  - Its peak resident memory is 15 MB, for the import, the line plan and the fill plan at 0.1 mm alike.
+- **The GUI is small on Metal.**
+  - On the Mac (Metal), the GUI stays at about 90 MB resident after 60 s, idle or with that drawing.
+
+### HYPOTHESIS H-E (ranked first): wgpu's OpenGL fences never report done on this driver, so every frame's upload buffers leak
+
+1. On OpenGL, wgpu frees a frame's upload buffers (egui's vertex and index data) only after a GL fence says the GPU
+   finished that frame (wgpu-hal `gles/fence.rs`).
+2. The fence wait at 14:41:51 timed out.
+3. 803 MB ÷ 667 frames ≈ 1.2 MB a frame. That matches the 1.35 MB vertex upload for this drawing.
+4. A detailed import raises the bytes per frame, and framing repaints 4 times a second. Both fit "after an import"
+   and "every few minutes while framing".
+
+**The fix under test:** `GlFenceBehavior::AutoFinish` (`openlaser::gl_fence_behavior`). It is the default now, and
+`OPENLASER_GL_FENCE=normal` turns it off. The heartbeat now runs every 20 s, so the next log shows the memory slope.
+
+**How to confirm or refute it:**
+- If the private memory stays flat while Alexandre works the same way, H-E is confirmed.
+- If it still climbs at about 1.2 MB a frame, H-E is refuted.
+
 ## 2. What this branch changes
 
 | Change | Where | Covers |

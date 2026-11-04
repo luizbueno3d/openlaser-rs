@@ -274,10 +274,15 @@ fn died_message(what: &str, _log: Option<&std::path::Path>) {
 /// backends broken in a 32-bit program: Vulkan aborts inside wgpu's debug-message callback, and DirectX 12 (WARP)
 /// fails to compile egui's shader, which wgpu reports as a panic, not an error. OpenGL opened the window. The old
 /// Intel graphics such PCs have ship no 32-bit Vulkan or DirectX 12 driver anyway. Every other build keeps eframe's
-/// default.
+/// default backends. Every build sets the OpenGL fence behaviour ([`openlaser::gl_fence_behavior`]), which only the
+/// OpenGL backend reads.
 fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
-    #[allow(unused_mut)]
     let mut options = eframe::egui_wgpu::WgpuConfiguration::default();
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup {
+        let fence = openlaser::gl_fence_behavior(std::env::var_os(openlaser::GL_FENCE_VAR).as_deref());
+        log::info!(target: "openlaser::start", "OpenGL fences (used only on the OpenGL backend): {fence:?}");
+        setup.instance_descriptor.backend_options.gl.fence_behavior = fence;
+    }
     #[cfg(all(windows, target_arch = "x86"))]
     if std::env::var_os(openlaser::WGPU_BACKEND).is_none()
         && let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup

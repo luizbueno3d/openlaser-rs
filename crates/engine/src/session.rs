@@ -226,7 +226,7 @@ impl Session {
         let journal_params = (spec.kind.journaled() && !dry_run).then(|| params.clone());
         let snapshot = (dry_run || !matches!(spec.kind, Kind::Query | Kind::Device(_))).then(|| self.snapshot());
         // 5–7 run inside `run` (decode, enabled, busy); 8: catch_unwind.
-        let logged = log_operation(spec.kind).then(|| (std::time::Instant::now(), param_summary(&params)));
+        let logged = log_operation(spec.kind, spec.id).then(|| (std::time::Instant::now(), param_summary(&params)));
         let prev = self.ctx.replace(Ctx { origin, effective, coalesce, dry_run });
         let run = spec.run;
         let outcome = catch_unwind(AssertUnwindSafe(|| run(self, params)));
@@ -1028,10 +1028,14 @@ impl std::fmt::Display for Label {
 /// The `log` target of the operations record (the app's diagnostics log: connect, frame, start, import, settings).
 pub const OPS_TARGET: &str = "openlaser::ops";
 
-/// Which commands the operations record lists: everything but edits, views and queries (those run per keystroke and
-/// per frame).
-pub(crate) fn log_operation(kind: Kind) -> bool {
-    !matches!(kind, Kind::Edit | Kind::View | Kind::Query)
+/// Which commands the operations record lists: everything but views, queries and edits (those run per keystroke and
+/// per frame), except the edits that load files or change cut settings.
+pub(crate) fn log_operation(kind: Kind, id: &str) -> bool {
+    match kind {
+        Kind::View | Kind::Query => false,
+        Kind::Edit => id.starts_with("file.") || id.starts_with("layer.cutSettings"),
+        _ => true,
+    }
 }
 
 /// The params of a logged command, at most 200 characters.

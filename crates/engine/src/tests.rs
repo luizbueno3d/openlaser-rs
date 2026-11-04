@@ -2004,11 +2004,16 @@ fn the_operations_record_lists_device_and_io_commands_only() {
     use crate::session::{log_operation, param_summary};
     for kind in [Kind::Io, Kind::Settings, Kind::Request, Kind::Device(DeviceClass::Light), Kind::Device(DeviceClass::Connect), Kind::Device(DeviceClass::Emit)]
     {
-        assert!(log_operation(kind), "{kind:?}");
+        assert!(log_operation(kind, "x.y"), "{kind:?}");
     }
     for kind in [Kind::Edit, Kind::View, Kind::Query] {
-        assert!(!log_operation(kind), "{kind:?}");
+        assert!(!log_operation(kind, "edit.nudge"), "{kind:?}");
     }
+    // Alexandre's crash log had no import and no cut-settings change: those are edits, and are listed.
+    assert!(log_operation(Kind::Edit, "file.import"));
+    assert!(log_operation(Kind::Edit, "layer.cutSettings.set"));
+    assert!(registry().find("file.import").is_some_and(|s| log_operation(s.kind, s.id)));
+    assert!(registry().find("layer.cutSettings.set").is_some_and(|s| log_operation(s.kind, s.id)));
     assert_eq!(param_summary(&Value::Null), "{}");
     assert_eq!(param_summary(&json!({ "looping": true })), r#"{"looping":true}"#);
     let long = param_summary(&json!({ "path": "é".repeat(500) }));

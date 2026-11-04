@@ -241,6 +241,24 @@ pub fn install_gpu_error_handlers(device: &eframe::wgpu::Device) {
     device.set_device_lost_callback(|reason, message| log::error!(target: GPU_TARGET, "the graphics device was lost ({reason:?}): {message}"));
 }
 
+/// `normal` keeps wgpu's own OpenGL fence handling; anything else (or unset) gives [`gl_fence_behavior`]'s default.
+pub const GL_FENCE_VAR: &str = "OPENLASER_GL_FENCE";
+
+/// OpenGL fences: `AutoFinish` unless `OPENLASER_GL_FENCE=normal`.
+///
+/// On OpenGL, wgpu frees each frame's upload buffers (egui's vertices, about 1.3 MB a frame for a detailed drawing)
+/// only once a GL fence says the GPU finished that frame. Alexandre's Intel HD 2500 (driver 10.18.10.4358, 32-bit)
+/// logged a fence wait that timed out ("Failed to wait for GPU to come idle") two seconds after start, then 803 MB
+/// private memory after 667 frames, then "device lost" and egui-wgpu's panic. `AutoFinish` treats a submission as
+/// done once it was issued, which OpenGL itself makes safe: the driver keeps a buffer alive while queued commands
+/// still use it (WebGL works this way). Other backends ignore the setting.
+pub fn gl_fence_behavior(setting: Option<&std::ffi::OsStr>) -> eframe::wgpu::GlFenceBehavior {
+    match setting.and_then(|s| s.to_str()) {
+        Some(s) if s.eq_ignore_ascii_case("normal") => eframe::wgpu::GlFenceBehavior::Normal,
+        _ => eframe::wgpu::GlFenceBehavior::AutoFinish,
+    }
+}
+
 /// The variable wgpu reads to pick its graphics backends (`dx12`, `vulkan`, `gl`, ...).
 pub const WGPU_BACKEND: &str = "WGPU_BACKEND";
 
@@ -482,6 +500,15 @@ mod tests {
         assert!(result.is_err());
         let text = seen.lock().unwrap().clone();
         assert!(text.starts_with("PANIC on thread '") && text.contains("lib.rs:") && text.contains("wgpu error: Validation Error"), "{text}");
+    }
+
+    #[test]
+    fn opengl_fences_auto_finish_unless_asked_for_normal() {
+        use eframe::wgpu::GlFenceBehavior;
+        assert_eq!(gl_fence_behavior(None), GlFenceBehavior::AutoFinish);
+        assert_eq!(gl_fence_behavior(Some(std::ffi::OsStr::new("normal"))), GlFenceBehavior::Normal);
+        assert_eq!(gl_fence_behavior(Some(std::ffi::OsStr::new("NORMAL"))), GlFenceBehavior::Normal);
+        assert_eq!(gl_fence_behavior(Some(std::ffi::OsStr::new("auto"))), GlFenceBehavior::AutoFinish);
     }
 
     #[test]

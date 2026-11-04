@@ -36,8 +36,9 @@ pub const SESSION_FILE: &str = "session.txt";
 pub const ROTATE_BYTES: u64 = 4 * 1024 * 1024;
 /// One process writes at most this much; a runaway warning loop cannot fill the disk.
 pub const SESSION_CAP_BYTES: u64 = 32 * 1024 * 1024;
-/// How often the heartbeat records memory and the UI its frame rate and textures.
-pub const HEARTBEAT: Duration = Duration::from_secs(60);
+/// How often the heartbeat records memory and the UI its frame rate and textures (often enough to see a leak's slope
+/// before it kills a 32-bit process: Alexandre's died 92 s after start).
+pub const HEARTBEAT: Duration = Duration::from_secs(20);
 /// The `log` target of every record that says why the GUI is closing; the last one becomes the exit reason.
 pub const EXIT_TARGET: &str = "openlaser::exit";
 
