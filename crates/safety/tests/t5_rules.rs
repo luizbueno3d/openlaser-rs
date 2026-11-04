@@ -453,14 +453,16 @@ fn safety_speed_above_the_word_cap_refused() {
 
 #[test]
 fn safety_too_many_paths_refused() {
-    let paths: Vec<Polyline> = (0..3001).map(|i| line(&[[0.0, f64::from(i) * 0.01 - 15.0], [1.0, f64::from(i) * 0.01 - 15.0]])).collect();
+    let n = i32::try_from(jpt().limits.max_paths).unwrap() + 1;
+    let paths: Vec<Polyline> = (0..n).map(|i| line(&[[0.0, f64::from(i) * 0.005 - 25.0], [1.0, f64::from(i) * 0.005 - 25.0]])).collect();
     let (m, p) = galvo_job(paths);
     assert!(codes(&validate(&p, &m)).contains(&RefusalCode::TooManyPaths));
 }
 
 #[test]
 fn safety_too_many_points_per_path_refused() {
-    let pts: Vec<[f64; 2]> = (0..2001).map(|i| [f64::from(i) * 0.01 - 10.0, 0.0]).collect();
+    let n = i32::try_from(jpt().limits.max_points_per_path).unwrap() + 1;
+    let pts: Vec<[f64; 2]> = (0..n).map(|i| [f64::from(i) * 0.001 - 10.0, 0.0]).collect();
     let (m, p) = galvo_job(vec![Polyline(pts)]);
     assert!(codes(&validate(&p, &m)).contains(&RefusalCode::TooManyPointsPerPath));
 }
@@ -477,16 +479,32 @@ fn safety_too_many_points_per_pass_refused() {
 
 #[test]
 fn safety_limits_refused_not_truncated() {
-    let mk = |n: i32| -> Vec<Polyline> { (0..n).map(|i| line(&[[0.0, f64::from(i) * 0.01 - 15.0], [1.0, f64::from(i) * 0.01 - 15.0]])).collect() };
-    let (m, p) = galvo_job(mk(3001));
+    let mk = |n: i32| -> Vec<Polyline> { (0..n).map(|i| line(&[[0.0, f64::from(i) * 0.005 - 25.0], [1.0, f64::from(i) * 0.005 - 25.0]])).collect() };
+    let limit = i32::try_from(jpt().limits.max_paths).unwrap();
+    let (m, p) = galvo_job(mk(limit + 1));
     let r = validate(&p, &m).unwrap_err();
     let too_many = r.refusals.iter().find(|x| x.code == RefusalCode::TooManyPaths).unwrap();
-    assert!(too_many.message.contains("3001") && too_many.message.contains("3000"), "{}", too_many.message);
+    assert!(too_many.message.contains(&(limit + 1).to_string()) && too_many.message.contains(&limit.to_string()), "{}", too_many.message);
     // The plan is untouched: nothing was cut down to fit.
-    assert_eq!(p.sections[0].paths.len(), 3001);
+    assert_eq!(p.sections[0].paths.len(), usize::try_from(limit + 1).unwrap());
     // At the limit the rule does not fire.
-    let (m, p) = galvo_job(mk(3000));
+    let (m, p) = galvo_job(mk(limit));
     assert!(!codes(&validate(&p, &m)).contains(&RefusalCode::TooManyPaths));
+}
+
+/// Regression (Alexandre, 2026-11-04): a fill of a 150 x 40 mm logo at 0.1 mm is 3083 scan segments, one path each,
+/// and a smooth DXF outline flattens to 5817 points. The prototype's 3000 / 2000 limits refused both; the defaults
+/// must not.
+#[test]
+fn safety_default_limits_accept_a_logo_fill_and_a_long_outline() {
+    let fill: Vec<Polyline> = (0..3083).map(|i| line(&[[0.0, f64::from(i) * 0.01 - 15.0], [1.0, f64::from(i) * 0.01 - 15.0]])).collect();
+    let (m, p) = galvo_job(fill);
+    let c = codes(&validate(&p, &m));
+    assert!(!c.contains(&RefusalCode::TooManyPaths), "{c:?}");
+    let outline: Vec<[f64; 2]> = (0..5817).map(|i| [f64::from(i) * 0.003 - 9.0, 0.0]).collect();
+    let (m, p) = galvo_job(vec![Polyline(outline)]);
+    let c = codes(&validate(&p, &m));
+    assert!(!c.contains(&RefusalCode::TooManyPointsPerPath), "{c:?}");
 }
 
 #[test]
@@ -797,7 +815,8 @@ fn safety_collects_all_refusals() {
         g.source.max_power_pct = 50.0;
     }
     let hot_slow = words(&m, 2.0, 90.0, 4500, PulseDecision::Refused { requested: 170.0, nearest: 150 });
-    let mut paths: Vec<Polyline> = (0..3001).map(|i| line(&[[0.0, f64::from(i) * 0.01 - 15.0], [1.0, f64::from(i) * 0.01 - 15.0]])).collect();
+    let n = i32::try_from(m.limits.max_paths).unwrap() + 1;
+    let mut paths: Vec<Polyline> = (0..n).map(|i| line(&[[0.0, f64::from(i) * 0.005 - 25.0], [1.0, f64::from(i) * 0.005 - 25.0]])).collect();
     paths.push(line(&[[0.0, 0.0], [f64::NAN, 0.0]]));
     let mut p = job(&m, vec![section(0, paths, CutQ::Galvo(hot_slow))]);
     p.facts.orphan_objects.push(ObjectId(7));

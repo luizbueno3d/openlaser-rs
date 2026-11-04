@@ -51,7 +51,13 @@ pub fn load_all(dir: Option<&Path>) -> (Vec<MachineProfile>, Vec<String>) {
                 validate_profile(&profile).map(|()| profile).map_err(|errors| errors.join("; "))
             });
         match loaded {
-            Ok(profile) => {
+            Ok(mut profile) => {
+                if profile.limits.upgrade_legacy() {
+                    messages.push(format!(
+                        "{}: job limits raised from the old 3000 paths / 2000 points per path to {} / {} (the file is unchanged)",
+                        profile.id.0, profile.limits.max_paths, profile.limits.max_points_per_path
+                    ));
+                }
                 if let Some(existing) = profiles.iter_mut().find(|item| item.id == profile.id) {
                     *existing = profile;
                 } else {
@@ -121,6 +127,35 @@ mod tests {
         assert!(messages.is_empty());
         assert_eq!(all.iter().filter(|item| item.id == profile.id).count(), 1);
         assert_eq!(all.iter().find(|item| item.id == profile.id).map(|item| item.name.as_str()), Some("Saved simulator"));
+    }
+
+    /// Regression (Alexandre, 2026-11-04): a profile saved with the prototype's 3000 / 2000 limits refused every
+    /// ordinary fill. It loads with the new defaults; a limit the person chose is kept; one over the ceiling is refused.
+    #[test]
+    fn saved_legacy_limits_load_as_the_new_defaults_and_chosen_ones_stay() {
+        use openlaser_machine::JobLimits;
+        let dir = tempfile::tempdir().unwrap();
+        let store = DirProfileStore::new(dir.path().to_path_buf());
+        let mut profile = jpt_m7_200_sim();
+        profile.limits = JobLimits::LEGACY;
+        store.save(&profile).unwrap();
+        let (all, messages) = load_all(Some(dir.path()));
+        let loaded = all.iter().find(|item| item.id == profile.id).unwrap();
+        assert_eq!(loaded.limits, JobLimits::DEFAULT);
+        assert!(messages.len() == 1 && messages[0].contains("job limits raised"), "{messages:?}");
+
+        profile.limits = JobLimits { max_paths: 5000, max_points_per_path: 2000, max_points_per_pass: 20_000 };
+        store.save(&profile).unwrap();
+        let (all, messages) = load_all(Some(dir.path()));
+        assert_eq!(all.iter().find(|item| item.id == profile.id).unwrap().limits, profile.limits);
+        assert!(messages.is_empty(), "{messages:?}");
+
+        profile.limits.max_points_per_pass = JobLimits::CEILING.max_points_per_pass + 1;
+        let bytes = serde_json::to_vec(&profile).unwrap();
+        fs::write(dir.path().join(format!("{}.json", profile.id.0)), bytes).unwrap();
+        let (all, messages) = load_all(Some(dir.path()));
+        assert_eq!(all.iter().find(|item| item.id == profile.id).unwrap().limits, JobLimits::DEFAULT, "the built-in stays");
+        assert!(messages.len() == 1 && messages[0].contains("at or under"), "{messages:?}");
     }
 
     #[test]

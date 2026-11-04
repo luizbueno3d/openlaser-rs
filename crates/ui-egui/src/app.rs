@@ -50,6 +50,9 @@ pub struct UiState {
     /// A machine is framing, running or stopping, or the ARM dialog is open: STOP chrome is up, files are refused.
     pub machine_active: bool,
     pub status_message: String,
+    /// Why the last foot-switch press did not start the job, shown in a popup until the person closes it (the status
+    /// line alone was missed at the machine).
+    pub pedal_notice: Option<String>,
     pub pointer_mm: Option<[f64; 2]>,
     /// Window ▸ Camera Background: the calibrated live feed under the design (persisted in UiSettings).
     pub camera_background: bool,
@@ -342,6 +345,7 @@ impl Default for UiState {
             anchor: 4,
             machine_active: false,
             status_message: String::new(),
+            pedal_notice: None,
             pointer_mm: None,
             camera_background: false,
             camera: CameraUi::default(),
@@ -1119,11 +1123,15 @@ impl OpenLaserApp {
         }
         if let Err(reason) = self.start_gate_now() {
             self.set_status(crate::tf!("Foot switch: {reason}", "Pedal: {reason}"));
+            self.ui.pedal_notice = Some(reason);
             return;
         }
         self.services.human.foot_switch(press);
         if let Err(e) = self.session.request_arm(openlaser_engine::Origin::Human) {
             self.set_status(crate::tf!("Foot switch: {e}", "Pedal: {e}"));
+            self.ui.pedal_notice = Some(e.to_string());
+        } else {
+            self.ui.pedal_notice = None;
         }
     }
 

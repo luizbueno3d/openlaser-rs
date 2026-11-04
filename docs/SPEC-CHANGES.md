@@ -137,3 +137,16 @@ summarised per crate. Fold into SPEC revision 3.
     gate (`start_gate_now`), and it arms at once only with a standing confirmation (≤ 2 s old). Inside an open
     dialog, with every item ticked, a press made after the dialog opened (≤ 30 s, design C3.8) replaces typing ARM.
     The Laser panel shows the pedal line.
+
+## Job limits (2026-11-04, a customer's fills refused)
+
+- `machine::JobLimits` defaults are now 10000 paths / 20000 points per path / 20000 points per pass (were 3000 / 2000 /
+  20000, copied from the Python prototype with no recorded rationale; research 05:430). They refused every ordinary
+  fill (one path per scan segment: a 150 x 40 mm logo at 0.1 mm is 3083) and smooth DXF outlines (one SPLINE flattened
+  to 5817 points). They are not controller limits: the encoder packetises a list into 256-command packets and the
+  driver streams them, so a path or a pass of any length reaches the board the same way. `max_points_per_pass` is
+  unchanged, which keeps a pass at the size the prototype ran on the board (about 79 packets).
+- A saved profile that still carries exactly the old numbers (`JobLimits::LEGACY`) loads with the new defaults and a
+  load message; any other saved value is the person's choice and is kept. The file is not rewritten.
+- `validate_profile` refuses limits over `JobLimits::CEILING` (10 x the defaults), and the hardware CLI's `profile set`
+  gains `limits.maxPaths`, `limits.maxPointsPerPath` and `limits.maxPointsPerPass`.

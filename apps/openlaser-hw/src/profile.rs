@@ -6,7 +6,8 @@
 //! runAhead.maxEmissionS, runAhead.watchdogFactor, runAhead.watchdogSlackS, transferTimeoutMs, usbSetConfiguration,
 //! redDot.offsetMm, redDot.scale, workArea (within h27Cleared), h27Cleared, and the foot switch (SPEC M3):
 //! footSwitch.bit (0..=15, or `none` to turn the pedal off), footSwitch.word (0..=2), footSwitch.activeLow,
-//! footSwitch.fullPulse, footSwitch.debounceMs. Set them from what `ports --watch` measured.
+//! footSwitch.fullPulse, footSwitch.debounceMs. Set them from what `ports --watch` measured. Job limits:
+//! limits.maxPaths, limits.maxPointsPerPath, limits.maxPointsPerPass (`validate_profile` checks the ceiling).
 
 use std::path::Path;
 
@@ -19,7 +20,7 @@ use crate::args::{ProfileAction, ProfileOpts};
 use crate::rig::DEFAULT_USB_MACHINE;
 use crate::{Env, HwError, Terminal, require_tty};
 
-pub const KEYS: [&str; 34] = [
+pub const KEYS: [&str; 37] = [
     "cal.negate.x",
     "cal.negate.y",
     "cal.swapXy",
@@ -54,6 +55,9 @@ pub const KEYS: [&str; 34] = [
     "footSwitch.activeLow",
     "footSwitch.fullPulse",
     "footSwitch.debounceMs",
+    "limits.maxPaths",
+    "limits.maxPointsPerPath",
+    "limits.maxPointsPerPass",
 ];
 
 fn bad(key: &str, value: &str, want: &str) -> HwError {
@@ -103,6 +107,16 @@ fn parse_rect(key: &str, v: &str) -> Result<FieldRect, HwError> {
 
 /// Applies one `key value` to a galvo profile. Range checks beyond parsing are `validate_profile`'s.
 pub fn apply(p: &mut MachineProfile, key: &str, value: &str) -> Result<(), HwError> {
+    if let Some(field) = key.strip_prefix("limits.") {
+        let n = value.trim().parse::<u32>().ok().filter(|n| *n >= 1).ok_or_else(|| bad(key, value, "a whole number of at least 1"))?;
+        match field {
+            "maxPaths" => p.limits.max_paths = n,
+            "maxPointsPerPath" => p.limits.max_points_per_path = n,
+            "maxPointsPerPass" => p.limits.max_points_per_pass = n,
+            _ => return Err(bad(key, value, "a supported limit (maxPaths, maxPointsPerPath, maxPointsPerPass)")),
+        }
+        return Ok(());
+    }
     let Kinematics::Galvo(g) = &mut p.kind else {
         return Err(HwError::refused(RefusalCode::WrongDeviceKind, format!("`{}` is not a galvo profile; its settings are edited in the GUI", p.id.0)));
     };
@@ -413,6 +427,22 @@ mod tests {
         assert!(apply(&mut p, "footSwitch.colour", "red").is_err());
         apply(&mut p, "footSwitch.bit", "none").unwrap();
         assert_eq!(galvo(&p).ports.foot_switch, None);
+    }
+
+    #[test]
+    fn limit_keys_set_the_job_limits_within_the_ceiling() {
+        let mut p = jpt_m7_200();
+        apply(&mut p, "limits.maxPaths", "15000").unwrap();
+        apply(&mut p, "limits.maxPointsPerPath", "30000").unwrap();
+        apply(&mut p, "limits.maxPointsPerPass", "40000").unwrap();
+        assert_eq!((p.limits.max_paths, p.limits.max_points_per_path, p.limits.max_points_per_pass), (15000, 30000, 40000));
+        assert!(validate_profile(&p).is_ok());
+        assert!(diff(&jpt_m7_200(), &p).iter().any(|l| l.starts_with("limits.maxPaths")));
+        for (key, value) in [("limits.maxPaths", "0"), ("limits.maxPaths", "-1"), ("limits.maxPaths", "many"), ("limits.colour", "5")] {
+            assert!(apply(&mut p, key, value).is_err(), "{key} {value}");
+        }
+        apply(&mut p, "limits.maxPointsPerPass", "999999999").unwrap();
+        assert!(validate_profile(&p).is_err(), "over the ceiling");
     }
 
     #[test]

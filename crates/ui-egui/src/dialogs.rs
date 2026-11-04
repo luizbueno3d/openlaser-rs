@@ -83,7 +83,37 @@ impl OpenLaserApp {
         }
     }
 
+    /// The foot switch did not start the job: say why, in the window's language, until the person closes it. Framing
+    /// first is the rule (a human approves every marking job by watching the red-light frame), so the popup names it.
+    fn pedal_notice_window(&mut self, ctx: &egui::Context) {
+        let Some(reason) = self.ui.pedal_notice.clone() else { return };
+        let mut open = true;
+        let mut ok = false;
+        egui::Window::new(t("Foot switch", "Pedal"))
+            .id(egui::Id::new("pedal_notice_window"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.heading(t("The foot switch did not start the job", "O pedal não iniciou o trabalho"));
+                ui.label(&reason);
+                ui.add_space(6.0);
+                ui.label(t(
+                    "Click Frame and let the red light trace the job once. Then press the foot switch.",
+                    "Clique em Enquadrar e deixe a luz vermelha percorrer o trabalho uma vez. Depois pressione o pedal.",
+                ));
+                ui.add_space(6.0);
+                ok = ui.button("OK").clicked();
+            });
+        if !open || ok {
+            self.ui.pedal_notice = None;
+        }
+    }
+
     pub(crate) fn dialogs(&mut self, ctx: &egui::Context) {
+        self.pedal_notice_window(ctx);
         if self.ui.cut_settings_open {
             self.cut_settings_dialog(ctx);
         } else {
