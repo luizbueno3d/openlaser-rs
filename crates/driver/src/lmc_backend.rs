@@ -105,7 +105,7 @@ impl<T: LmcTransport + 'static> Backend for LmcBackend<T> {
     type Frame = LmcFrameJob;
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities { kind: DeviceKind::GalvoLmc, frame: true, run: true, pause: false, jog: false, home: false, inputs: false }
+        Capabilities { kind: DeviceKind::GalvoLmc, frame: true, run: true, pause: false, jog: false, home: false, inputs: true }
     }
 
     /// The init sequence verbatim (R05 §1.4, incl. Reset and WriteCorTable(0)), then the 50 ms pause. The board
@@ -214,6 +214,20 @@ impl<T: LmcTransport + 'static> Backend for LmcBackend<T> {
 
     fn emergency_stop(&mut self, cx: &mut Cx) -> StopReport {
         self.session.emergency(cx)
+    }
+
+    fn foot_switch(&self) -> Option<openlaser_machine::FootSwitchCfg> {
+        self.machine.ports.foot_switch.clone()
+    }
+
+    fn read_inputs(&mut self, cx: &mut Cx) -> Result<[u16; 4], DriverError> {
+        if !self.connected {
+            return Err(DriverError::NotConnected);
+        }
+        self.session.read_port(cx).map_err(|h| match h {
+            Halt::Fault(e) => e,
+            Halt::Stopped => DriverError::Protocol("input read stopped".to_owned()),
+        })
     }
 
     fn status(&mut self, cx: &mut Cx) -> Result<MachineStatus, DriverError> {

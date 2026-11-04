@@ -256,6 +256,68 @@ pub struct FirstJump {
 pub struct PortMap {
     pub laser_bit: u8,
     pub red_bit: u8,
+    /// The foot switch input (SPEC M3, H11). Unset (the default) means the pedal does nothing; it is set only after
+    /// `openlaser-hw ports --watch` has shown which bit the pedal moves on this board.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foot_switch: Option<FootSwitchCfg>,
+}
+
+/// Where the foot switch shows in the `ReadPort` (0x0025) reply and how it is read (LightBurn's "Start Marking" and
+/// "Require 'Full Pulse' to Start").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FootSwitchCfg {
+    /// The reply word (0..=2; word 3 is the board status, never an input).
+    #[serde(default = "FootSwitchCfg::default_word")]
+    pub word: u8,
+    /// 0..=15, as `openlaser-hw ports` prints it.
+    pub bit: u8,
+    /// The bit rests at 1 and pressing pulls it to 0.
+    #[serde(default)]
+    pub active_low: bool,
+    /// Count a press only once the pedal is released again (press → release), never on the press alone.
+    #[serde(default = "FootSwitchCfg::default_full_pulse")]
+    pub full_pulse: bool,
+    /// A level counts only after it held this long (bounce, noise). 10..=1000 ms.
+    #[serde(default = "FootSwitchCfg::default_debounce_ms")]
+    pub debounce_ms: u16,
+}
+
+impl FootSwitchCfg {
+    fn default_word() -> u8 {
+        1
+    }
+    fn default_full_pulse() -> bool {
+        true
+    }
+    fn default_debounce_ms() -> u16 {
+        30
+    }
+
+    /// Bit `bit` of word `word`, with the defaults (active high, full pulse, 30 ms).
+    pub fn new(word: u8, bit: u8) -> Self {
+        FootSwitchCfg { word, bit, active_low: false, full_pulse: true, debounce_ms: Self::default_debounce_ms() }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.word > 2 {
+            return Err(format!("foot switch word must be 0, 1 or 2 (word 3 is the board status), got {}", self.word));
+        }
+        if self.bit > 15 {
+            return Err(format!("foot switch bit must be 0..=15, got {}", self.bit));
+        }
+        if !(10..=1000).contains(&self.debounce_ms) {
+            return Err(format!("foot switch debounce must be 10..=1000 ms, got {}", self.debounce_ms));
+        }
+        Ok(())
+    }
+
+    /// Whether the pedal is pressed in this `ReadPort` reply.
+    pub fn pressed(&self, reply: [u16; 4]) -> bool {
+        let word = reply.get(usize::from(self.word)).copied().unwrap_or(0);
+        let level = word.checked_shr(u32::from(self.bit)).is_some_and(|w| w & 1 == 1);
+        level != self.active_low
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -372,6 +434,11 @@ fn rect_inside(inner: FieldRect, outer: FieldRect) -> bool {
 }
 
 fn validate_galvo(g: &GalvoMachine, problems: &mut Vec<String>) {
+    if let Some(f) = &g.ports.foot_switch
+        && let Err(e) = f.validate()
+    {
+        problems.push(e);
+    }
     if let Some(r) = &g.rotary
         && let Err(e) = r.validate(g.work_area)
     {

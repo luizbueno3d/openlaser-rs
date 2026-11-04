@@ -11,4 +11,6 @@ disallowed-methods = [
     { path = "openlaser_arm::GuiGestureWitness::new", reason = "only crates/human/src/gesture.rs may build a GUI gesture witness (SPEC §2.3 rule 11)" },
     { path = "openlaser_arm::HumanConfirm::from_tty", reason = "only apps/openlaser-hw/src/tty_arm.rs may build a TTY confirmation (SPEC §2.3 rule 11)" },
     { path = "openlaser_arm::TtyWitness::new", reason = "only apps/openlaser-hw/src/tty_arm.rs may build a TTY witness (SPEC §2.3 rule 11)" },
+    { path = "openlaser_arm::HumanConfirm::from_foot_switch", reason = "only crates/human/src/pedal.rs may build a foot-switch confirmation (SPEC §2.3 rule 11)" },
+    { path = "openlaser_arm::FootSwitchWitness::new", reason = "only crates/human/src/pedal.rs may build a foot-switch witness (SPEC §2.3 rule 11)" },
 ]
