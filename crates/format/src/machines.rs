@@ -54,8 +54,8 @@ pub fn load_all(dir: Option<&Path>) -> (Vec<MachineProfile>, Vec<String>) {
             Ok(mut profile) => {
                 if profile.limits.upgrade_legacy() {
                     messages.push(format!(
-                        "{}: job limits raised from the old 3000 paths / 2000 points per path to {} / {} (the file is unchanged)",
-                        profile.id.0, profile.limits.max_paths, profile.limits.max_points_per_path
+                        "{}: job limits raised from an earlier default to {} paths / {} points per path / {} points per pass (the file is unchanged)",
+                        profile.id.0, profile.limits.max_paths, profile.limits.max_points_per_path, profile.limits.max_points_per_pass
                     ));
                 }
                 if let Some(existing) = profiles.iter_mut().find(|item| item.id == profile.id) {
@@ -143,6 +143,13 @@ mod tests {
         let loaded = all.iter().find(|item| item.id == profile.id).unwrap();
         assert_eq!(loaded.limits, JobLimits::DEFAULT);
         assert!(messages.len() == 1 && messages[0].contains("job limits raised"), "{messages:?}");
+
+        // 0.1.4's defaults, written by a 0.1.4 Device Settings save, move on too.
+        profile.limits = JobLimits::V014;
+        store.save(&profile).unwrap();
+        let (all, messages) = load_all(Some(dir.path()));
+        assert_eq!(all.iter().find(|item| item.id == profile.id).unwrap().limits, JobLimits::DEFAULT);
+        assert_eq!(messages.len(), 1, "{messages:?}");
 
         profile.limits = JobLimits { max_paths: 5000, max_points_per_path: 2000, max_points_per_pass: 20_000 };
         store.save(&profile).unwrap();
