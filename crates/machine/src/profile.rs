@@ -368,9 +368,9 @@ pub enum GantryLink {
 
 /// How big one layer-pass (one LMC list) and one path may be. Defensive host bounds, not controller limits: the
 /// encoder packetises a list into 256-command packets and the driver streams them under the run-ahead window, so a
-/// path or a pass of any length reaches the board in the same way. `max_points_per_pass` stays at the size the
-/// Python prototype ran on the board (about 79 packets); the other two follow from it (a fill segment is a 2-point
-/// path, a spline outline is one long path). See docs/SPEC-CHANGES.md (2026-11-04).
+/// path or a pass of any length reaches the board in the same way. They bound the host's work per edit (the whole job
+/// and its listing are rebuilt on the UI thread, about 200 bytes a point): 200,000 points is about 40 MB, safe on a
+/// 32-bit PC. A fill segment is a 2-point path. See docs/SPEC-CHANGES.md (2026-11-04, 2026-11-05).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobLimits {
@@ -381,17 +381,20 @@ pub struct JobLimits {
 
 impl JobLimits {
     /// The defaults of every built-in profile.
-    pub const DEFAULT: JobLimits = JobLimits { max_paths: 10_000, max_points_per_path: 20_000, max_points_per_pass: 20_000 };
+    pub const DEFAULT: JobLimits = JobLimits { max_paths: 100_000, max_points_per_path: 200_000, max_points_per_pass: 200_000 };
+    /// 0.1.4's defaults, which a profile saved by 0.1.4 carries (its Device Settings saves write the limits too). They
+    /// still refused dense fills (a 150 x 40 mm logo at 0.03 mm is about 20,600 points).
+    pub const V014: JobLimits = JobLimits { max_paths: 10_000, max_points_per_path: 20_000, max_points_per_pass: 20_000 };
     /// The prototype's numbers (3000 / 2000 / 20000), which every profile saved before 2026-11-04 carries. They refused
     /// ordinary fills (one path per scan segment: a 150 x 40 mm logo at 0.1 mm is 3083) and smooth DXF outlines.
     pub const LEGACY: JobLimits = JobLimits { max_paths: 3000, max_points_per_path: 2000, max_points_per_pass: 20_000 };
     /// The most a profile may set: 10 x the defaults, so a typo cannot ask the host for an unbounded job.
-    pub const CEILING: JobLimits = JobLimits { max_paths: 100_000, max_points_per_path: 200_000, max_points_per_pass: 200_000 };
+    pub const CEILING: JobLimits = JobLimits { max_paths: 1_000_000, max_points_per_path: 2_000_000, max_points_per_pass: 2_000_000 };
 
-    /// A saved profile still on [`JobLimits::LEGACY`] moves to [`JobLimits::DEFAULT`]; any other value is the
-    /// person's own choice and stays. True when it changed.
+    /// A saved profile still on an earlier default ([`JobLimits::LEGACY`] or [`JobLimits::V014`]) moves to
+    /// [`JobLimits::DEFAULT`]; any other value is the person's own choice and stays. True when it changed.
     pub fn upgrade_legacy(&mut self) -> bool {
-        if *self == Self::LEGACY {
+        if *self == Self::LEGACY || *self == Self::V014 {
             *self = Self::DEFAULT;
             return true;
         }

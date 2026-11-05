@@ -150,3 +150,13 @@ summarised per crate. Fold into SPEC revision 3.
   load message; any other saved value is the person's choice and is kept. The file is not rewritten.
 - `validate_profile` refuses limits over `JobLimits::CEILING` (10 x the defaults), and the hardware CLI's `profile set`
   gains `limits.maxPaths`, `limits.maxPointsPerPath` and `limits.maxPointsPerPass`.
+
+## Job limits, step 2 (2026-11-05, dense fills)
+
+- `JobLimits::DEFAULT` is 100000 paths / 200000 points per path / 200000 points per pass (0.1.4 had 10000 / 20000 /
+  20000, which still refused a 150 x 40 mm logo fill at 0.03 mm). The bound is the host's: the whole job and its
+  listing are rebuilt on the UI thread per edit, about 200 bytes a point, so 200000 points is about 40 MB.
+- Profiles saved with 0.1.4's defaults (`JobLimits::V014`) are upgraded on load like the prototype's
+  (`JobLimits::LEGACY`). `JobLimits::CEILING` stays 10 x the defaults.
+- Not hardware-verified: a pass of 200000 points is about 800 packets streamed in one list; the longest list run on
+  the board so far was about 79 packets. Underrun behaviour if the host stalls mid-list (H-UR) is still open.

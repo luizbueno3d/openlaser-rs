@@ -18,9 +18,9 @@ pub(crate) static RULES: &[(RefusalCode, &str)] = &[
         RefusalCode::MalformedPoint,
         "Points have exactly two coordinates: refused at import (B9); a plan's Polyline cannot hold any other shape. Every path of a section and of a frame has at least 2 points",
     ),
-    (RefusalCode::TooManyPaths, "At most JobLimits.max_paths (default 10000) paths in one layer-pass and in the frame"),
-    (RefusalCode::TooManyPointsPerPath, "At most JobLimits.max_points_per_path (default 20000) points in one path"),
-    (RefusalCode::TooManyPointsPerPass, "At most JobLimits.max_points_per_pass (default 20000) points in one layer-pass and in the frame"),
+    (RefusalCode::TooManyPaths, "At most JobLimits.max_paths (default 100000) paths in one layer-pass and in the frame"),
+    (RefusalCode::TooManyPointsPerPath, "At most JobLimits.max_points_per_path (default 200000) points in one path"),
+    (RefusalCode::TooManyPointsPerPass, "At most JobLimits.max_points_per_pass (default 200000) points in one layer-pass and in the frame"),
     (
         RefusalCode::OutOfBed,
         "Gantry: every point lies on the bed (centre-origin bed mm, Y up, the plan convention the G-code encoder maps to the controller), within 1e-6 mm. An object with any point beyond plan::MAX_COORD_MM (100 m) is not planned at all and is refused by name",
