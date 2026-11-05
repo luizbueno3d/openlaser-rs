@@ -618,6 +618,34 @@ fn profile_writes_go_through_the_store_after_validation() {
     assert_eq!(s.execute("device.calibrateAxis", json!({ "axis": 3, "requestedMm": 1, "measuredMm": 1 })).unwrap_err().code(), "bad_params");
 }
 
+/// Regression (Alexandre, 2026-11-04): a new design started at the built-in 30 % / 30 kHz while his jobs needed
+/// 100 % / 50 kHz, and nothing marked. Saved layer defaults are what the next new design starts from.
+#[test]
+fn saved_layer_defaults_seed_the_next_new_design() {
+    let store = Arc::new(MemStore::default());
+    let mut cfg = config(Origin::Human, true, DeviceAccess::None);
+    cfg.profiles = Some(store.clone());
+    let mut s = Session::new(cfg);
+    with_doc(&mut s);
+    let mut defaults = serde_json::to_value(&jpt_m7_200_sim().layer_defaults).unwrap();
+    defaults["galvo"]["power"] = json!(100.0);
+    defaults["galvo"]["frequency"] = json!(50_000);
+    defaults["fill"]["interval"] = json!(0.05);
+    let out = s.execute("device.settings.set", json!({ "layerDefaults": defaults }));
+    if openlaser_machine::validate_profile(&jpt_m7_200_sim()).is_err() {
+        assert_eq!(out.unwrap_err().code(), "bad_params");
+        return;
+    }
+    out.unwrap();
+    assert_eq!(store.saved.lock().unwrap().len(), 1);
+    s.execute("file.new", json!({})).unwrap();
+    let op = s.active().unwrap().project.color_layer(0).and_then(|l| l.ops.first().cloned()).unwrap();
+    assert_eq!((op.galvo.power.get(), op.galvo.frequency.get(), op.fill.interval.get()), (100.0, 50_000, 0.05));
+    // A malformed block is a parameter error, and nothing is saved.
+    assert_eq!(s.execute("device.settings.set", json!({ "layerDefaults": { "galvo": 5 } })).unwrap_err().code(), "bad_params");
+    assert_eq!(store.saved.lock().unwrap().len(), 1);
+}
+
 // ---- requests ---------------------------------------------------------------------------------------------------
 
 #[test]

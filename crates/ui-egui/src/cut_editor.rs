@@ -122,6 +122,27 @@ impl Draft {
         })
     }
 
+    /// The profile's layer defaults with this draft's galvo and fill values: what "Use as default for new designs"
+    /// saves. `base` is the profile's `layerDefaults` as JSON; the gantry block and the galvo extras (min power,
+    /// timings, wobble) are kept.
+    pub fn as_layer_defaults(&self, mut base: serde_json::Value) -> serde_json::Value {
+        if let Some(g) = base.get_mut("galvo").and_then(serde_json::Value::as_object_mut) {
+            g.insert("speed".into(), self.speed.into());
+            g.insert("power".into(), self.power.into());
+            // Whole hertz, as the profile stores it (validate() keeps the value finite and above 0).
+            g.insert("frequency".into(), serde_json::Value::from((self.frequency_khz * 1000.0).round() as u64));
+            g.insert("qPulse".into(), self.q_pulse_ns.map_or(serde_json::Value::Null, serde_json::Value::from));
+        }
+        if let Some(f) = base.get_mut("fill").and_then(serde_json::Value::as_object_mut) {
+            f.insert("interval".into(), self.interval.into());
+            f.insert("angle".into(), self.angle.into());
+            f.insert("angleIncrement".into(), self.angle_increment.into());
+            f.insert("bidirectional".into(), self.bidirectional.into());
+            f.insert("crossHatch".into(), self.cross_hatch.into());
+        }
+        base
+    }
+
     /// Sets one field by its wire name (`ui.dialog.set {dialog: "cutSettings", field, value}`).
     pub fn set_field(&mut self, field: &str, value: &serde_json::Value) -> Result<(), String> {
         let number = || value.as_f64().ok_or_else(|| format!("{field} must be a number"));
@@ -319,6 +340,27 @@ impl Draft {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn as_layer_defaults_takes_galvo_and_fill_and_keeps_the_rest() {
+        let mut d = Draft::from_layer(&layer()).unwrap();
+        d.power = 100.0;
+        d.frequency_khz = 50.0;
+        d.q_pulse_ns = Some(120.0);
+        d.interval = 0.05;
+        d.cross_hatch = true;
+        let base = serde_json::to_value(openlaser_machine::jpt_m7_200_sim().layer_defaults).unwrap();
+        let out = d.as_layer_defaults(base.clone());
+        assert_eq!(out["galvo"]["power"], 100.0);
+        assert_eq!(out["galvo"]["frequency"], 50_000);
+        assert_eq!(out["galvo"]["qPulse"], 120.0);
+        assert_eq!(out["fill"]["interval"], 0.05);
+        assert_eq!(out["fill"]["crossHatch"], true);
+        assert_eq!(out["gantry"], base["gantry"], "the gantry block is kept");
+        assert_eq!(out["galvo"]["minPower"], base["galvo"]["minPower"]);
+        let back: openlaser_doc::LayerDefaults = serde_json::from_value(out).unwrap();
+        assert_eq!((back.galvo.power.get(), back.galvo.frequency.get()), (100.0, 50_000));
+    }
 
     fn layer() -> ColorLayer {
         let defaults = openlaser_machine::jpt_m7_200_sim().layer_defaults;

@@ -3969,6 +3969,10 @@ expression: rows
             "null"
           ]
         },
+        "layerDefaults": {
+          "default": null,
+          "description": "The cut settings every new design and import starts from (the profile's `layerDefaults`, whole)."
+        },
         "maxPowerPct": {
           "default": null,
           "description": "Source power ceiling, percent.",
