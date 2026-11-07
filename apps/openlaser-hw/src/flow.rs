@@ -400,7 +400,7 @@ fn run_inner(rig: &mut dyn Rig, o: &RunOpts, term: &mut dyn Terminal, env: &Env,
 }
 
 /// Human-only motion bench commands: no marking list, laser source stays off.
-pub fn rotary(degrees: Option<f64>, device: &crate::args::DeviceOpts, term: &mut dyn Terminal, env: &mut Env) -> Result<(), HwError> {
+pub fn rotary(motion: openlaser_driver::RotaryMotion, device: &crate::args::DeviceOpts, term: &mut dyn Terminal, env: &mut Env) -> Result<(), HwError> {
     require_tty(term, "rotary")?;
     let mut rig = env.rigs.open(&RigSpec { purpose: Purpose::Status, device: device.clone(), extent: None })?;
     rig.prepare_rotary()?;
@@ -408,7 +408,10 @@ pub fn rotary(degrees: Option<f64>, device: &crate::args::DeviceOpts, term: &mut
     let _guards = guards(env, &target)?;
     let stop = target.clone();
     let _keys = term.keys(Arc::new(move |_| stop.stop_now())).map_err(HwError::Failed)?;
-    let position = rig.rotary(degrees)?;
+    let position = rig.rotary(motion)?;
     term.write(&format!("Rotary position: {position} pulses (laser off).\n"));
+    if position != 0 {
+        term.write("Jobs start only at position 0: run `rotary zero` before marking.\n");
+    }
     Ok(())
 }

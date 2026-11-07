@@ -16,7 +16,7 @@ mod lmc_ops;
 mod lmc_session;
 mod rotary;
 mod runtime;
-pub use rotary::RotarySession;
+pub use rotary::{RotaryMotion, RotarySession};
 mod stop;
 
 pub use backend::{Backend, Capabilities, DeviceInfo, DriverError, DriverEvent, EncodedJob, FrameOutcome, MachineState, MachineStatus, Outcome, TraceLine};

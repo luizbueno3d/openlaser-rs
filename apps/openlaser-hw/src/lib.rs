@@ -237,7 +237,7 @@ fn execute(cmd: Cmd, term: &mut dyn Terminal, env: &mut Env) -> Result<(), HwErr
             Ok(())
         }
         Cmd::Detect => rig::detect(term),
-        Cmd::Rotary { degrees, device } => flow::rotary(degrees, &device, term, env),
+        Cmd::Rotary { motion, device } => flow::rotary(motion, &device, term, env),
         Cmd::Status(o) => flow::status(&o, term, env),
         Cmd::Ports(o) => ports::run(&o, term, env),
         Cmd::Bench(b) => bench::run(b, term),

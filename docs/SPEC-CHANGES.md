@@ -150,3 +150,23 @@ summarised per crate. Fold into SPEC revision 3.
   load message; any other saved value is the person's choice and is kept. The file is not rewritten.
 - `validate_profile` refuses limits over `JobLimits::CEILING` (10 x the defaults), and the hardware CLI's `profile set`
   gains `limits.maxPaths`, `limits.maxPointsPerPath` and `limits.maxPointsPerPass`.
+
+## Job limits, step 2 (2026-11-05, dense fills)
+
+- `JobLimits::DEFAULT` is 100000 paths / 200000 points per path / 200000 points per pass (0.1.4 had 10000 / 20000 /
+  20000, which still refused a 150 x 40 mm logo fill at 0.03 mm). The bound is the host's: the whole job and its
+  listing are rebuilt on the UI thread per edit, about 200 bytes a point, so 200000 points is about 40 MB.
+- Profiles saved with 0.1.4's defaults (`JobLimits::V014`) are upgraded on load like the prototype's
+  (`JobLimits::LEGACY`). `JobLimits::CEILING` stays 10 x the defaults.
+- Not hardware-verified: a pass of 200000 points is about 800 packets streamed in one list; the longest list run on
+  the board so far was about 79 packets. Underrun behaviour if the host stalls mid-list (H-UR) is still open.
+
+## Rotary bench readiness (2026-11-07, 0.1.6)
+
+- Chuck rotaries map the design onto the **object** diameter; rollers onto the **roller** (drive) diameter. Before,
+  both used `driveDiameterMm`, so a chuck needed drive = object or the wrap came out scaled. The ARM bytes of a rotary
+  job change only when the two diameters differ; non-rotary bytes are unchanged.
+- Hardware CLI: `rotary jog <deg>` (alias of `move --deg`) and `rotary zero` (one absolute MoveAxisTo(0); nothing
+  sent when already at 0). Still human-only and TTY-only; no engine, agent CLI or MCP path moves the axis.
+- Device Settings labels: "Object diameter" and "Roller diameter (rollers only)", with the pulses/rev formula.
+- Still unverified (D12 unsigned): units, direction, position after power-up, and whether StopExecute stops the motor.

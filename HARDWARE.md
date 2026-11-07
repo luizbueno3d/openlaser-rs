@@ -118,14 +118,17 @@ D12 is **UNSIGNED, proposed** and is not covered by the D1–D11 sign-off. All a
 sign-magnitude replies, direction, acceleration, moving-bit timing and timeout assumptions remain unverified.
 Rotary jobs and the human-only `rotary` CLI refuse until a human saves `rotary.enabled=true` in the profile
 (default off). The job currently requires controller position **0** at start; it refuses a nonzero position
-rather than change the exact absolute bytes approved at ARM. `rotary pos` shows the reported pulses.
+rather than change the exact absolute bytes approved at ARM. `rotary pos` shows the reported pulses;
+`rotary zero` moves back to 0. Chuck: the design wraps the object diameter; rollers: the roller diameter.
+`rotary.pulses_per_rev` is pulses per chuck/roller turn = driver pulses/rev x gear ratio. Portuguese bench plan for
+the Leadshine M542C rotary: [`docs/ROTARY-BENCH-PT.md`](docs/ROTARY-BENCH-PT.md).
 
 - [ ] **R0 — key switch OFF.** After checking the profile's pulses/rev, diameter and conservative speeds,
-      `olhw rotary move --deg 90 --trace rotary-r0.jsonl` (motion only, laser off). Check direction and pulses/rev;
+      `olhw rotary jog 90 --trace rotary-r0.jsonl` (motion only, laser off). Check direction and pulses/rev;
       `olhw rotary pos` must show the expected sign-magnitude position. No homing command is sent.
-- [ ] **R1 — one full turn.** `olhw rotary move --deg 360 --trace rotary-r1.jsonl`; the same physical mark must
-      return to the same place. Check chuck object diameter versus roller drive diameter. Undo bench motion
-      with the opposite degrees so the reported controller position is 0 before the job.
+- [ ] **R1 — one full turn.** `olhw rotary jog 360 --trace rotary-r1.jsonl`; the same physical mark must
+      return to the same place. Check chuck object diameter versus roller drive diameter. Then
+      `olhw rotary zero` (one absolute MoveAxisTo(0)) so the reported controller position is 0 before the job.
 - [ ] **R2 — red light.** Frame a rotary job and compare the union of centred strip outlines with the intended
       tube layout; check receipt/ARM strip count, split, total degrees/pulses and return choice.
 - [ ] **R3 — low-power scrap.** Burn a ring of text on a scrap tube, with framing and typed ARM. Check seams,

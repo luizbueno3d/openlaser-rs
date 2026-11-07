@@ -469,8 +469,9 @@ fn safety_too_many_points_per_path_refused() {
 
 #[test]
 fn safety_too_many_points_per_pass_refused() {
-    // 11 paths × 1900 points = 20900 > 20000, each path under the per-path limit.
-    let paths: Vec<Polyline> = (0..11).map(|j| Polyline((0..1900).map(|i| [f64::from(i) * 0.01 - 9.5, f64::from(j)]).collect())).collect();
+    // Just over the per-pass limit in 1900-point paths, each path under the per-path limit.
+    let n = i32::try_from(jpt().limits.max_points_per_pass / 1900).unwrap() + 1;
+    let paths: Vec<Polyline> = (0..n).map(|j| Polyline((0..1900).map(|i| [f64::from(i) * 0.01 - 9.5, f64::from(j) * 0.2 - 10.0]).collect())).collect();
     let (m, p) = galvo_job(paths);
     let c = codes(&validate(&p, &m));
     assert!(c.contains(&RefusalCode::TooManyPointsPerPass), "{c:?}");
