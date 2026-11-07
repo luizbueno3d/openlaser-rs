@@ -160,3 +160,13 @@ summarised per crate. Fold into SPEC revision 3.
   (`JobLimits::LEGACY`). `JobLimits::CEILING` stays 10 x the defaults.
 - Not hardware-verified: a pass of 200000 points is about 800 packets streamed in one list; the longest list run on
   the board so far was about 79 packets. Underrun behaviour if the host stalls mid-list (H-UR) is still open.
+
+## Rotary bench readiness (2026-11-07, 0.1.6)
+
+- Chuck rotaries map the design onto the **object** diameter; rollers onto the **roller** (drive) diameter. Before,
+  both used `driveDiameterMm`, so a chuck needed drive = object or the wrap came out scaled. The ARM bytes of a rotary
+  job change only when the two diameters differ; non-rotary bytes are unchanged.
+- Hardware CLI: `rotary jog <deg>` (alias of `move --deg`) and `rotary zero` (one absolute MoveAxisTo(0); nothing
+  sent when already at 0). Still human-only and TTY-only; no engine, agent CLI or MCP path moves the axis.
+- Device Settings labels: "Object diameter" and "Roller diameter (rollers only)", with the pulses/rev formula.
+- Still unverified (D12 unsigned): units, direction, position after power-up, and whether StopExecute stops the motor.

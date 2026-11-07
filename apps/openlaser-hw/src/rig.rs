@@ -77,7 +77,7 @@ pub trait Rig {
     fn prepare_rotary(&mut self) -> Result<(), HwError> {
         Err(HwError::Failed("rotary control is unavailable on this rig".into()))
     }
-    fn rotary(&mut self, _degrees: Option<f64>) -> Result<i32, HwError> {
+    fn rotary(&mut self, _motion: openlaser_driver::RotaryMotion) -> Result<i32, HwError> {
         Err(HwError::Failed("rotary control is unavailable on this rig".into()))
     }
     fn machine(&self) -> &MachineId;
@@ -442,8 +442,8 @@ impl Rig for EngineRig {
         self.rotary = Some(openlaser_driver::RotarySession::new(transport, g.clone(), self.clock.clone()).map_err(driver_error)?);
         Ok(())
     }
-    fn rotary(&mut self, degrees: Option<f64>) -> Result<i32, HwError> {
-        self.rotary.as_mut().ok_or_else(|| HwError::Failed("rotary session is not prepared".into()))?.execute(degrees).map_err(driver_error)
+    fn rotary(&mut self, motion: openlaser_driver::RotaryMotion) -> Result<i32, HwError> {
+        self.rotary.as_mut().ok_or_else(|| HwError::Failed("rotary session is not prepared".into()))?.run(motion).map_err(driver_error)
     }
 
     fn machine(&self) -> &MachineId {

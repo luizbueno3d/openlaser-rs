@@ -270,6 +270,25 @@ mod tests {
         assert_eq!(out[0].rotary.unwrap().target_pulses, 2037);
     }
     #[test]
+    fn chuck_maps_the_object_circumference_and_ignores_drive_diameter() {
+        // 80 mm tube in a chuck, 3200 pulses per chuck turn: 30 mm of design in 10 mm strips.
+        let mut m = machine();
+        let r = m.rotary.as_mut().unwrap();
+        r.kind = RotaryKind::Chuck;
+        r.pulses_per_rev = 3200;
+        r.object_diameter_mm = 80.0;
+        r.drive_diameter_mm = 20.0;
+        let base = section(&m, vec![[0.0, 0.0], [0.0, 30.0]]);
+        let out = run(&m, std::slice::from_ref(&base));
+        let per_mm = 3200.0 / (80.0 * std::f64::consts::PI);
+        let targets: Vec<i32> = out.iter().map(|s| s.rotary.unwrap().target_pulses).collect();
+        assert_eq!(targets, vec![(-10.0 * per_mm).round() as i32, 0, (10.0 * per_mm).round() as i32]);
+        assert_eq!(targets, vec![-127, 0, 127]);
+        // A full design circumference is exactly one chuck turn of pulses.
+        m.rotary.as_mut().unwrap().drive_diameter_mm = 300.0;
+        assert_eq!(run(&m, &[base]).iter().map(|s| s.rotary.unwrap().target_pulses).collect::<Vec<_>>(), targets);
+    }
+    #[test]
     fn thousand_strips_round_from_absolute_centres_and_keep_layer_order() {
         let mut m = machine();
         let r = m.rotary.as_mut().unwrap();

@@ -1198,7 +1198,7 @@ fn cli_skipped_profile_file_refuses_device_commands() {
 
 #[test]
 fn rotary_commands_require_tty_and_enabled_profile() {
-    for sub in ["rotary move --deg 90 --sim", "rotary pos --sim"] {
+    for sub in ["rotary move --deg 90 --sim", "rotary jog 90 --sim", "rotary zero --sim", "rotary pos --sim"] {
         let (mut env, s) = fake_env(Script::default());
         let mut term = Scripted::new(false, &[]);
         assert_eq!(run_with(&argv(sub), &mut term, &mut env), EXIT_FAIL);
