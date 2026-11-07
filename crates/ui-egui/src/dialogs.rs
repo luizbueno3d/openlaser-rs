@@ -472,8 +472,8 @@ impl OpenLaserApp {
                                     });
                                     egui::Grid::new("rotary-fields").num_columns(2).show(ui, |ui| {
                                         for (label, pt, value) in [
-                                            ("Drive diameter (mm)", "Diâmetro de acionamento (mm)", &mut r.drive_diameter_mm),
-                                            ("Object diameter (mm, layout)", "Diâmetro do objeto (mm, layout)", &mut r.object_diameter_mm),
+                                            ("Object diameter (mm)", "Diâmetro do objeto (mm)", &mut r.object_diameter_mm),
+                                            ("Roller diameter (mm, rollers only)", "Diâmetro do rolete (mm, só roletes)", &mut r.drive_diameter_mm),
                                             ("Split (mm)", "Divisão (mm)", &mut r.split_mm),
                                             ("Overlap (mm)", "Sobreposição (mm)", &mut r.overlap_mm),
                                             ("Maximum turns per job", "Máximo de voltas por trabalho", &mut r.max_turns_per_job),
@@ -484,7 +484,8 @@ impl OpenLaserApp {
                                             tracked.push((response, label.into()));
                                             ui.end_row();
                                         }
-                                        ui.label(t("Pulses per revolution", "Pulsos por revolução"));
+                                        ui.label(t("Pulses per revolution", "Pulsos por revolução"))
+                                            .on_hover_text(t("Pulses for one turn of the chuck (or roller): driver pulses/rev (DIP SW5–8) × gear ratio.", "Pulsos para uma volta do mandril (ou rolete): pulsos/volta do driver (DIP SW5–8) × relação de engrenagens."));
                                         let response = ui.add(egui::DragValue::new(&mut r.pulses_per_rev));
                                         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::DragValue, !read_only, "Pulses per revolution"));
                                         tracked.push((response, "Pulses per revolution".into()));
@@ -513,8 +514,8 @@ impl OpenLaserApp {
                                     g.rotary = Some(r);
                                 }
                                 ui.weak(t(
-                                    "Drive diameter means object diameter for a chuck, roller diameter for a roller. Protocol unverified (D12).",
-                                    "Diâmetro de acionamento é o diâmetro do objeto no mandril e o diâmetro do rolete nos roletes. Protocolo não verificado (D12).",
+                                    "Chuck: the design wraps the object diameter. Rollers: it wraps the roller diameter. Pulses per revolution = driver pulses/rev × gear ratio. Jobs start at axis position 0. Protocol unverified (D12).",
+                                    "Mandril: o desenho envolve o diâmetro do objeto. Roletes: envolve o diâmetro do rolete. Pulsos por revolução = pulsos/volta do driver × relação de engrenagens. Trabalhos começam na posição 0 do eixo. Protocolo não verificado (D12).",
                                 ));
                             });
                             let mut required = self.session.frame_required();

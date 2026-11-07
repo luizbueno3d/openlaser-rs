@@ -78,6 +78,7 @@ const RESET_LIST: u16 = 0x0012;
 const WRITE_PORT: u16 = 0x0021;
 const FIBER_SET_MO: u16 = 0x0033;
 const GET_VERSION: u16 = 0x0007;
+const MOVE_AXIS_TO: u16 = 0x0029;
 const GET_MARK_TIME: u16 = 0x0041;
 const EXECUTE_LIST: u16 = 0x0005;
 const STOP_EXECUTE: u16 = 0x001F;
@@ -1328,6 +1329,17 @@ fn rotary_bench_motion_is_relative_dark_and_refuses_active_board() {
     assert_eq!(session.execute(Some(90.0)).unwrap(), 3200);
     assert_eq!(session.execute(None).unwrap(), 3200);
     assert_eq!(session.execute(Some(-90.0)).unwrap(), 0);
+    // `rotary zero`: one absolute MoveAxisTo(0) from wherever the bench jogs left the axis.
+    use openlaser_driver::RotaryMotion;
+    assert_eq!(session.run(RotaryMotion::Relative(-270.0)).unwrap(), -9600);
+    let before_zero = recorder.snapshot().wire.len();
+    assert_eq!(session.run(RotaryMotion::Zero).unwrap(), 0);
+    let zero_moves: Vec<[u16; 6]> = singles(&recorder.snapshot().wire[before_zero..]).into_iter().filter(|w| w[0] == MOVE_AXIS_TO).collect();
+    assert_eq!(zero_moves, vec![[MOVE_AXIS_TO, 0, 0, 0, 0, 0]]);
+    // Already at zero: no motion command at all.
+    let before_noop = recorder.snapshot().wire.len();
+    assert_eq!(session.run(RotaryMotion::Zero).unwrap(), 0);
+    assert!(singles(&recorder.snapshot().wire[before_noop..]).iter().all(|w| w[0] != MOVE_AXIS_TO));
     let record = recorder.snapshot();
     assert!(record.burned.is_empty() && record.mo_open.is_empty() && !record.mo && record.port == 0);
     assert!(record.wire.iter().all(|w| !matches!(w, SimWire::Packet { .. })));

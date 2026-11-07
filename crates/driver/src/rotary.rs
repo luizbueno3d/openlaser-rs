@@ -8,6 +8,17 @@ use openlaser_lmc::{AxisMove, GalvoMachine, LmcTransport, abort_packet};
 use openlaser_types::Clock;
 use std::sync::Arc;
 
+/// What a human bench command asks the rotary axis to do. Never reachable from engine, agent CLI or MCP.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RotaryMotion {
+    /// Read the controller position only.
+    Query,
+    /// Turn by these degrees of the chuck (or roller), relative to the reported position.
+    Relative(f64),
+    /// Absolute MoveAxisTo(0): undo bench jogs so a job can start (jobs require position 0).
+    Zero,
+}
+
 pub struct RotarySession<T: LmcTransport> {
     session: Session<TransportWire<T>>,
     machine: GalvoMachine,
@@ -43,6 +54,14 @@ impl<T: LmcTransport> RotarySession<T> {
 
     /// Degrees are relative to the current position; targets are sign-magnitude absolute pulses.
     pub fn execute(&mut self, degrees: Option<f64>) -> Result<i32, DriverError> {
+        self.run(match degrees {
+            Some(d) => RotaryMotion::Relative(d),
+            None => RotaryMotion::Query,
+        })
+    }
+
+    /// Bench motion: query, relative degrees, or back to controller position 0 (where jobs must start).
+    pub fn run(&mut self, motion: RotaryMotion) -> Result<i32, DriverError> {
         let cx = Cx::new(&self.latch, &self.events, self.clock.as_ref());
         let result = (|| {
             let status = self.session.axis_status(&cx)?;
@@ -53,11 +72,13 @@ impl<T: LmcTransport> RotarySession<T> {
                 )));
             }
             let position = self.session.read_axis(&cx)?;
-            let Some(deg) = degrees else {
-                return Ok(position);
-            };
             let r = self.machine.rotary.as_ref().ok_or_else(|| Halt::Fault(DriverError::Protocol("missing rotary settings".into())))?;
-            let delta = (deg / 360.0 * f64::from(r.pulses_per_rev)).round() * if r.reverse { -1.0 } else { 1.0 };
+            let (deg, delta) = match motion {
+                RotaryMotion::Query => return Ok(position),
+                RotaryMotion::Zero if position == 0 => return Ok(position),
+                RotaryMotion::Zero => (0.0, -f64::from(position)),
+                RotaryMotion::Relative(deg) => (deg, (deg / 360.0 * f64::from(r.pulses_per_rev)).round() * if r.reverse { -1.0 } else { 1.0 }),
+            };
             let target = f64::from(position) + delta;
             if !deg.is_finite() || delta.abs() > r.max_turns_per_job * f64::from(r.pulses_per_rev) || target.abs() > f64::from(i32::MAX) {
                 return Err(Halt::Fault(DriverError::refused(

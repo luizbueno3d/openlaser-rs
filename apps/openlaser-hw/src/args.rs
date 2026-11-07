@@ -14,7 +14,8 @@ usage:
   openlaser-hw status  [--machine <id>] [--sim] [--trace <f>]
   openlaser-hw ports   [--watch] [--machine <id>] [--sim] [--trace <f>]
                                                             read the input port bits (foot switch, door); never writes
-  openlaser-hw rotary  move --deg <d> | pos [--machine <id>] [--sim] [--trace <f>]
+  openlaser-hw rotary  jog <deg> | move --deg <d> | zero | pos [--machine <id>] [--sim] [--trace <f>]
+                                                            turn the rotary axis only (laser off); zero = back to position 0
   openlaser-hw bench   start|status|end
   openlaser-hw profile show|set <key> <value>|import-om <calibration.json>|import-ezcad <markcfg> [--machine <id>]
   openlaser-hw frame   (<project> | --builtin <pattern>) [--loop] [--style bounds|contour] [--source job|tools|both]
@@ -97,7 +98,7 @@ pub struct ProfileOpts {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cmd {
-    Rotary { degrees: Option<f64>, device: DeviceOpts },
+    Rotary { motion: openlaser_driver::RotaryMotion, device: DeviceOpts },
     Help,
     Detect,
     Status(StatusOpts),
@@ -228,12 +229,16 @@ pub fn parse(args: &[String]) -> Result<Cmd, HwError> {
         },
         "rotary" => {
             let f = Flags::parse("rotary", rest, &["--deg", "--machine", "--trace"], &["--sim"])?;
-            let degrees = match f.positional.as_slice() {
-                ["move"] => Some(finite("rotary", "--deg", f.value("--deg").ok_or_else(|| usage("rotary move requires --deg"))?)?),
-                ["pos"] if f.value("--deg").is_none() => None,
-                _ => return Err(usage("rotary move --deg <d> | rotary pos")),
+            use openlaser_driver::RotaryMotion;
+            let motion = match (f.positional.as_slice(), f.value("--deg")) {
+                (["move"], Some(d)) => RotaryMotion::Relative(finite("rotary", "--deg", d)?),
+                (["move"], None) => return Err(usage("rotary move requires --deg")),
+                (["jog", d], None) => RotaryMotion::Relative(finite("rotary", "<deg>", d)?),
+                (["zero"], None) => RotaryMotion::Zero,
+                (["pos"], None) => RotaryMotion::Query,
+                _ => return Err(usage("rotary jog <deg> | rotary move --deg <d> | rotary zero | rotary pos")),
             };
-            Ok(Cmd::Rotary { degrees, device: f.device() })
+            Ok(Cmd::Rotary { motion, device: f.device() })
         }
         "profile" => parse_profile(rest),
         "frame" => parse_frame(rest),
@@ -382,6 +387,34 @@ mod tests {
             "status --machine --sim",
             "frame a.olp -x",
             "run --builtin dot --power-pct -1",
+        ] {
+            assert!(is_usage(p(bad)), "`{bad}` must be a usage error");
+        }
+    }
+
+    #[test]
+    fn rotary_jog_zero_move_and_pos() {
+        use openlaser_driver::RotaryMotion;
+        let m = |s: &str| match p(s) {
+            Ok(Cmd::Rotary { motion, device }) => Some((motion, device.sim)),
+            _ => None,
+        };
+        assert_eq!(m("rotary jog 90 --sim"), Some((RotaryMotion::Relative(90.0), true)));
+        assert_eq!(m("rotary jog -360"), Some((RotaryMotion::Relative(-360.0), false)));
+        assert_eq!(m("rotary move --deg -45.5"), Some((RotaryMotion::Relative(-45.5), false)));
+        assert_eq!(m("rotary zero"), Some((RotaryMotion::Zero, false)));
+        assert_eq!(m("rotary pos --sim"), Some((RotaryMotion::Query, true)));
+        for bad in [
+            "rotary",
+            "rotary jog",
+            "rotary jog nan",
+            "rotary jog inf",
+            "rotary jog 1 2",
+            "rotary zero 5",
+            "rotary zero --deg 5",
+            "rotary move",
+            "rotary pos --deg 1",
+            "rotary home",
         ] {
             assert!(is_usage(p(bad)), "`{bad}` must be a usage error");
         }

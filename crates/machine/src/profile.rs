@@ -143,8 +143,14 @@ impl Default for RotaryCfg {
 }
 
 impl RotaryCfg {
+    /// Surface millimetres per revolution of the driven axis: a chuck turns the object itself
+    /// (object diameter); rollers turn the object by friction (roller diameter, whatever the object).
     pub fn circumference(&self) -> f64 {
-        std::f64::consts::PI * self.drive_diameter_mm
+        std::f64::consts::PI
+            * match self.kind {
+                RotaryKind::Chuck => self.object_diameter_mm,
+                RotaryKind::Roller => self.drive_diameter_mm,
+            }
     }
 
     pub fn validate(&self, work: FieldRect) -> Result<(), String> {
